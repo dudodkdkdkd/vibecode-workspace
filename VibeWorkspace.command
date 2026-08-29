@@ -1,6 +1,11 @@
 #!/bin/zsh
 set -euo pipefail
 
+# Finder/Terminal können .command-Dateien mit einem stark eingeschränkten PATH
+# starten. Die macOS-Systemprogramme und übliche Homebrew-Installationen müssen
+# deshalb ausdrücklich verfügbar gemacht werden.
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
+
 # ============================================================
 # VIBE WORKSPACE LAUNCHER
 # macOS + Visual Studio Code
