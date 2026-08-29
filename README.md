@@ -136,9 +136,11 @@ Editor-Metadaten.
 
 ## Terminalfenster des Starters
 
-Nach einem erfolgreichen Durchlauf schließt der Launcher nur seinen eigenen
-Apple-Terminal-Tab. Andere Fenster und Tabs bleiben offen. Bei einem Fehler
-bleibt der Tab geöffnet und macOS zeigt zusätzlich einen Fehlerdialog an.
+Nach einem erfolgreichen Durchlauf schließt der Launcher sein eigenes
+Apple-Terminal-Fenster, sofern darin nur der Starter läuft. Enthält das Fenster
+weitere Tabs, bleibt es zum Schutz dieser Sitzungen offen. Andere Fenster werden
+nicht verändert. Bei einem Fehler bleibt das Starterfenster geöffnet und macOS
+zeigt zusätzlich einen Fehlerdialog an.
 
 Das automatische Schließen lässt sich in `config.local.zsh` deaktivieren:
 

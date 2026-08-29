@@ -2,6 +2,7 @@
 config.local.zsh
 projects.tsv
 last-selection.txt
+terminal-close.log
 *.code-workspace
 .vscode/
 .idea/

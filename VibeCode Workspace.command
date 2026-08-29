@@ -186,24 +186,22 @@ ERROR_APPLESCRIPT
        && "$CLOSE_LAUNCHER_TERMINAL" == "true" \
        && "${TERM_PROGRAM:-}" == "Apple_Terminal" \
        && "$LAUNCHER_TTY" == /dev/tty* ]]; then
-    (
-      /usr/bin/osascript - "$LAUNCHER_TTY" <<'CLOSE_APPLESCRIPT'
-on run argv
-    set targetTTY to item 1 of argv
-    delay 0.7
-    tell application "Terminal"
-        repeat with terminalWindow in windows
-            repeat with terminalTab in tabs of terminalWindow
-                if (tty of terminalTab) is targetTTY then
-                    close terminalTab
-                    return
-                end if
-            end repeat
-        end repeat
-    end tell
-end run
-CLOSE_APPLESCRIPT
-    ) >/dev/null 2>&1 &!
+    /usr/bin/nohup /usr/bin/osascript \
+      -e 'on run argv' \
+      -e 'set targetTTY to item 1 of argv' \
+      -e 'delay 0.7' \
+      -e 'tell application "Terminal"' \
+      -e 'repeat with terminalWindow in windows' \
+      -e 'repeat with terminalTab in tabs of terminalWindow' \
+      -e 'if (tty of terminalTab) is targetTTY then' \
+      -e 'if (count of tabs of terminalWindow) is 1 then close terminalWindow' \
+      -e 'return' \
+      -e 'end if' \
+      -e 'end repeat' \
+      -e 'end repeat' \
+      -e 'end tell' \
+      -e 'end run' \
+      "$LAUNCHER_TTY" </dev/null >> "$CONFIG_DIR/terminal-close.log" 2>&1 &!
   fi
 
   return "$exit_code"
