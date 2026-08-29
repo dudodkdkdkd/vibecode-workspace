@@ -95,20 +95,6 @@ if ! command -v "$EDITOR_CMD" >/dev/null 2>&1; then
   fi
 fi
 
-# Diagnosemodus für Installation und automatisierte Prüfung, ohne Fenster zu öffnen.
-if [[ "${1:-}" == "--check" ]]; then
-  for required_command in osascript rm mktemp; do
-    command -v "$required_command" >/dev/null 2>&1 || {
-      printf 'FEHLER: %s wurde nicht gefunden.\n' "$required_command" >&2
-      exit 1
-    }
-  done
-  printf 'OK: VibeCode Workspace ist startbereit.\n'
-  printf 'Editor: %s\n' "$EDITOR_CMD"
-  printf 'Lokale Konfiguration: %s\n' "$LOCAL_CONFIG"
-  exit 0
-fi
-
 # Temporäre Dateien vorbereiten.
 TMP_NAMES="$(mktemp)"
 TMP_SELECTED="$(mktemp)"
@@ -123,12 +109,12 @@ typeset -A SEEN_PROJECT_NAMES
 
 add_project() {
   local name="$1"
-  local path="$2"
+  local input_path="$2"
   local real_path base_name suffix
 
-  path="${path/#\~/$HOME}"
-  [[ -d "$path" ]] || return 0
-  real_path="$(cd "$path" 2>/dev/null && pwd -P)" || return 0
+  input_path="${input_path/#\~/$HOME}"
+  [[ -d "$input_path" ]] || return 0
+  real_path="$(cd "$input_path" 2>/dev/null && pwd -P)" || return 0
   [[ -n "${SEEN_PROJECT_PATHS[$real_path]-}" ]] && return 0
 
   base_name="$name"
@@ -147,8 +133,8 @@ add_project() {
 # Manuell im Starter konfigurierte Projekte einlesen.
 for entry in "${PROJECTS[@]}"; do
   name="${entry%%|*}"
-  path="${entry#*|}"
-  add_project "$name" "$path"
+  repo_path="${entry#*|}"
+  add_project "$name" "$repo_path"
 done
 
 # Wenn der Starter im geklonten Repository liegt oder über einen Alias darauf
@@ -163,6 +149,21 @@ if [[ -f "$SAVED_PROJECTS" ]]; then
     [[ -n "$saved_name" && -n "$saved_path" ]] || continue
     add_project "$saved_name" "$saved_path"
   done < "$SAVED_PROJECTS"
+fi
+
+# Diagnosemodus für Installation und Konfiguration, ohne Fenster zu öffnen.
+if [[ "${1:-}" == "--check" ]]; then
+  for required_command in osascript rm mktemp; do
+    command -v "$required_command" >/dev/null 2>&1 || {
+      printf 'FEHLER: %s wurde nicht gefunden.\n' "$required_command" >&2
+      exit 1
+    }
+  done
+  printf 'OK: VibeCode Workspace ist startbereit.\n'
+  printf 'Editor: %s\n' "$EDITOR_CMD"
+  printf 'Lokale Konfiguration: %s\n' "$LOCAL_CONFIG"
+  printf 'Gültige Projekte: %s\n' "${#SEEN_PROJECT_PATHS}"
+  exit 0
 fi
 
 # Frische Installation oder verschobene Repositories: native Ordnerauswahl
@@ -234,7 +235,7 @@ done
 
 # Ohne eigene Terminal-Konfiguration erhält jedes Projekt eine Shell.
 if [[ ! -s "$TMP_TERMINALS" ]]; then
-  while IFS=$'\t' read -r project path; do
+  while IFS=$'\t' read -r project repo_path; do
     printf '%s\t%s\t%s\t%s\n' "$project" "Shell" "exec zsh -l" "" >> "$TMP_TERMINALS"
   done < "$TMP_CONFIG"
 fi
