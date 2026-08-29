@@ -1,148 +1,186 @@
 # VibeCode Workspace
 
-Ein macOS-Launcher, der ein oder mehrere lokale Git-Repositories als gemeinsamen
-Visual-Studio-Code-Workspace öffnet. Pro Projekt lassen sich integrierte Terminals
-und Entwicklungsbefehle definieren.
+Ein portabler macOS-Launcher für Multi-Repository-Workspaces in Visual Studio
+Code oder Cursor. Du wählst die gewünschten Projekte aus; der Launcher erzeugt
+einen gemeinsamen Workspace und startet pro Projekt Shell, Claude Code und
+Codex in eigenen Terminal-Gruppen.
 
-## Inhalt des Repositories
+## Voraussetzungen
 
-- `VibeCode Workspace.command` – der portable, ausführbare Starter
-- `config.example.zsh` – committed Beispielkonfiguration
-- `config.local.zsh` – persönliche, von Git ignorierte Konfiguration
-- `README.md` – Einrichtung und Konfiguration
+- macOS
+- Visual Studio Code oder Cursor
+- optional: Claude Code und Codex CLI
 
-## Starter auf den Schreibtisch ziehen
+Fehlt Claude Code oder Codex, bleibt das jeweilige Terminal mit einem Hinweis
+als normale Shell geöffnet.
 
-Der Starter enthält keine Pfade eines bestimmten Benutzers. Nach einem frischen
-Download oder `git clone` kann er auf jedem Mac verwendet werden.
+## Schnellstart
 
-### Empfohlen: Alias mit automatischen Updates
+### 1. Repository herunterladen
 
-Damit der Starter im Repository bleibt und spätere Git-Updates automatisch auch
-auf dem Schreibtisch gelten:
-
-1. Das heruntergeladene Repository im Finder öffnen.
-2. `VibeCode Workspace.command` mit der rechten Maustaste anklicken und
-   **Alias erzeugen** wählen.
-3. Den erzeugten Alias auf den Schreibtisch ziehen.
-4. Den Alias bei Bedarf wieder in `VibeCode Workspace` umbenennen.
-
-Alternativ kann direkt beim Ziehen auf den Schreibtisch `⌥` + `⌘` gedrückt
-gehalten werden. Dadurch erzeugt der Finder ebenfalls einen Alias, statt die
-Originaldatei aus dem Repository zu verschieben.
-
-### Portable Einzeldatei
-
-Die Datei kann auch eigenständig auf den Schreibtisch kopiert werden. Beim
-Ziehen dafür `⌥` gedrückt halten, damit der Finder eine Kopie erstellt und die
-Originaldatei im Repository erhalten bleibt. Die kopierte Datei funktioniert
-ohne das Repository, erhält aber keine späteren Git-Updates.
-
-## Starten
-
-Auf dem Schreibtisch `VibeCode Workspace` doppelklicken. Beim ersten Start kann
-macOS eine Sicherheitsabfrage anzeigen. In diesem Fall den Starter mit der
-rechten Maustaste anklicken, **Öffnen** wählen und den Start bestätigen.
-
-Der Launcher erkennt die installierte Visual-Studio-Code-App automatisch, auch
-wenn der `code`-Befehl nicht im `PATH` liegt. Alternativ wird Cursor erkannt.
-
-Wenn noch keine gültigen Projekte konfiguriert sind, erscheint beim ersten Start
-eine Finder-Ordnerauswahl. Die ausgewählten Repositories werden nur für das
-jeweilige Benutzerkonto gespeichert:
-
-```text
-~/.config/vibecode-workspace/projects.tsv
-```
-
-Wenn der Starter als Alias direkt aus dem geklonten Repository gestartet wird,
-erkennt und ergänzt er dieses Repository automatisch.
-
-### Terminalfenster des Starters
-
-Nach einem vollständig erfolgreichen Start schließt der Launcher nur den eigenen
-Apple-Terminal-Tab automatisch. Andere Terminalfenster und Tabs bleiben offen.
-Tritt ein Fehler auf, bleibt der Starter-Tab zur Diagnose geöffnet und macOS
-zeigt zusätzlich einen Fehlerdialog an.
-
-Das automatische Schließen kann in `config.local.zsh` deaktiviert werden:
+Entweder als ZIP über GitHub herunterladen oder mit Git klonen:
 
 ```zsh
-CLOSE_LAUNCHER_TERMINAL=false
+git clone https://github.com/dudodkdkdkd/vibecode-workspace.git
+cd vibecode-workspace
 ```
 
-### Repository-Auswahl
+### 2. Repository-Ordner einrichten
 
-Der macOS-Standarddialog unterstützt Mehrfachauswahl. Um die markierte
-Kombination zu ändern, beim Anklicken mehrerer Einträge `⌘` gedrückt halten.
-Die Auswahl wird nach dem Öffnen gespeichert und beim nächsten Start bereits
-markiert. Dann genügt normalerweise ein Klick auf **OK**.
+Im Finder doppelt auf **Setup VibeCode Workspace.command** klicken.
 
-Die zuletzt verwendete Auswahl liegt benutzerspezifisch unter:
+Beim ersten Start kann macOS die Datei blockieren. Dann:
 
-```text
-~/.config/vibecode-workspace/last-selection.txt
-```
+1. Rechtsklick auf **Setup VibeCode Workspace.command**
+2. **Öffnen** auswählen
+3. Den Start bestätigen
 
-## Projekte konfigurieren
+Im Setup gibt es zwei Möglichkeiten:
 
-Die Finder-Ersteinrichtung genügt normalerweise. Für eine dateibasierte
-Konfiguration die Vorlage kopieren:
+- **Hinzufügen** behält alle vorhandenen Ordner und ergänzt neue.
+- **Ersetzen** erstellt eine komplett neue Ordnerliste.
+
+Danach die gewünschten Repository-Ordner auswählen. Für mehrere einzelne
+Ordner beim Anklicken `⌘` gedrückt halten.
+
+### 3. Starter auf den Schreibtisch legen
+
+Empfohlen ist ein Finder-Alias. Dadurch bleibt die Originaldatei im Repository
+und spätere Git-Updates gelten automatisch auch für den Schreibtisch-Starter:
+
+1. Rechtsklick auf **VibeCode Workspace.command**
+2. **Alias erzeugen** auswählen
+3. Den Alias auf den Schreibtisch ziehen
+4. Den Alias bei Bedarf in `VibeCode Workspace` umbenennen
+
+Alternativ beim Ziehen auf den Schreibtisch `⌥` + `⌘` gedrückt halten. Eine
+eigenständige Kopie entsteht beim Ziehen mit `⌥`; sie erhält jedoch keine
+späteren Updates aus dem Repository.
+
+### 4. Workspace starten
+
+Den Starter auf dem Schreibtisch doppelt anklicken, Repositories auswählen und
+**OK** drücken. Die zuletzt verwendete Auswahl wird beim nächsten Start wieder
+vorselektiert.
+
+## Später Ordner hinzufügen oder ändern
+
+Einfach jederzeit erneut **Setup VibeCode Workspace.command** im geklonten
+Repository ausführen:
+
+- **Hinzufügen** für weitere Repository-Ordner
+- **Ersetzen** zum vollständigen Neuaufbau der Liste
+
+Der Schreibtisch-Starter muss danach nicht neu erstellt werden. Er liest die
+aktuelle Konfiguration bei jedem Start ein.
+
+Optional funktioniert das Setup auch ohne Dialog:
 
 ```zsh
-cp config.example.zsh config.local.zsh
+./Setup\ VibeCode\ Workspace.command --add "$HOME/Projects/projekt-a"
+./Setup\ VibeCode\ Workspace.command --replace "$HOME/Projects/projekt-a" "$HOME/Projects/projekt-b"
 ```
 
-Anschließend nur `config.local.zsh` bearbeiten:
+## Automatisch gestartete Terminals
 
-```zsh
-PROJECTS=(
-  "Mein Projekt|$HOME/Documents/GitHub/mein-projekt"
-  "Zweites Projekt|$HOME/Projects/zweites-projekt"
-)
-```
-
-`config.local.zsh` wird vom Starter automatisch geladen und steht in
-`.gitignore`. Persönliche Pfade und Befehle gelangen daher nicht versehentlich
-ins Repository. Änderungen am Starter oder an `config.example.zsh` können normal
-committed werden.
-
-Nicht mehr vorhandene Pfade werden ignoriert. Sind alle gespeicherten Pfade
-ungültig, startet die Einrichtung automatisch erneut.
-
-## Terminals konfigurieren
-
-Für jedes ausgewählte Repository öffnet der Starter automatisch drei
-VS-Code-Terminals:
+Für jedes ausgewählte Repository legt der Workspace standardmäßig diese Tasks
+an:
 
 - Shell
 - Claude Code
 - Codex
 
-Ist Claude Code oder Codex auf einem neuen Mac noch nicht installiert, bleibt
-das jeweilige Terminal mit einem verständlichen Hinweis als normale Shell offen.
+Beim ersten Öffnen kann VS Code fragen, ob automatische Workspace-Tasks erlaubt
+werden. Diese Freigabe ist nötig, damit die Terminals automatisch starten.
 
-Zusätzliche projektspezifische Tasks verwenden dieses Format:
+Zusätzliche projektspezifische Tasks können in `config.local.zsh` definiert
+werden:
+
+```zsh
+TERMINALS=(
+  "Mein Projekt|Frontend|npm run dev|frontend"
+  "Mein Projekt|Backend|npm run dev|backend"
+)
+```
+
+Format:
 
 ```text
 Projektname|Terminalname|Befehl|relatives Arbeitsverzeichnis
 ```
 
-Beispiele:
+## Konfiguration und Datenschutz
 
-```zsh
-TERMINALS=(
-  "Mein Projekt|Frontend|npm run dev|frontend"
-)
+Das Setup speichert persönliche Ordnerpfade außerhalb des Repositories:
+
+```text
+~/.config/vibecode-workspace/projects.tsv
 ```
 
-Beim Öffnen kann VS Code fragen, ob automatische Tasks erlaubt werden. Diese
-Freigabe ist nötig, damit Shell, Claude Code, Codex und weitere konfigurierte
-Terminals automatisch starten können.
+Die zuletzt verwendete Auswahl liegt ebenfalls nur im Benutzerprofil:
 
-## Artwork und Finder-Symbol
+```text
+~/.config/vibecode-workspace/last-selection.txt
+```
 
-Am Anfang des Starters befindet sich ein vollständig auskommentiertes
-ASCII-Artwork. Es beeinflusst die Ausführung nicht. Das Symbol einer
-`.command`-Datei legt macOS selbst fest; ein dauerhaft eigenes Finder-Symbol
-würde stattdessen ein separates `.app`-Bundle erfordern.
+Für erweiterte Einstellungen kann `config.example.zsh` kopiert werden:
+
+```zsh
+cp config.example.zsh config.local.zsh
+```
+
+`config.local.zsh` ist in `.gitignore` eingetragen. Persönliche Pfade und lokale
+Befehle werden daher nicht committed. Zusätzlich ignoriert Git vorsorglich
+`projects.tsv`, `last-selection.txt`, `.code-workspace`-Dateien sowie übliche
+Editor-Metadaten.
+
+## Terminalfenster des Starters
+
+Nach einem erfolgreichen Durchlauf schließt der Launcher nur seinen eigenen
+Apple-Terminal-Tab. Andere Fenster und Tabs bleiben offen. Bei einem Fehler
+bleibt der Tab geöffnet und macOS zeigt zusätzlich einen Fehlerdialog an.
+
+Das automatische Schließen lässt sich in `config.local.zsh` deaktivieren:
+
+```zsh
+CLOSE_LAUNCHER_TERMINAL=false
+```
+
+## Dateien im Repository
+
+- `VibeCode Workspace.command` – Schreibtisch-Launcher
+- `Setup VibeCode Workspace.command` – Ordner hinzufügen oder ersetzen
+- `config.example.zsh` – öffentliche Konfigurationsvorlage
+- `config.local.zsh` – optionale lokale Konfiguration, von Git ignoriert
+- `.gitignore` – Schutz für lokale und generierte Dateien
+
+## Fehlerbehebung
+
+### Starter öffnet sich nur als Text
+
+Die `.command`-Datei im Finder öffnen, nicht im VS-Code-Dateibaum. Beim ersten
+Start Rechtsklick → **Öffnen** verwenden.
+
+### Keine Repositories eingerichtet
+
+**Setup VibeCode Workspace.command** ausführen und mindestens einen Ordner
+hinzufügen.
+
+### VS Code oder Cursor wird nicht gefunden
+
+Eine der beiden Apps in `/Applications` installieren. Der Launcher findet die
+App auch dann, wenn `code` oder `cursor` nicht im Terminal-PATH liegen.
+
+### Diagnose ohne Fenster
+
+```zsh
+./VibeCode\ Workspace.command --check
+```
+
+Das prüft Editor, Systembefehle und die Anzahl gültiger Projekte, ohne einen
+Workspace zu öffnen.
+
+## Artwork
+
+Das Artwork am Anfang des Starters ist vollständig auskommentiert und verändert
+die Ausführung nicht. Finder kann es als Vorschau der `.command`-Datei anzeigen.
