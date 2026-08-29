@@ -58,6 +58,19 @@ jeweilige Benutzerkonto gespeichert:
 Wenn der Starter als Alias direkt aus dem geklonten Repository gestartet wird,
 erkennt und ergänzt er dieses Repository automatisch.
 
+### Repository-Auswahl
+
+Der macOS-Standarddialog unterstützt Mehrfachauswahl. Um die markierte
+Kombination zu ändern, beim Anklicken mehrerer Einträge `⌘` gedrückt halten.
+Die Auswahl wird nach dem Öffnen gespeichert und beim nächsten Start bereits
+markiert. Dann genügt normalerweise ein Klick auf **OK**.
+
+Die zuletzt verwendete Auswahl liegt benutzerspezifisch unter:
+
+```text
+~/.config/vibecode-workspace/last-selection.txt
+```
+
 ## Projekte konfigurieren
 
 Die Finder-Ersteinrichtung genügt normalerweise. Für eine dateibasierte
@@ -86,7 +99,17 @@ ungültig, startet die Einrichtung automatisch erneut.
 
 ## Terminals konfigurieren
 
-Format:
+Für jedes ausgewählte Repository öffnet der Starter automatisch drei
+VS-Code-Terminals:
+
+- Shell
+- Claude Code
+- Codex
+
+Ist Claude Code oder Codex auf einem neuen Mac noch nicht installiert, bleibt
+das jeweilige Terminal mit einem verständlichen Hinweis als normale Shell offen.
+
+Zusätzliche projektspezifische Tasks verwenden dieses Format:
 
 ```text
 Projektname|Terminalname|Befehl|relatives Arbeitsverzeichnis
@@ -96,15 +119,13 @@ Beispiele:
 
 ```zsh
 TERMINALS=(
-  "Mein Projekt|Shell|exec zsh -l|"
   "Mein Projekt|Frontend|npm run dev|frontend"
 )
 ```
 
 Beim Öffnen kann VS Code fragen, ob automatische Tasks erlaubt werden. Diese
-Freigabe ist nötig, wenn die konfigurierten Terminals automatisch starten sollen.
-Ohne eigene Terminal-Konfiguration wird für jedes ausgewählte Repository eine
-Shell angelegt.
+Freigabe ist nötig, damit Shell, Claude Code, Codex und weitere konfigurierte
+Terminals automatisch starten können.
 
 ## Artwork und Finder-Symbol
 
