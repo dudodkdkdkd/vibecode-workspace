@@ -54,6 +54,15 @@ TERMINALS=()
 #   "Mein Projekt|Frontend|npm run dev|frontend"
 # )
 
+# Diese Standard-Terminals werden für jedes ausgewählte Projekt angelegt.
+# Falls Claude Code oder Codex fehlen, bleibt eine Shell mit Installationshinweis
+# geöffnet, statt dass der Task sofort verschwindet.
+AUTO_TERMINALS=(
+  "Shell|exec zsh -l|"
+  "Claude Code|if command -v claude >/dev/null 2>&1; then exec claude; else echo 'Claude Code ist nicht installiert.'; exec zsh -l; fi|"
+  "Codex|if command -v codex >/dev/null 2>&1; then exec codex; else echo 'Codex ist nicht installiert.'; exec zsh -l; fi|"
+)
+
 # Bevorzugter VS-Code-Befehl. Wenn er nicht im PATH liegt, wird die
 # installierte VS-Code-App automatisch verwendet.
 EDITOR_CMD="code"
@@ -66,6 +75,7 @@ WORKSPACE_NAME="Vibe-Session.code-workspace"
 # gespeichert. Dadurch enthält der Starter keine fremden absoluten Pfade.
 CONFIG_DIR="$HOME/.config/vibecode-workspace"
 SAVED_PROJECTS="$CONFIG_DIR/projects.tsv"
+LAST_SELECTION="$CONFIG_DIR/last-selection.txt"
 
 # true = definierte Terminals automatisch beim Öffnen starten.
 # false = Tasks werden angelegt, aber nicht automatisch gestartet.
@@ -101,7 +111,8 @@ TMP_SELECTED="$(mktemp)"
 TMP_CONFIG="$(mktemp)"
 TMP_TERMINALS="$(mktemp)"
 TMP_CHOSEN_PATHS="$(mktemp)"
-trap 'rm -f "$TMP_NAMES" "$TMP_SELECTED" "$TMP_CONFIG" "$TMP_TERMINALS" "$TMP_CHOSEN_PATHS"' EXIT
+TMP_DEFAULTS="$(mktemp)"
+trap 'rm -f "$TMP_NAMES" "$TMP_SELECTED" "$TMP_CONFIG" "$TMP_TERMINALS" "$TMP_CHOSEN_PATHS" "$TMP_DEFAULTS"' EXIT
 
 # Doppelte und nicht mehr vorhandene Projektpfade ausfiltern.
 typeset -A SEEN_PROJECT_PATHS
@@ -200,11 +211,27 @@ fi
 
 [[ -s "$TMP_NAMES" ]] || exit 0
 
-# Mehrfachauswahl via native macOS-Dialog.
+# Die zuletzt verwendete Auswahl erneut vorselektieren. Beim allerersten Start
+# sind alle vorhandenen Projekte markiert.
+if [[ -f "$LAST_SELECTION" ]]; then
+  while IFS= read -r selected_name; do
+    [[ -n "${SEEN_PROJECT_NAMES[$selected_name]-}" ]] || continue
+    printf '%s\n' "$selected_name" >> "$TMP_DEFAULTS"
+  done < "$LAST_SELECTION"
+fi
+
+if [[ ! -s "$TMP_DEFAULTS" ]]; then
+  cp "$TMP_NAMES" "$TMP_DEFAULTS"
+fi
+
+# Standardmäßiger macOS-Mehrfachauswahldialog. Zum Ändern mehrerer Einträge
+# verlangt macOS die Cmd-Taste; die gespeicherte Auswahl kann direkt bestätigt werden.
 osascript <<APPLESCRIPT > "$TMP_SELECTED"
 set namesFile to POSIX file "$TMP_NAMES"
+set defaultsFile to POSIX file "$TMP_DEFAULTS"
 set projectNames to paragraphs of (read namesFile as «class utf8»)
-set chosen to choose from list projectNames with title "Vibe Workspace" with prompt "Welche Repositories sollen geöffnet werden?" with multiple selections allowed
+set defaultNames to paragraphs of (read defaultsFile as «class utf8»)
+set chosen to choose from list projectNames with title "Vibe Workspace" with prompt "Welche Repositories sollen geöffnet werden? Zum Ändern mehrerer Einträge ⌘ gedrückt halten." default items defaultNames with multiple selections allowed
 if chosen is false then
     return ""
 end if
@@ -220,9 +247,23 @@ if [[ ! -s "$TMP_SELECTED" ]]; then
   exit 0
 fi
 
+mkdir -p "$CONFIG_DIR"
+cp "$TMP_SELECTED" "$LAST_SELECTION"
+
 WORKSPACE_PATH="$WORKSPACE_DIR/$WORKSPACE_NAME"
 
-# Terminal-Konfiguration vorbereiten.
+# Automatische Standard-Terminals für jedes konfigurierte Projekt vorbereiten.
+while IFS=$'\t' read -r project repo_path; do
+  for automatic_terminal in "${AUTO_TERMINALS[@]}"; do
+    terminal_name="${automatic_terminal%%|*}"
+    rest="${automatic_terminal#*|}"
+    command="${rest%%|*}"
+    cwd="${rest#*|}"
+    printf '%s\t%s\t%s\t%s\n' "$project" "$terminal_name" "$command" "$cwd" >> "$TMP_TERMINALS"
+  done
+done < "$TMP_CONFIG"
+
+# Zusätzliche projektspezifische Terminal-Konfiguration ergänzen.
 for t in "${TERMINALS[@]}"; do
   project="${t%%|*}"
   rest="${t#*|}"
@@ -232,13 +273,6 @@ for t in "${TERMINALS[@]}"; do
   cwd="${rest#*|}"
   printf '%s\t%s\t%s\t%s\n' "$project" "$terminal_name" "$command" "$cwd" >> "$TMP_TERMINALS"
 done
-
-# Ohne eigene Terminal-Konfiguration erhält jedes Projekt eine Shell.
-if [[ ! -s "$TMP_TERMINALS" ]]; then
-  while IFS=$'\t' read -r project repo_path; do
-    printf '%s\t%s\t%s\t%s\n' "$project" "Shell" "exec zsh -l" "" >> "$TMP_TERMINALS"
-  done < "$TMP_CONFIG"
-fi
 
 AUTO_START_VALUE="$AUTO_START_TERMINALS" \
 osascript -l JavaScript - "$TMP_SELECTED" "$TMP_CONFIG" "$TMP_TERMINALS" "$WORKSPACE_PATH" <<'JXA'
