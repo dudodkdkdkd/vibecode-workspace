@@ -165,7 +165,6 @@ TMP_NAMES="$(mktemp)"
 TMP_SELECTED="$(mktemp)"
 TMP_CONFIG="$(mktemp)"
 TMP_TERMINALS="$(mktemp)"
-TMP_CHOSEN_PATHS="$(mktemp)"
 TMP_DEFAULTS="$(mktemp)"
 LAUNCHER_TTY="$(tty 2>/dev/null || true)"
 LAUNCH_COMPLETED=false
@@ -174,7 +173,7 @@ finish_launcher() {
   local exit_code=$?
   trap - EXIT
 
-  /bin/rm -f "$TMP_NAMES" "$TMP_SELECTED" "$TMP_CONFIG" "$TMP_TERMINALS" "$TMP_CHOSEN_PATHS" "$TMP_DEFAULTS"
+  /bin/rm -f "$TMP_NAMES" "$TMP_SELECTED" "$TMP_CONFIG" "$TMP_TERMINALS" "$TMP_DEFAULTS"
 
   if (( exit_code != 0 )); then
     /usr/bin/osascript - "$exit_code" <<'ERROR_APPLESCRIPT' >/dev/null 2>&1 || true
@@ -246,13 +245,7 @@ for entry in "${PROJECTS[@]}"; do
   add_project "$name" "$repo_path"
 done
 
-# Wenn der Starter im geklonten Repository liegt oder über einen Alias darauf
-# zeigt, das Repository selbst automatisch anbieten.
-if [[ -d "$SCRIPT_DIR/.git" ]]; then
-  add_project "VibeCode Workspace" "$SCRIPT_DIR"
-fi
-
-# Auf diesem Benutzerkonto bei der Ersteinrichtung gespeicherte Projekte laden.
+# Vom Setup-Programm auf diesem Benutzerkonto gespeicherte Projekte laden.
 if [[ -f "$SAVED_PROJECTS" ]]; then
   while IFS=$'\t' read -r saved_name saved_path; do
     [[ -n "$saved_name" && -n "$saved_path" ]] || continue
@@ -275,36 +268,11 @@ if [[ "${1:-}" == "--check" ]]; then
   exit 0
 fi
 
-# Frische Installation oder verschobene Repositories: native Ordnerauswahl
-# anzeigen und die Auswahl für zukünftige Starts speichern.
+# Ohne gültige Konfiguration auf das separate Setup-Programm verweisen.
 if [[ ! -s "$TMP_NAMES" ]]; then
-  if ! osascript <<'APPLESCRIPT' > "$TMP_CHOSEN_PATHS"
-set chosenFolders to choose folder with prompt "VibeCode Workspace einrichten: Wähle die Repositories aus, die im Workspace angeboten werden sollen." with multiple selections allowed
-set oldDelims to AppleScript's text item delimiters
-set AppleScript's text item delimiters to linefeed
-set outputPaths to {}
-repeat with chosenFolder in chosenFolders
-    set end of outputPaths to POSIX path of chosenFolder
-end repeat
-set outputText to outputPaths as text
-set AppleScript's text item delimiters to oldDelims
-return outputText
-APPLESCRIPT
-  then
-    exit 0
-  fi
-
-  [[ -s "$TMP_CHOSEN_PATHS" ]] || exit 0
-  mkdir -p "$CONFIG_DIR"
-  : > "$SAVED_PROJECTS"
-
-  while IFS= read -r chosen_path; do
-    [[ -n "$chosen_path" ]] || continue
-    chosen_path="${chosen_path%/}"
-    chosen_name="${chosen_path:t}"
-    printf '%s\t%s\n' "$chosen_name" "$chosen_path" >> "$SAVED_PROJECTS"
-    add_project "$chosen_name" "$chosen_path"
-  done < "$TMP_CHOSEN_PATHS"
+  osascript -e 'display alert "Noch keine Repositories eingerichtet" message "Öffne im VibeCode-Workspace-Ordner die Datei ‚Setup VibeCode Workspace.command‘ und füge dort deine Repository-Ordner hinzu." as informational'
+  LAUNCH_COMPLETED=true
+  exit 0
 fi
 
 [[ -s "$TMP_NAMES" ]] || exit 0
