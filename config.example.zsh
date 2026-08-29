@@ -11,21 +11,20 @@ PROJECTS=(
   "Zweites Projekt|$HOME/Projects/zweites-projekt"
 )
 
-# Shell, Claude Code und Codex werden vom Starter automatisch für jedes
-# ausgewählte Projekt angelegt. Hier kommen nur zusätzliche Tasks hinein.
+# Diese Terminals werden für JEDES ausgewählte Projekt geöffnet.
+# Zeilen entfernen, ergänzen oder den Befehl frei anpassen.
+# Format: "Terminalname|Befehl|relatives Arbeitsverzeichnis"
+AUTO_TERMINALS=(
+  "Shell|exec zsh -l|"
+  "Claude Code|claude|"
+  "Codex|codex|"
+)
+
+# Zusätzliche Tasks nur für ein bestimmtes Projekt.
 # Format: "Projektname|Terminalname|Befehl|relatives Arbeitsverzeichnis"
 TERMINALS=(
   "Mein Projekt|Frontend|npm run dev|frontend"
 )
-
-# Optional lassen sich die automatischen Terminals überschreiben oder mit
-# AUTO_TERMINALS=() vollständig deaktivieren.
-# Format: "Terminalname|Befehl|relatives Arbeitsverzeichnis"
-# AUTO_TERMINALS=(
-#   "Shell|exec zsh -l|"
-#   "Claude Code|claude|"
-#   "Codex|codex|"
-# )
 
 # "code" für Visual Studio Code oder "cursor" für Cursor.
 # Installierte macOS-Apps werden auch ohne CLI-Befehl automatisch erkannt.

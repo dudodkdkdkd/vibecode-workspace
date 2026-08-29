@@ -263,6 +263,7 @@ if [[ "${1:-}" == "--check" ]]; then
   printf 'Editor: %s\n' "$EDITOR_CMD"
   printf 'Lokale Konfiguration: %s\n' "$LOCAL_CONFIG"
   printf 'Gültige Projekte: %s\n' "${#SEEN_PROJECT_PATHS}"
+  printf 'Automatische Terminals pro Projekt: %s\n' "${#AUTO_TERMINALS}"
   exit 0
 fi
 
