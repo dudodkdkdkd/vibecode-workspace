@@ -297,7 +297,7 @@ set namesFile to POSIX file "$TMP_NAMES"
 set defaultsFile to POSIX file "$TMP_DEFAULTS"
 set projectNames to paragraphs of (read namesFile as «class utf8»)
 set defaultNames to paragraphs of (read defaultsFile as «class utf8»)
-set chosen to choose from list projectNames with title "Vibe Workspace" with prompt "Welche Repositories sollen geöffnet werden? Zum Ändern mehrerer Einträge ⌘ gedrückt halten." default items defaultNames with multiple selections allowed
+set chosen to choose from list projectNames with title "Vibe Workspace" with prompt "Welche Repositories sollen geöffnet werden? Zum Ändern der Ordnerliste ‚Setup VibeCode Workspace.command‘ erneut ausführen. Für die Mehrfachauswahl ⌘ gedrückt halten." default items defaultNames with multiple selections allowed
 if chosen is false then
     return ""
 end if
