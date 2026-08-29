@@ -93,6 +93,32 @@ an:
 Beim ersten Öffnen kann VS Code fragen, ob automatische Workspace-Tasks erlaubt
 werden. Diese Freigabe ist nötig, damit die Terminals automatisch starten.
 
+### Terminals und Commands frei festlegen
+
+In `config.local.zsh` bestimmt `AUTO_TERMINALS`, welche Terminals für jedes
+ausgewählte Repository geöffnet werden. Jede Zeile enthält Anzeigename, Command
+und optional ein relatives Arbeitsverzeichnis:
+
+```zsh
+AUTO_TERMINALS=(
+  "Shell|exec zsh -l|"
+  "Claude Code|claude|"
+  "Codex|codex|"
+  "Tests|npm test|frontend"
+)
+```
+
+Eine Zeile entfernen deaktiviert dieses Terminal. Mit
+`AUTO_TERMINALS=()` werden keine allgemeinen Terminals angelegt. Commands dürfen
+beliebige Optionen enthalten, aber kein `|`, weil dieses Zeichen als
+Feldtrenner dient.
+
+Optionen wie `codex --yolo` oder
+`claude --dangerously-skip-permissions` können ebenfalls eingetragen werden,
+deaktivieren aber die Sicherheitsabfragen der jeweiligen Agenten. Solche
+Einstellungen gehören ausschließlich in die von Git ignorierte
+`config.local.zsh`, nicht in die öffentliche Beispielkonfiguration.
+
 Zusätzliche projektspezifische Tasks können in `config.local.zsh` definiert
 werden:
 
