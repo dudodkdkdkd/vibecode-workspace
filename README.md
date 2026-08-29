@@ -58,6 +58,19 @@ jeweilige Benutzerkonto gespeichert:
 Wenn der Starter als Alias direkt aus dem geklonten Repository gestartet wird,
 erkennt und ergänzt er dieses Repository automatisch.
 
+### Terminalfenster des Starters
+
+Nach einem vollständig erfolgreichen Start schließt der Launcher nur den eigenen
+Apple-Terminal-Tab automatisch. Andere Terminalfenster und Tabs bleiben offen.
+Tritt ein Fehler auf, bleibt der Starter-Tab zur Diagnose geöffnet und macOS
+zeigt zusätzlich einen Fehlerdialog an.
+
+Das automatische Schließen kann in `config.local.zsh` deaktiviert werden:
+
+```zsh
+CLOSE_LAUNCHER_TERMINAL=false
+```
+
 ### Repository-Auswahl
 
 Der macOS-Standarddialog unterstützt Mehrfachauswahl. Um die markierte

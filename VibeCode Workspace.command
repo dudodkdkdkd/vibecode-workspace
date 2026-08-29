@@ -131,6 +131,10 @@ LAST_SELECTION="$CONFIG_DIR/last-selection.txt"
 # true = definierte Terminals automatisch beim Öffnen starten.
 # false = Tasks werden angelegt, aber nicht automatisch gestartet.
 AUTO_START_TERMINALS=true
+
+# true = den eigenen Apple-Terminal-Tab nach erfolgreichem Start schließen.
+# Bei Fehlern bleibt das Terminal offen und zeigt die Diagnose an.
+CLOSE_LAUNCHER_TERMINAL=true
 # ---------------------------------------------------------------
 
 # Persönliche Konfiguration neben dem Starter laden. Diese Datei ist absichtlich
@@ -163,7 +167,50 @@ TMP_CONFIG="$(mktemp)"
 TMP_TERMINALS="$(mktemp)"
 TMP_CHOSEN_PATHS="$(mktemp)"
 TMP_DEFAULTS="$(mktemp)"
-trap 'rm -f "$TMP_NAMES" "$TMP_SELECTED" "$TMP_CONFIG" "$TMP_TERMINALS" "$TMP_CHOSEN_PATHS" "$TMP_DEFAULTS"' EXIT
+LAUNCHER_TTY="$(tty 2>/dev/null || true)"
+LAUNCH_COMPLETED=false
+
+finish_launcher() {
+  local exit_code=$?
+  trap - EXIT
+
+  /bin/rm -f "$TMP_NAMES" "$TMP_SELECTED" "$TMP_CONFIG" "$TMP_TERMINALS" "$TMP_CHOSEN_PATHS" "$TMP_DEFAULTS"
+
+  if (( exit_code != 0 )); then
+    /usr/bin/osascript - "$exit_code" <<'ERROR_APPLESCRIPT' >/dev/null 2>&1 || true
+on run argv
+    set errorCode to item 1 of argv
+    display alert "VibeCode Workspace konnte nicht gestartet werden" message "Fehlercode: " & errorCode & return & return & "Das Terminal bleibt geöffnet. Dort stehen die technischen Details." as critical
+end run
+ERROR_APPLESCRIPT
+  elif [[ "$LAUNCH_COMPLETED" == "true" \
+       && "$CLOSE_LAUNCHER_TERMINAL" == "true" \
+       && "${TERM_PROGRAM:-}" == "Apple_Terminal" \
+       && "$LAUNCHER_TTY" == /dev/tty* ]]; then
+    (
+      /usr/bin/osascript - "$LAUNCHER_TTY" <<'CLOSE_APPLESCRIPT'
+on run argv
+    set targetTTY to item 1 of argv
+    delay 0.7
+    tell application "Terminal"
+        repeat with terminalWindow in windows
+            repeat with terminalTab in tabs of terminalWindow
+                if (tty of terminalTab) is targetTTY then
+                    close terminalTab
+                    return
+                end if
+            end repeat
+        end repeat
+    end tell
+end run
+CLOSE_APPLESCRIPT
+    ) >/dev/null 2>&1 &!
+  fi
+
+  return "$exit_code"
+}
+
+trap finish_launcher EXIT
 
 # Doppelte und nicht mehr vorhandene Projektpfade ausfiltern.
 typeset -A SEEN_PROJECT_PATHS
@@ -444,3 +491,7 @@ JXA
 if [[ "$AUTO_START_TERMINALS" == "true" ]]; then
   osascript -e 'display notification "Falls VS Code fragt: automatische Tasks für diesen Workspace erlauben." with title "Vibe Workspace gestartet"'
 fi
+
+# Erst jetzt gilt der Start als vollständig erfolgreich. Der EXIT-Handler darf
+# anschließend den eigenen Terminal-Tab schließen.
+LAUNCH_COMPLETED=true
