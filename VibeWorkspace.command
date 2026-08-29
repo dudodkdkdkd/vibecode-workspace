@@ -16,7 +16,7 @@ set -euo pipefail
 #
 # $HOME darf verwendet werden.
 PROJECTS=(
-  "VibeCode Workspace|$HOME/Documents/Codex/vibecode-workspace"
+  "VibeCode Workspace|$HOME/Documents/GitHub/vibecode-workspace"
 )
 
 # Optionale Terminals/Tasks.
@@ -217,4 +217,3 @@ PY
 if [[ "$AUTO_START_TERMINALS" == "true" ]]; then
   osascript -e 'display notification "Falls VS Code fragt: automatische Tasks für diesen Workspace erlauben." with title "Vibe Workspace gestartet"'
 fi
-

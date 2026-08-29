@@ -19,7 +19,7 @@ In `VibeWorkspace.command` den Bereich `PROJECTS` bearbeiten:
 
 ```zsh
 PROJECTS=(
-  "VibeCode Workspace|$HOME/Documents/Codex/vibecode-workspace"
+  "VibeCode Workspace|$HOME/Documents/GitHub/vibecode-workspace"
   "Mein Projekt|$HOME/Projects/mein-projekt"
 )
 ```
@@ -43,4 +43,3 @@ TERMINALS=(
 
 Beim Öffnen kann VS Code fragen, ob automatische Tasks erlaubt werden. Diese
 Freigabe ist nötig, wenn die konfigurierten Terminals automatisch starten sollen.
-
