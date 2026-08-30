@@ -434,6 +434,15 @@ function run(argv) {
         }
     }
 
+    // Pro ausgewähltem Ordner eine gemeinsame Symbolfarbe für sämtliche Tasks.
+    // Theme-Farben bleiben auch bei einem Wechsel zwischen hell/dunkel lesbar.
+    const terminalColors = [
+        "terminal.ansiBlue", "terminal.ansiGreen", "terminal.ansiMagenta",
+        "terminal.ansiCyan", "terminal.ansiYellow", "terminal.ansiRed",
+    ];
+    const projectColors = new Map(selected.map((project, index) =>
+        [project, terminalColors[index % terminalColors.length]]));
+
     const tasks = [];
     const usedLabels = new Set();
     for (const { project, terminalName, command, relativeCwd } of terminalDefinitions) {
@@ -449,6 +458,7 @@ function run(argv) {
             type: "shell",
             command,
             options: { cwd },
+            icon: { id: "terminal", color: projectColors.get(project) },
             problemMatcher: [],
             presentation: {
                 echo: true,
