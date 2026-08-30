@@ -75,8 +75,8 @@ SCRIPT_DIR="${SCRIPT_FILE:h}"
 # macOS + Visual Studio Code
 #
 # 1) Optional Repos unten im CONFIG-Bereich eintragen.
-# 2) Optional pro Repo beliebig viele integrierte Terminals definieren.
-# 3) Beim ersten Start können Repos bequem im Finder ausgewählt werden.
+# 2) Im Setup pro Repo Anzahl und Inhalt der integrierten Terminals festlegen.
+# 3) Repos können bequem im Setup per Finder ausgewählt werden.
 # 4) Datei doppelklicken -> Projekte auswählen -> VS Code öffnet alles.
 # ============================================================
 
@@ -105,13 +105,14 @@ TERMINALS=()
 #   "Mein Projekt|Frontend|npm run dev|frontend"
 # )
 
-# Diese Standard-Terminals werden für jedes ausgewählte Projekt angelegt.
+# Diese Standard-Terminals gelten für Projekte ohne eigene Setup-Auswahl.
 # Falls Claude Code oder Codex fehlen, bleibt eine Shell mit Installationshinweis
 # geöffnet, statt dass der Task sofort verschwindet.
+# Keine Sicherheitsabfragen: Claude Code im YOLO-Modus, Codex mit Workspace-Sandbox.
 AUTO_TERMINALS=(
   "Shell|exec zsh -l|"
-  "Claude Code|if command -v claude >/dev/null 2>&1; then exec claude; else echo 'Claude Code ist nicht installiert.'; exec zsh -l; fi|"
-  "Codex|if command -v codex >/dev/null 2>&1; then exec codex; else echo 'Codex ist nicht installiert.'; exec zsh -l; fi|"
+  "Claude Code|if command -v claude >/dev/null 2>&1; then exec claude --dangerously-skip-permissions; else echo 'Claude Code ist nicht installiert.'; exec zsh -l; fi|"
+  "Codex|if command -v codex >/dev/null 2>&1; then exec codex --sandbox workspace-write --ask-for-approval never; else echo 'Codex ist nicht installiert.'; exec zsh -l; fi|"
 )
 
 # Bevorzugter VS-Code-Befehl. Wenn er nicht im PATH liegt, wird die
@@ -263,7 +264,8 @@ if [[ "${1:-}" == "--check" ]]; then
   printf 'Editor: %s\n' "$EDITOR_CMD"
   printf 'Lokale Konfiguration: %s\n' "$LOCAL_CONFIG"
   printf 'Gültige Projekte: %s\n' "${#SEEN_PROJECT_PATHS}"
-  printf 'Automatische Terminals pro Projekt: %s\n' "${#AUTO_TERMINALS}"
+  printf 'Standard-Terminals pro Projekt ohne Setup-Auswahl: %s\n' "${#AUTO_TERMINALS}"
+  printf 'Terminal-Konfiguration aus dem Setup: %s\n' "$CONFIG_DIR/terminals.json"
   exit 0
 fi
 
@@ -340,7 +342,7 @@ for t in "${TERMINALS[@]}"; do
 done
 
 AUTO_START_VALUE="$AUTO_START_TERMINALS" \
-osascript -l JavaScript - "$TMP_SELECTED" "$TMP_CONFIG" "$TMP_TERMINALS" "$WORKSPACE_PATH" <<'JXA'
+osascript -l JavaScript - "$TMP_SELECTED" "$TMP_CONFIG" "$TMP_TERMINALS" "$WORKSPACE_PATH" "$CONFIG_DIR/terminals.json" <<'JXA'
 ObjC.import("Foundation");
 
 function readText(path) {
@@ -363,10 +365,10 @@ function nonEmptyLines(path) {
 }
 
 function run(argv) {
-    const [selectedFile, configFile, terminalsFile, outputFile] = argv;
+    const [selectedFile, configFile, terminalsFile, outputFile, savedTerminalsFile] = argv;
     const selected = nonEmptyLines(selectedFile);
 
-    const projects = {};
+    const projects = Object.create(null);
     for (const line of nonEmptyLines(configFile)) {
         const separator = line.indexOf("\t");
         if (separator === -1) continue;
@@ -391,17 +393,59 @@ function run(argv) {
     );
     const autoStart = String(autoStartValue).toLowerCase() === "true";
 
-    const tasks = [];
+    let savedTerminals = {};
+    if ($.NSFileManager.defaultManager.fileExistsAtPath($(savedTerminalsFile))) {
+        const saved = JSON.parse(readText(savedTerminalsFile));
+        if (!saved || saved.version !== 1 || !saved.projects || typeof saved.projects !== "object" || Array.isArray(saved.projects)) {
+            throw new Error("Ungültige Terminal-Konfiguration aus dem Setup.");
+        }
+        savedTerminals = saved.projects;
+    }
+
+    // Eine Setup-Auswahl ersetzt sämtliche Standard- und lokalen Zusatz-Terminals
+    // dieses Repositories. Eine leere Liste bedeutet ausdrücklich null Terminals.
+    const terminalDefinitions = [];
     for (const raw of nonEmptyLines(terminalsFile)) {
         const parts = raw.split("\t");
         while (parts.length < 4) parts.push("");
         const [project, terminalName, command, relativeCwd] = parts;
         if (!selected.includes(project)) continue;
+        if (Object.prototype.hasOwnProperty.call(savedTerminals, projects[project])) continue;
+        terminalDefinitions.push({ project, terminalName, command, relativeCwd });
+    }
+    for (const project of selected) {
+        if (!Object.prototype.hasOwnProperty.call(savedTerminals, projects[project])) continue;
+        const entries = savedTerminals[projects[project]];
+        if (!Array.isArray(entries) || entries.some((entry) => !entry ||
+            typeof entry.name !== "string" || !entry.name.trim() ||
+            typeof entry.command !== "string" || !entry.command.trim() ||
+            typeof entry.cwd !== "string")) {
+            throw new Error(`Ungültige Terminals für ${project}. Bitte das Setup erneut ausführen.`);
+        }
+        for (const entry of entries) {
+            // Auch früher gespeicherte Codex-Vorlagen verwenden den neuen Standard.
+            // Nur den erzeugten Start ersetzen; eigene Befehle und Prompts bleiben erhalten.
+            const command = entry.type === "Codex"
+                ? entry.command.replace(
+                    /^(if command -v codex >\/dev\/null 2>&1; then exec codex )--yolo(?=;| -- )/,
+                    "$1--sandbox workspace-write --ask-for-approval never")
+                : entry.command;
+            terminalDefinitions.push({ project, terminalName: entry.name, command, relativeCwd: entry.cwd });
+        }
+    }
 
+    const tasks = [];
+    const usedLabels = new Set();
+    for (const { project, terminalName, command, relativeCwd } of terminalDefinitions) {
         const repoPath = projects[project].replace(/\/$/, "");
         const cwd = relativeCwd ? `${repoPath}/${relativeCwd}` : repoPath;
+        const baseLabel = `${project} · ${terminalName}`;
+        let label = baseLabel;
+        let suffix = 2;
+        while (usedLabels.has(label)) label = `${baseLabel} (${suffix++})`;
+        usedLabels.add(label);
         const task = {
-            label: `${project} · ${terminalName}`,
+            label,
             type: "shell",
             command,
             options: { cwd },
