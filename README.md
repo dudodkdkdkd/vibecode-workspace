@@ -128,6 +128,18 @@ Einrichtung und Workspace-Vertrauen können weiterhin eine Bestätigung erforder
 Beim ersten Öffnen kann VS Code fragen, ob automatische Workspace-Tasks erlaubt
 werden. Diese Freigabe ist nötig, damit die Terminals automatisch starten.
 
+### Terminalfarben pro Ordner
+
+Alle vom Launcher gestarteten Terminals eines ausgewählten Repository-Ordners
+bekommen dieselbe Symbolfarbe in der Terminal-Liste. Die Farben werden in der
+Reihenfolge der ausgewählten Ordner vergeben: Blau, Grün, Magenta, Cyan, Gelb
+und Rot; danach wiederholt sich die Palette. Drei ausgewählte Ordner haben also
+drei unterschiedliche Farben, unabhängig von der Anzahl ihrer Terminals.
+
+Die Farbtöne folgen dem Editor-Theme. Hintergrund und Warnfarben bleiben
+unverändert. Die Farben gelten für neu gestartete Workspace-Tasks; bereits
+laufende oder manuell geöffnete Terminals werden nicht nachträglich umgefärbt.
+
 ### Terminals und Commands frei festlegen
 
 Am einfachsten über **Terminals ändern** im Setup. Diese Auswahl gilt pro

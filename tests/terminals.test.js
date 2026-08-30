@@ -118,6 +118,7 @@ test('setup stores counts, repeated agents, literal prompts and custom commands 
     assert.equal(result.tasks.tasks[1].options.cwd, `${files.a}/frontend`);
     assert.equal(result.tasks.tasks[0].command, terminals[0].command);
     assert.ok(result.tasks.tasks.every((task) => task.runOptions.runOn === 'folderOpen'));
+    assert.ok(result.tasks.tasks.every((task) => task.icon.color === 'terminal.ansiBlue'));
 });
 
 test('editing one repo preserves other settings, including zero terminals', (t) => {
@@ -243,6 +244,22 @@ source "$1"
     const tasks = launch().tasks.tasks;
     assert.equal(tasks.length, 3);
     assert.ok(tasks.every((task) => task.label.startsWith('B · ')));
+
+    // Three selected folders, each with several tasks, must have three colors.
+    const c = path.join(files.dir, 'Repo C');
+    fs.mkdirSync(c);
+    fs.appendFileSync(files.projects, `C\t${c}\n`);
+    fs.unlinkSync(files.saved);
+    fs.unlinkSync(path.join(files.dir, 'last-selection.txt'));
+    const coloredTasks = launch().tasks.tasks;
+    assert.equal(coloredTasks.length, 9);
+    for (const [project, color] of [
+        ['A', 'terminal.ansiBlue'], ['B', 'terminal.ansiGreen'], ['C', 'terminal.ansiMagenta'],
+    ]) {
+        const group = coloredTasks.filter((task) => task.presentation.group === project);
+        assert.equal(group.length, 3);
+        assert.ok(group.every((task) => task.icon.id === 'terminal' && task.icon.color === color));
+    }
 });
 
 test('cancelling terminal setup also discards newly selected repository folders', (t) => {
