@@ -11,16 +11,17 @@ PROJECTS=(
   "Zweites Projekt|$HOME/Projects/zweites-projekt"
 )
 
-# Diese Terminals werden für JEDES ausgewählte Projekt geöffnet.
+# Diese Terminals gelten für Projekte OHNE eigene Terminal-Auswahl im Setup.
 # Zeilen entfernen, ergänzen oder den Befehl frei anpassen.
 # Format: "Terminalname|Befehl|relatives Arbeitsverzeichnis"
+# Claude Code: YOLO. Codex: Workspace-Sandbox ohne Sicherheitsabfragen.
 AUTO_TERMINALS=(
   "Shell|exec zsh -l|"
-  "Claude Code|claude|"
-  "Codex|codex|"
+  "Claude Code|if command -v claude >/dev/null 2>&1; then exec claude --dangerously-skip-permissions; else echo 'Claude Code ist nicht installiert.'; exec zsh -l; fi|"
+  "Codex|if command -v codex >/dev/null 2>&1; then exec codex --sandbox workspace-write --ask-for-approval never; else echo 'Codex ist nicht installiert.'; exec zsh -l; fi|"
 )
 
-# Zusätzliche Tasks nur für ein bestimmtes Projekt.
+# Zusätzliche Tasks nur für ein bestimmtes Projekt OHNE Setup-Terminal-Auswahl.
 # Format: "Projektname|Terminalname|Befehl|relatives Arbeitsverzeichnis"
 TERMINALS=(
   "Mein Projekt|Frontend|npm run dev|frontend"

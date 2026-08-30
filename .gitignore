@@ -1,6 +1,7 @@
 .DS_Store
 config.local.zsh
 projects.tsv
+terminals.json
 last-selection.txt
 terminal-close.log
 *.code-workspace

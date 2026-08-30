@@ -2,8 +2,9 @@
 
 Ein portabler macOS-Launcher für Multi-Repository-Workspaces in Visual Studio
 Code oder Cursor. Du wählst die gewünschten Projekte aus; der Launcher erzeugt
-einen gemeinsamen Workspace und startet pro Projekt Shell, Claude Code und
-Codex in eigenen Terminal-Gruppen.
+einen gemeinsamen Workspace und startet pro Projekt die im Setup festgelegten
+Terminals. Claude Code startet standardmäßig im YOLO-Modus; Codex mit
+Workspace-Sandbox ohne Sicherheitsabfragen.
 
 ## Voraussetzungen
 
@@ -35,13 +36,29 @@ Beim ersten Start kann macOS die Datei blockieren. Dann:
 2. **Öffnen** auswählen
 3. Den Start bestätigen
 
-Im Setup gibt es zwei Möglichkeiten:
+Im Setup gibt es drei Möglichkeiten:
 
 - **Hinzufügen** behält alle vorhandenen Ordner und ergänzt neue.
 - **Ersetzen** erstellt eine komplett neue Ordnerliste.
+- **Terminals ändern** passt Anzahl und Inhalt für vorhandene Ordner an.
 
 Danach die gewünschten Repository-Ordner auswählen. Für mehrere einzelne
 Ordner beim Anklicken `⌘` gedrückt halten.
+
+Anschließend die Repositories auswählen, deren Terminals du einrichten möchtest.
+Für jedes davon fragt das Setup:
+
+1. **Anzahl der Terminals** (auch `0` ist möglich).
+2. Pro Terminal: **Shell**, **Claude Code**, **Codex** oder **Eigener Befehl**.
+3. Bei Agenten einen optionalen **Startprompt**, bei eigenen Befehlen den
+   **Shell-Command** (z. B. `npm run dev`).
+4. **Terminalname** und optional einen **Unterordner** als Arbeitsverzeichnis.
+
+So sind beispielsweise zwei Claude-Terminals mit unterschiedlichen Aufgaben,
+ein Codex-Terminal und ein Dev-Server für dasselbe Repository möglich.
+Nicht ausgewählte Repositories behalten ihre Terminal-Einstellungen; ohne
+eigene Einstellungen gelten die drei Standard-Terminals. Abbrechen in einem
+Dialog verwirft die Änderungen des gesamten Setup-Durchlaufs.
 
 ### 3. Starter auf den Schreibtisch legen
 
@@ -70,40 +87,64 @@ Repository ausführen:
 
 - **Hinzufügen** für weitere Repository-Ordner
 - **Ersetzen** zum vollständigen Neuaufbau der Liste
+- **Terminals ändern** zum Anpassen der Terminals ohne neue Ordnerauswahl
 
 Der Schreibtisch-Starter muss danach nicht neu erstellt werden. Er liest die
 aktuelle Konfiguration bei jedem Start ein.
 
-Optional funktioniert das Setup auch ohne Dialog:
+Die Ordnerliste lässt sich auch ohne Dialog ändern. Bestehende
+Terminal-Einstellungen bleiben dabei erhalten; neue Repositories verwenden die
+Standard-Terminals:
 
 ```zsh
 ./Setup\ VibeCode\ Workspace.command --add "$HOME/Projects/projekt-a"
 ./Setup\ VibeCode\ Workspace.command --replace "$HOME/Projects/projekt-a" "$HOME/Projects/projekt-b"
 ```
 
+Direkt die Terminal-Dialoge öffnen:
+
+```zsh
+./Setup\ VibeCode\ Workspace.command --terminals
+```
+
 ## Automatisch gestartete Terminals
 
-Für jedes ausgewählte Repository legt der Workspace standardmäßig diese Tasks
-an:
+Für Repositories ohne eigene Terminal-Auswahl legt der Workspace diese Tasks an:
 
 - Shell
-- Claude Code
-- Codex
+- Claude Code mit `--dangerously-skip-permissions`
+- Codex mit `--sandbox workspace-write --ask-for-approval never`
+
+Bei Codex bleibt die Sandbox aktiv. Aktionen, die sie verbietet, scheitern,
+statt eine Freigabe anzufordern. Auch zuvor über das Setup gespeicherte
+Codex-Terminals mit YOLO verwenden beim nächsten Workspace-Start diesen neuen
+Standard; ihre Anzahl, Namen, Prompts und Arbeitsverzeichnisse bleiben erhalten.
+
+**Achtung:** Claude Code läuft weiterhin im YOLO-Modus ohne Sicherheitsabfragen.
+Verwende diese Starts nur in vertrauenswürdigen Projekten und vorzugsweise in
+einer isolierten Umgebung. Login, erste
+Einrichtung und Workspace-Vertrauen können weiterhin eine Bestätigung erfordern.
 
 Beim ersten Öffnen kann VS Code fragen, ob automatische Workspace-Tasks erlaubt
 werden. Diese Freigabe ist nötig, damit die Terminals automatisch starten.
 
 ### Terminals und Commands frei festlegen
 
-In `config.local.zsh` bestimmt `AUTO_TERMINALS`, welche Terminals für jedes
-ausgewählte Repository geöffnet werden. Jede Zeile enthält Anzeigename, Command
+Am einfachsten über **Terminals ändern** im Setup. Diese Auswahl gilt pro
+Repository und ersetzt dort sowohl `AUTO_TERMINALS` als auch `TERMINALS` aus
+`config.local.zsh`, damit genau die eingestellte Anzahl geöffnet wird. `0`
+unterdrückt auch lokale Zusatz-Terminals. Die Zuordnung erfolgt über den
+absoluten Repository-Pfad, unabhängig vom Anzeigenamen.
+
+Alternativ bestimmt `AUTO_TERMINALS` in `config.local.zsh` die Standard-Terminals
+für Repositories ohne Setup-Auswahl. Jede Zeile enthält Anzeigename, Command
 und optional ein relatives Arbeitsverzeichnis:
 
 ```zsh
 AUTO_TERMINALS=(
   "Shell|exec zsh -l|"
-  "Claude Code|claude|"
-  "Codex|codex|"
+  "Claude Code|claude --dangerously-skip-permissions|"
+  "Codex|codex --sandbox workspace-write --ask-for-approval never|"
   "Tests|npm test|frontend"
 )
 ```
@@ -113,14 +154,17 @@ Eine Zeile entfernen deaktiviert dieses Terminal. Mit
 beliebige Optionen enthalten, aber kein `|`, weil dieses Zeichen als
 Feldtrenner dient.
 
-Optionen wie `codex --yolo` oder
-`claude --dangerously-skip-permissions` können ebenfalls eingetragen werden,
-deaktivieren aber die Sicherheitsabfragen der jeweiligen Agenten. Solche
-Einstellungen gehören ausschließlich in die von Git ignorierte
-`config.local.zsh`, nicht in die öffentliche Beispielkonfiguration.
+Eigene Befehle im Setup dürfen auch Pipes (`|`) und Anführungszeichen enthalten.
+Startprompts werden als einzelnes Argument übergeben; enthaltene Shell-Zeichen
+werden dabei nicht als Befehle ausgeführt.
 
-Zusätzliche projektspezifische Tasks können in `config.local.zsh` definiert
-werden:
+Für einen Agentenstart mit den persönlichen CLI-Standardeinstellungen im Setup
+**Eigener Befehl** wählen und `claude` oder `codex` eintragen. Eigene Befehle und
+manuell angepasste Befehle in `config.local.zsh` werden nicht automatisch
+umgeschrieben.
+
+Zusätzliche projektspezifische Tasks für Repositories ohne Setup-Auswahl können
+in `config.local.zsh` definiert werden:
 
 ```zsh
 TERMINALS=(
@@ -141,7 +185,14 @@ Das Setup speichert persönliche Ordnerpfade außerhalb des Repositories:
 
 ```text
 ~/.config/vibecode-workspace/projects.tsv
+~/.config/vibecode-workspace/terminals.json
 ```
+
+`terminals.json` enthält die Terminal-Anzahl, Typen, Namen, Startprompts, Befehle
+und Arbeitsverzeichnisse pro Repository. Diese Datei wird als JSON gelesen,
+nicht als Shell-Konfiguration ausgeführt. Befehle laufen erst mit den
+Workspace-Tasks. Auch diese Datei kann persönliche Aufgaben enthalten und
+gehört nicht in Git.
 
 Die zuletzt verwendete Auswahl liegt ebenfalls nur im Benutzerprofil:
 
@@ -157,7 +208,7 @@ cp config.example.zsh config.local.zsh
 
 `config.local.zsh` ist in `.gitignore` eingetragen. Persönliche Pfade und lokale
 Befehle werden daher nicht committed. Zusätzlich ignoriert Git vorsorglich
-`projects.tsv`, `last-selection.txt`, `.code-workspace`-Dateien sowie übliche
+`projects.tsv`, `terminals.json`, `last-selection.txt`, `.code-workspace`-Dateien sowie übliche
 Editor-Metadaten.
 
 ## Terminalfenster des Starters
@@ -177,7 +228,8 @@ CLOSE_LAUNCHER_TERMINAL=false
 ## Dateien im Repository
 
 - `VibeCode Workspace.command` – Schreibtisch-Launcher
-- `Setup VibeCode Workspace.command` – Ordner hinzufügen oder ersetzen
+- `Setup VibeCode Workspace.command` – Ordner und Terminals einrichten
+- `terminal-setup.js` – macOS-Dialoge für die Terminal-Konfiguration
 - `config.example.zsh` – öffentliche Konfigurationsvorlage
 - `config.local.zsh` – optionale lokale Konfiguration, von Git ignoriert
 - `.gitignore` – Schutz für lokale und generierte Dateien
@@ -207,6 +259,18 @@ App auch dann, wenn `code` oder `cursor` nicht im Terminal-PATH liegen.
 
 Das prüft Editor, Systembefehle und die Anzahl gültiger Projekte, ohne einen
 Workspace zu öffnen.
+
+### Änderungen testen
+
+Auf macOS mit installiertem Node.js:
+
+```zsh
+node --test tests/terminals.test.js
+```
+
+Die Tests prüfen Setup-Speicherung, Abbrechen, Startprompts und die erzeugten
+Workspace-Tasks in temporären Ordnern. Dialogantworten werden simuliert; es
+werden weder ein Editor noch echte Agentensitzungen geöffnet.
 
 ## Artwork
 
