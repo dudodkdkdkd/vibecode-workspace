@@ -70,6 +70,10 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PA
 SCRIPT_FILE="${0:A}"
 SCRIPT_DIR="${SCRIPT_FILE:h}"
 
+if [[ "${1:-}" == "remote" ]]; then
+  exec "$SCRIPT_DIR/workspace" "$@"
+fi
+
 # ============================================================
 # VIBE WORKSPACE LAUNCHER
 # macOS + Visual Studio Code
@@ -143,6 +147,11 @@ CLOSE_LAUNCHER_TERMINAL=true
 LOCAL_CONFIG="$SCRIPT_DIR/config.local.zsh"
 if [[ -f "$LOCAL_CONFIG" ]]; then
   source "$LOCAL_CONFIG"
+fi
+
+if [[ "${1:-}" == "--remote-workspace" ]]; then
+  AUTO_START_TERMINALS="${VIBE_REMOTE_TERMINALS:-false}"
+  CLOSE_LAUNCHER_TERMINAL=false
 fi
 
 mkdir -p "$WORKSPACE_DIR"
@@ -271,6 +280,10 @@ fi
 
 # Ohne gültige Konfiguration auf das separate Setup-Programm verweisen.
 if [[ ! -s "$TMP_NAMES" ]]; then
+  if [[ "${1:-}" == "--remote-workspace" ]]; then
+    print -u2 'Remote: zuerst Repositories im Workspace-Setup einrichten.'
+    exit 1
+  fi
   osascript -e 'display alert "Noch keine Repositories eingerichtet" message "Öffne im VibeCode-Workspace-Ordner die Datei ‚Setup VibeCode Workspace.command‘ und füge dort deine Repository-Ordner hinzu." as informational'
   LAUNCH_COMPLETED=true
   exit 0
@@ -293,6 +306,9 @@ fi
 
 # Standardmäßiger macOS-Mehrfachauswahldialog. Zum Ändern mehrerer Einträge
 # verlangt macOS die Cmd-Taste; die gespeicherte Auswahl kann direkt bestätigt werden.
+if [[ "${1:-}" == "--remote-workspace" ]]; then
+  cp "$TMP_DEFAULTS" "$TMP_SELECTED"
+else
 osascript <<APPLESCRIPT > "$TMP_SELECTED"
 set namesFile to POSIX file "$TMP_NAMES"
 set defaultsFile to POSIX file "$TMP_DEFAULTS"
@@ -308,6 +324,7 @@ set outputText to chosen as text
 set AppleScript's text item delimiters to oldDelims
 return outputText
 APPLESCRIPT
+fi
 
 # Abgebrochen / nichts gewählt.
 if [[ ! -s "$TMP_SELECTED" ]]; then
