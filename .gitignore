@@ -7,3 +7,4 @@ terminal-close.log
 *.code-workspace
 .vscode/
 .idea/
+__pycache__/
