@@ -1,15 +1,4 @@
 {
-  "enabled": false,
-  "days": ["monday", "tuesday", "wednesday", "thursday", "friday"],
-  "start": "14:00",
-  "duration": "5h",
-  "wake_mac": true,
-  "keep_awake": true,
-  "apps": ["Codex", "Claude"],
-  "restart_if_crashed": true,
-  "close_apps_after": true,
-  "open_workspace": false,
-  "open_terminals": false,
-  "open_control_terminal": true,
-  "force_sleep": false
+  "keep_awake": false,
+  "apps": ["Codex", "Claude"]
 }

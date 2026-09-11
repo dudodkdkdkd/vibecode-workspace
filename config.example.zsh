@@ -34,6 +34,10 @@ EDITOR_CMD="code"
 # true startet die definierten Terminals automatisch beim Öffnen.
 AUTO_START_TERMINALS=true
 
+# true nutzt das Starter-Terminal anschließend als Kontrollterminal für
+# Wachhalten + Apps. Dort selbst gibt es nur AN/AUS und die App-Auswahl.
+OPEN_CONTROL_TERMINAL=true
+
 # true schließt den Terminal-Tab des Starters nur nach erfolgreichem Durchlauf.
 # Bei einem Fehler bleibt er zur Diagnose geöffnet.
 CLOSE_LAUNCHER_TERMINAL=true
