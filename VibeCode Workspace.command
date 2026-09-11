@@ -137,6 +137,10 @@ LAST_SELECTION="$CONFIG_DIR/last-selection.txt"
 # false = Tasks werden angelegt, aber nicht automatisch gestartet.
 AUTO_START_TERMINALS=true
 
+# true = dieses Starter-Terminal nach dem Workspace-Start als einfaches
+# Kontrollterminal für Wachhalten + Apps weiterverwenden.
+OPEN_CONTROL_TERMINAL=true
+
 # true = den eigenen Apple-Terminal-Tab nach erfolgreichem Start schließen.
 # Bei Fehlern bleibt das Terminal offen und zeigt die Diagnose an.
 CLOSE_LAUNCHER_TERMINAL=true
@@ -152,6 +156,7 @@ fi
 if [[ "${1:-}" == "--remote-workspace" ]]; then
   AUTO_START_TERMINALS="${VIBE_REMOTE_TERMINALS:-false}"
   CLOSE_LAUNCHER_TERMINAL=false
+  OPEN_CONTROL_TERMINAL=false
 fi
 
 mkdir -p "$WORKSPACE_DIR"
@@ -528,6 +533,17 @@ JXA
 # Kurzer Hinweis beim ersten Start automatischer Tasks.
 if [[ "$AUTO_START_TERMINALS" == "true" ]]; then
   osascript -e 'display notification "Falls VS Code fragt: automatische Tasks für diesen Workspace erlauben." with title "Vibe Workspace gestartet"'
+fi
+
+# Das beim Doppelklick ohnehin geöffnete Starter-Terminal wird zum dauerhaften
+# Kontrollterminal. Bei AN hält es den Mac wach und verwaltet die ausgewählten
+# Desktop-Apps beziehungsweise Agent-Terminals; q kehrt hierher zurück.
+if [[ "$OPEN_CONTROL_TERMINAL" == "true" && -f "$SCRIPT_DIR/remote.py" ]]; then
+  if command -v python3 >/dev/null 2>&1; then
+    VIBECODE_REMOTE_DIR="$CONFIG_DIR/remote" python3 "$SCRIPT_DIR/remote.py" control
+  else
+    printf 'Kontrollterminal benötigt Python 3.\n' >&2
+  fi
 fi
 
 # Erst jetzt gilt der Start als vollständig erfolgreich. Der EXIT-Handler darf

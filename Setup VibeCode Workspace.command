@@ -111,7 +111,7 @@ else
 on run argv
     set existingCount to item 1 of argv
     set dialogText to "Aktuell sind " & existingCount & " gültige Ordner eingerichtet." & return & return & "Ordner hinzufügen, die Liste ersetzen oder nur die Terminals ändern?"
-    set chosenMode to choose from list {"Hinzufügen", "Ersetzen", "Terminals ändern", "Remote konfigurieren"} with title "VibeCode Workspace Setup" with prompt dialogText default items {"Hinzufügen"}
+    set chosenMode to choose from list {"Hinzufügen", "Ersetzen", "Terminals ändern", "Wachhalten & Apps"} with title "VibeCode Workspace Setup" with prompt dialogText default items {"Hinzufügen"}
     if chosenMode is false then return ""
     return item 1 of chosenMode
 end run
@@ -123,7 +123,7 @@ MODE_APPLESCRIPT
 
 fi
 
-if [[ "$setup_mode" == "Remote konfigurieren" ]]; then
+if [[ "$setup_mode" == "Wachhalten & Apps" ]]; then
   "$SCRIPT_DIR/workspace" remote menu
   SETUP_COMPLETED=true
   exit 0

@@ -214,6 +214,8 @@ test('full launcher keeps Claude YOLO and Codex sandboxed without approvals, and
     const files = fixture(t);
     const script = path.join(files.dir, 'VibeCode Workspace.command');
     fs.writeFileSync(script, launcherSource);
+    fs.copyFileSync(path.join(root, 'remote.py'), path.join(files.dir, 'remote.py'));
+    fs.copyFileSync(path.join(root, 'remote.example.json'), path.join(files.dir, 'remote.example.json'));
     fs.writeFileSync(path.join(files.dir, 'config.local.zsh'), `
 CONFIG_DIR=${quote(files.dir)}
 SAVED_PROJECTS=${quote(files.projects)}
@@ -240,6 +242,9 @@ source "$1"
     assert.equal(defaults.length, 6);
     assert.equal(defaults.filter((task) => task.command.includes('exec claude --dangerously-skip-permissions')).length, 2);
     assert.equal(defaults.filter((task) => task.command.includes('exec codex --sandbox workspace-write --ask-for-approval never')).length, 2);
+    const controlConfig = JSON.parse(fs.readFileSync(path.join(files.dir, 'remote', 'config.json')));
+    assert.deepEqual(Object.keys(controlConfig).sort(), ['apps', 'keep_awake']);
+    assert.equal(controlConfig.keep_awake, false);
     fs.writeFileSync(files.saved, JSON.stringify({ version: 1, projects: { [files.a]: [] } }));
     const tasks = launch().tasks.tasks;
     assert.equal(tasks.length, 3);

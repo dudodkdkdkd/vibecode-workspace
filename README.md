@@ -4,16 +4,18 @@ Ein portabler macOS-Launcher für Multi-Repository-Workspaces in Visual Studio
 Code oder Cursor. Du wählst die gewünschten Projekte aus; der Launcher erzeugt
 einen gemeinsamen Workspace und startet pro Projekt die im Setup festgelegten
 Terminals. Claude Code startet standardmäßig im YOLO-Modus; Codex mit
-Workspace-Sandbox ohne Sicherheitsabfragen.
+Workspace-Sandbox ohne Sicherheitsabfragen. Das Starter-Terminal dient danach
+als einfache AN/AUS-Steuerung zum Wachhalten des Macs und zum Öffnen ausgewählter
+Apps beziehungsweise Agenten.
 
 ## Voraussetzungen
 
 - macOS
 - Visual Studio Code oder Cursor
-- optional: Claude Code und Codex CLI
+- optional: Claude Code, Codex CLI und OpenCode
 
-Fehlt Claude Code oder Codex, bleibt das jeweilige Terminal mit einem Hinweis
-als normale Shell geöffnet.
+Fehlt Claude Code oder Codex, bleibt das jeweilige Workspace-Terminal mit einem
+Hinweis als normale Shell geöffnet.
 
 ## Schnellstart
 
@@ -88,6 +90,7 @@ Repository ausführen:
 - **Hinzufügen** für weitere Repository-Ordner
 - **Ersetzen** zum vollständigen Neuaufbau der Liste
 - **Terminals ändern** zum Anpassen der Terminals ohne neue Ordnerauswahl
+- **Wachhalten & Apps** für das dauerhafte Kontrollterminal
 
 Der Schreibtisch-Starter muss danach nicht neu erstellt werden. Er liest die
 aktuelle Konfiguration bei jedem Start ein.
@@ -105,6 +108,43 @@ Direkt die Terminal-Dialoge öffnen:
 
 ```zsh
 ./Setup\ VibeCode\ Workspace.command --terminals
+```
+
+## Kontrollterminal: Wachhalten und Apps
+
+Nach jedem normalen Workspace-Start wird das ohnehin geöffnete Starter-Terminal
+automatisch zum Kontrollterminal. Es lässt sich außerdem jederzeit separat über
+**Setup → Wachhalten & Apps** öffnen. Darin gibt es nur zwei Einstellungen:
+
+1. **Wachhalten + Apps: AN/AUS**
+2. **Apps auswählen**
+
+Auswählbar sind die Claude-App sowie Claude Code, Codex und optional OpenCode.
+Die drei Coding-Agenten starten jeweils in einem eigenen Terminal. OpenCode wird
+nur gestartet, wenn der Befehl `opencode` installiert ist; eine fehlende
+Installation wird als Fehler im Kontrollterminal angezeigt.
+
+Bei **AN** verhindert macOS den Ruhezustand und öffnet nur die ausgewählten
+Apps beziehungsweise Agent-Terminals. Bei **AUS** wird die Wachhaltesperre
+gelöst. Die ausgewählten Desktop-Apps werden vollständig beendet und die eigens
+von VibeCode gestarteten Agent-Terminals samt Prozessen geschlossen. Reagiert
+eine Desktop-App nicht auf das normale Beenden, beendet VibeCode ihre noch
+laufenden App-Prozesse zwangsweise.
+
+**Achtung:** Nicht gespeicherte Arbeit in einer ausgewählten Desktop-App kann
+beim Ausschalten verloren gehen. `q` schließt dagegen nur das Kontrollterminal;
+der AN/AUS-Zustand bleibt unverändert. Erneut öffnen lässt es sich jederzeit
+über das Setup oder direkt mit:
+
+```zsh
+./workspace remote
+```
+
+Soll das Kontrollterminal ausnahmsweise nicht bei jedem Workspace-Start
+erscheinen, kann es in `config.local.zsh` deaktiviert werden:
+
+```zsh
+OPEN_CONTROL_TERMINAL=false
 ```
 
 ## Automatisch gestartete Terminals
@@ -198,7 +238,11 @@ Das Setup speichert persönliche Ordnerpfade außerhalb des Repositories:
 ```text
 ~/.config/vibecode-workspace/projects.tsv
 ~/.config/vibecode-workspace/terminals.json
+~/.config/vibecode-workspace/remote/config.json
 ```
+
+Die Konfiguration des Kontrollterminals speichert ausschließlich den AN/AUS-
+Wert und die ausgewählten Apps beziehungsweise Plattformen.
 
 `terminals.json` enthält die Terminal-Anzahl, Typen, Namen, Startprompts, Befehle
 und Arbeitsverzeichnisse pro Repository. Diese Datei wird als JSON gelesen,
@@ -242,6 +286,7 @@ CLOSE_LAUNCHER_TERMINAL=false
 - `VibeCode Workspace.command` – Schreibtisch-Launcher
 - `Setup VibeCode Workspace.command` – Ordner und Terminals einrichten
 - `terminal-setup.js` – macOS-Dialoge für die Terminal-Konfiguration
+- `workspace` / `remote.py` – Kontrollterminal, Wachhalten und App-Verwaltung
 - `config.example.zsh` – öffentliche Konfigurationsvorlage
 - `config.local.zsh` – optionale lokale Konfiguration, von Git ignoriert
 - `.gitignore` – Schutz für lokale und generierte Dateien
