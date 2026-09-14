@@ -1,30 +1,47 @@
 # Local Dev - OpenCode + Ollama
 
-Ein **Doppelklick-Skript** für macOS, das OpenCode automatisch mit lokalem Ollama verbindet.
+**Ein All-in-One Skript** für macOS, das Setup, Start/Stop und Reset für Ollama + OpenCode in einem Menü vereint.
 
 ---
 
 ## 🚀 Schnellstart
 
-1. **Ordner auf den Desktop kopieren**
+**Einfach auf den Desktop legen:**
+1. Erstelle einen **Alias** des Skripts:
+   - Rechtsklick auf `Local Dev.command` → **Alias erzeugen** → Auf Desktop ziehen
+   
+   **Vorteile:** Updates werden automatisch übernommen!
+
+**Oder kopieren:**
    ```bash
-   cp -r /Pfad/zum/vibecode-workspace/local-dev ~/Desktop/
+   cp "/Users/tobiaspitschi/Documents/GitHub/vibecode-workspace/Local Dev.command" ~/Desktop/
    ```
 
 2. **Modell in der Konfiguration anpassen (optional)**
-   - Öffne `ollama-config.json`
+   - Öffne `ollama-config.json` (wird beim ersten Start automatisch erstellt!)
    - Ändere das Feld `"model"` zu deinem Wunschmodell (z. B. `"mistral:7b"`, `"phi3"`, `"llama3"`)
 
-3. **Per Doppelklick auf `ollama-opencode.command` starten**
+3. **Per Doppelklick auf `Local Dev.command` starten**
 
 ---
 
 ## 🔄 Funktionsweise
 
-| Aktion | Beschreibung |
-|--------|-------------|
-| **🟢 1. Doppelklick** | Startet Ollama → Lädt Modell → Konfiguriert OpenCode → Startet OpenCode |
-| **🔴 2. Doppelklick** | Stoppt OpenCode → Entfernt Modell aus RAM → Stoppt Ollama |
+### Menü-Optionen (nach Doppelklick):
+
+| Option | Aktion | Beschreibung |
+|--------|--------|-------------|
+| **1) Starten** | 🚀 | Startet Ollama + lädt Modell + konfiguriert OpenCode + startet OpenCode |
+| **2) Stoppen** | 🛑 | Stoppt OpenCode + entfernt Modell aus RAM + stoppt Ollama |
+| **3) Reset** | 💥 | **ALLES zurücksetzen** – Stoppt alles + deinstalliert ALLE Modelle |
+| **4) Setup** | ⚙️ | Konfiguration anpassen (Modell auswählen) |
+| **5) Beenden** | 🚪 | Skript schließen |
+
+### Automatisches Setup:
+- Beim ersten Start (keine Config) → **Setup-Dialog** wird automatisch angezeigt
+- Beim nächsten Start → **Menü** mit allen Optionen
+
+**💡 Tipp:** Nutze das **`Local Dev.command`** im Root-Verzeichnis für beste Desktop-Integration!
 
 ---
 
@@ -41,6 +58,21 @@ Ein **Doppelklick-Skript** für macOS, das OpenCode automatisch mit lokalem Olla
   }
 }
 ```
+
+---
+
+## 📁 Dateistruktur
+
+```
+local-dev/
+├── ollama-config.json         # Modell-Konfiguration (wird automatisch erstellt)
+└── README.md                  # Diese Datei
+```
+
+**Haupt-Skript im Root-Verzeichnis:**
+- `Local Dev.command` → **All-in-One** Skript mit Menü für Setup, Start/Stop und Reset
+
+**Hinweis:** Die alten Skripte `ollama-opencode.command` und `reset-ollama.command` sind noch vorhanden für Kompatibilität, werden aber nicht mehr benötigt.
 
 ---
 

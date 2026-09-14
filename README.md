@@ -14,7 +14,7 @@ Kopiere diese Dateien einfach auf deinen **Schreibtisch** und starte sie per Dop
 |-------|-------|-------|
 | `Setup Workspace.command` | Workspaces | Repository-Ordner einrichten |
 | `Launch Workspace.command` | Workspaces | Workspace mit Terminals starten |
-| `Toggle Ollama.command` | Local Dev | Ollama + OpenCode starten/stoppen |
+| `Local Dev.command` | Local Dev | **All-in-One**: Setup, Start/Stop, Reset für Ollama + OpenCode |
 
 **Tipp:** Erstelle **Aliase** (Rechtsklick → Alias erzeugen) statt Kopien, damit Updates automatisch übernommen werden!
 
@@ -72,6 +72,7 @@ Kopiere diese Dateien einfach auf deinen **Schreibtisch** und starte sie per Dop
 
 **Hauptdateien:**
 - `ollama-opencode.command` – Doppelklick-Skript (Toggle)
+- `reset-ollama.command` – **ALLES zurücksetzen** (Modelle deinstallieren)
 - `ollama-config.json` – Modell-Konfiguration
 
 ---
@@ -216,7 +217,7 @@ python3 remote/remote.py --ssh "Mein Server"
 ### Local Dev (`local-dev/`)
 | Datei | Zweck |
 |-------|-------|
-| `ollama-config.json` | Modell und Ollama-Einstellungen |
+| `ollama-config.json` | Modell und Ollama-Einstellungen (wird automatisch erstellt) |
 
 **Beispiel-Konfiguration:**
 ```json
@@ -230,8 +231,7 @@ python3 remote/remote.py --ssh "Mein Server"
 ```
 
 **Usage:**
-- **Doppelklick auf `ollama-opencode.command`** → Startet alles
-- **Nochmal Doppelklick** → Stoppt alles
+- **Doppelklick auf `Local Dev.command`** → **Menü mit Optionen**: Starten, Stoppen, Reset, Setup
 
 ---
 
@@ -242,7 +242,7 @@ python3 remote/remote.py --ssh "Mein Server"
 # Quick-Launch-Buttons auf den Schreibtisch kopieren:
 cp Setup\ Workspace.command ~/Desktop/
 cp Launch\ Workspace.command ~/Desktop/
-cp Toggle\ Ollama.command ~/Desktop/
+cp Local\ Dev.command ~/Desktop/
 
 # Oder Aliase erstellen (besser für Updates):
 # Rechtsklick auf die Dateien → Alias erzeugen → Auf Desktop ziehen
@@ -303,7 +303,7 @@ vibecode-workspace/
 │
 ├── Setup Workspace.command     # ⭐ Quick-Launch: Setup-Assistent
 ├── Launch Workspace.command    # ⭐ Quick-Launch: Workspace starten
-├── Toggle Ollama.command       # ⭐ Quick-Launch: Ollama Toggle
+├── Local Dev.command           # ⭐ Quick-Launch: All-in-One für Ollama + OpenCode
 │
 ├── workspaces/                 # Modul 1: Workspace-Management
 │   ├── workspace               # Einstiegspunkt
@@ -318,6 +318,7 @@ vibecode-workspace/
 │
 └── local-dev/                  # Modul 3: Lokale KI-Entwicklung
     ├── ollama-opencode.command
+    ├── reset-ollama.command
     ├── ollama-config.json
     └── README.md
 ```
