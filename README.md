@@ -32,6 +32,8 @@ Kopiere diese Dateien einfach auf deinen **Schreibtisch** und starte sie per Dop
 | **Farbcodierung** | Unterschiedliche Farben pro Ordner |
 | **Agenten-Integration** | Claude Code, Codex, Antigravity |
 | **Wachhalten** | Verhindert macOS-Ruhezustand |
+| **🆕 Split-Screen-Tabs** | VS Code mit vordefiniertem Tab-Layout |
+| **🆕 Auto-Open URLs** | Browser-Tabs für localhost-Adressen |
 
 **Hauptdateien:**
 - `workspace` – Einstiegspunkt (leitet an Remote oder Workspace weiter)
@@ -135,20 +137,44 @@ Führe **`workspaces/Setup VibeCode Workspace.command`** aus, um:
 
 **Beispiel-Konfiguration (`config.local.zsh`):**
 ```zsh
-# Terminal-Einstellungen
+# ========== TERMINAL-EINSTELLUNGEN ==========
 TERMINAL_THEME="Dracula"
 TERMINAL_FONT_SIZE=14
 
-# Standard-Terminals pro Projekt
+# ========== STANDARD-TERMINALS ==========
+# Format: "Anzeigename|Befehl|Arbeitsverzeichnis"
 AUTO_TERMINALS=(
   "Frontend|npm run dev|frontend"
   "Backend|npm run server|backend"
 )
 
-# Wachhalten deaktivieren
+# ========== AUTO-OPEN URLs (Browser-Tabs) ==========
+# URLs, die automatisch beim Workspace-Start geöffnet werden
+AUTO_OPEN_URLS=(
+  "http://localhost:3000"    # Dev-Server
+  "http://localhost:6006"    # Storybook
+  "http://localhost:5173"    # Vite
+)
+
+# ========== SPLIT-SCREEN LAYOUT ==========
+# Wie VS Code die Terminals anordnen soll
+# Optionen: "tabs" (Standard) | "split" (2 Spalten) | "grid" (4 Felder)
+VSCODE_TERMINAL_LAYOUT="split"
+
+# ========== WACHHALTEN ==========
 OPEN_CONTROL_TERMINAL=false
 CLOSE_LAUNCHER_TERMINAL=false
 ```
+
+**💡 Split-Screen in VS Code (manuell):**
+| Aktion | Shortcut (macOS) |
+|--------|------------------|
+| Vertikaler Split | `⌘ + \` |
+| Horizontaler Split | `⌘ + Alt + \` |
+| Zwischen Gruppen wechseln | `⌘ + [1-9]` |
+| Terminal Split | `⌘ + \` (im Terminal-Fokus) |
+
+**📌 Tipp:** Die `AUTO_TERMINALS` und `AUTO_OPEN_URLS` Konfigurationen sind **unabhängig voreinander** – du kannst beides kombinieren!
 
 ---
 
@@ -304,6 +330,7 @@ vibecode-workspace/
 - macOS
 - VS Code oder Cursor (optional: Claude Code, Codex, Antigravity)
 - Node.js (für `terminal-setup.js`)
+- **Split-Screen:** Funktioniert mit allen modernen VS Code Versionen (1.80+)
 
 ### Remote Management
 - Python 3.x
@@ -344,6 +371,8 @@ vibecode-workspace/
 - **Keine Konflikte:** Die Module stören sich nicht gegenseitig
 - **Einfache Updates:** Git-Pulls aktualisieren nur die Module, die du behältst
 - **Wiederherstellen:** Einfach das Repository neu klonen, wenn du ein Modul zurückholen willst
+- **🔧 Split-Screen:** Nutze `VSCODE_TERMINAL_LAYOUT` in `config.local.zsh` für automatische Terminal-Anordnung
+- **🌐 Auto-URLs:** Definiere `AUTO_OPEN_URLS` in `config.local.zsh`, um Browser-Tabs automatisch zu öffnen
 
 ---
 
