@@ -1,0 +1,9 @@
+{
+  "mlx": {
+    "model": "Spark-X2.5-4B",
+    "repository": "XHToken/Spark-X2.5-4B",
+    "device": "gpu",
+    "dtype": "bfloat16",
+    "port": 8000
+  }
+}
