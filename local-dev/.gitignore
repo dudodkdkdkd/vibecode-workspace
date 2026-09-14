@@ -1,0 +1,20 @@
+# Local Dev - Ignorierte Dateien
+
+# Config-Dateien (lokale Einstellungen)
+ollama-config.json
+mlx-config.json
+
+# Lock-Dateien
+.ollama-opencode.lock
+.mlx-spark.lock
+
+# Log-Dateien
+*.log
+local-dev.log
+mlx-spark.log
+
+# Server-Skripte
+mlx-server.sh
+
+# Temporaere Dateien
+*.tmp

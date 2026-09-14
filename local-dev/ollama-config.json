@@ -1,7 +1,0 @@
-{
-  "model": "deepseek-coder:6.7b",
-  "ollama": {
-    "host": "localhost",
-    "port": 11434
-  }
-}
