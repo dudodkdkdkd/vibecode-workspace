@@ -1,8 +1,8 @@
 #!/bin/zsh
 
 # =============================================
-# Local Dev - MLX Spark + OpenCode Manager
-# Einfaches Skript: Starten, Stoppen, Config
+# Local Dev - KI Provider Manager
+# Verwalte lokal gehostete KI-Modelle mit Providern
 # =============================================
 
 SCRIPT_DIR="$(cd "$(dirname "${0}")" && pwd)"
@@ -10,6 +10,9 @@ LOCAL_DEV_DIR="${SCRIPT_DIR}/local-dev"
 CONFIG_FILE="${LOCAL_DEV_DIR}/mlx-config.json"
 LOCK_FILE="${LOCAL_DEV_DIR}/.mlx-spark.lock"
 LOG_FILE="${LOCAL_DEV_DIR}/mlx-spark.log"
+BACKEND="MLX"  # Standard-Backend (kann in Zukunft erweitert werden)
+OPENCODE_NPM_PREFIX="$HOME/.npm-global"
+export PATH="${OPENCODE_NPM_PREFIX}:${HOME}/.local/bin:${HOME}/.opencode/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
 
 # Logging
 log() {
@@ -27,18 +30,49 @@ check_python() {
     fi
 }
 
+add_opencode_path() {
+    local path_line='export PATH="$HOME/.npm-global:$HOME/.local/bin:$HOME/.opencode/bin:$PATH"'
+    local shell_profile="$HOME/.zprofile"
+
+    if ! grep -Fqx "$path_line" "$shell_profile" 2>/dev/null; then
+        printf '\n# OpenCode CLI\n%s\n' "$path_line" >> "$shell_profile"
+    fi
+    export PATH="${OPENCODE_NPM_PREFIX}:${HOME}/.local/bin:${HOME}/.opencode/bin:${PATH}"
+}
+
+install_opencode() {
+    if ! command -v npm &> /dev/null; then
+        echo "npm wurde nicht gefunden. Bitte zuerst Node.js installieren (z. B. brew install node)."
+        return 1
+    fi
+
+    mkdir -p "$OPENCODE_NPM_PREFIX"
+    npm config set prefix "$OPENCODE_NPM_PREFIX" >/dev/null 2>&1
+    add_opencode_path
+    echo "Installiere OpenCode CLI fuer deinen Benutzer..."
+    npm install --global opencode-ai
+}
+
 check_opencode() {
-    if ! command -v open &> /dev/null; then
-        echo "open Befehl nicht gefunden!"
-        exit 1
+    if command -v opencode &> /dev/null || [ -d "/Applications/OpenCode.app" ] || [ -d "$HOME/Applications/OpenCode.app" ]; then
+        return 0
     fi
-    if [ ! -d "/Applications/OpenCode.app" ] && [ ! -d "~/Applications/OpenCode.app" ]; then
-        echo "OpenCode.app nicht gefunden!"
-        echo "Installiere OpenCode in /Applications/ oder ~/Applications/"
-        echo -n "Druecke Enter zum Beenden..."
-        read -r
-        exit 1
+
+    echo "OpenCode ist noch nicht installiert."
+    echo -n "Jetzt automatisch installieren? (ja/nein): "
+    read -r
+    if [[ $REPLY =~ ^[Jj][Aa]?$ ]]; then
+        install_opencode || exit 1
+        if ! command -v opencode &> /dev/null; then
+            echo "OpenCode wurde installiert, aber die CLI ist noch nicht im PATH sichtbar."
+            echo "Starte ein neues Terminal und fuehre das Programm erneut aus."
+            exit 1
+        fi
+        return 0
     fi
+
+    echo "OpenCode wird benoetigt. Installiere es spaeter ueber das Setup."
+    exit 1
 }
 
 # Get config values
@@ -82,14 +116,90 @@ get_dtype() {
     fi
 }
 
+# Get provider name (flexibel aus Config oder Default)
+get_provider_name() {
+    if [ -f "$CONFIG_FILE" ] && [ -s "$CONFIG_FILE" ]; then
+        local name
+        name=$(grep '"provider_name"' "$CONFIG_FILE" 2>/dev/null | sed 's/.*: *"//;s/".*//' | head -n1)
+        if [ -n "$name" ]; then
+            echo "$name"
+            return
+        fi
+        name=$(grep '"name"' "$CONFIG_FILE" 2>/dev/null | sed 's/.*: *"//;s/".*//' | head -n1)
+        if [ -n "$name" ]; then
+            echo "$name"
+            return
+        fi
+    fi
+    echo "$BACKEND $(get_model)"
+}
+
+get_opencode_model() {
+    echo "mlx/$(get_model)"
+}
+
+get_opencode_config() {
+    local model="$(get_model)"
+    local port="$(get_port)"
+    echo "{\"provider\":{\"mlx\":{\"npm\":\"@ai-sdk/openai-compatible\",\"name\":\"MLX local\",\"options\":{\"baseURL\":\"http://localhost:${port}/v1\"},\"models\":{\"${model}\":{\"name\":\"${model}\"}}}},\"model\":\"$(get_opencode_model)\"}"
+}
+
+# Open OpenCode in Vordergrund mit lokalem Modell
+open_opencode() {
+    local model="$(get_model)"
+    local provider_name="$(get_provider_name)"
+    local opencode_model="$(get_opencode_model)"
+    
+    if pgrep -if "opencode" > /dev/null 2>&1; then
+        osascript -e 'tell application "OpenCode" to activate' 2>/dev/null
+        log "OpenCode ist bereits offen und im Vordergrund"
+        return 0
+    fi
+    
+    log "Oeffne OpenCode mit $provider_name ($model) und bringe in Vordergrund..."
+    
+    # App bevorzugen, sonst CLI in einem neuen Terminalfenster starten
+    if [ -d "/Applications/OpenCode.app" ] || [ -d "$HOME/Applications/OpenCode.app" ]; then
+        open -a "OpenCode" --args --model "$opencode_model" > /dev/null 2>&1 &
+    elif command -v opencode &> /dev/null; then
+        local opencode_config="$(get_opencode_config)"
+        osascript <<APPLESCRIPT >/dev/null 2>&1
+tell application "Terminal"
+    activate
+    do script "OPENCODE_CONFIG_CONTENT='${opencode_config}' opencode --model '${opencode_model}'; echo; echo 'OpenCode beendet. Dieses Terminal bleibt fuer weitere Befehle offen.'; exec zsh -l"
+end tell
+APPLESCRIPT
+    else
+        log "ERROR: Keine OpenCode App oder CLI gefunden"
+        return 1
+    fi
+    
+    sleep 3
+    osascript -e 'tell application "OpenCode" to activate' 2>/dev/null
+    sleep 2
+    
+    if ! pgrep -if "opencode" > /dev/null 2>&1; then
+        log "WARNING: OpenCode konnte nicht geoeffnet werden"
+        return 1
+    fi
+    
+    log "OpenCode im Vordergrund mit $provider_name ($model)"
+    return 0
+}
+
 # Start MLX Server
 start_mlx() {
+    local provider_name="$(get_provider_name)"
+    local model="$(get_model)"
+    
     check_python
     check_opencode
     
     if [ -f "$LOCK_FILE" ]; then
         if pgrep -f "mlx_lm.server" > /dev/null 2>&1; then
-            log "MLX Server laeuft bereits"
+            log "$provider_name Server laeuft bereits"
+            configure_opencode
+            open_opencode
             return 0
         fi
     fi
@@ -116,7 +226,7 @@ start_mlx() {
     local PORT="$(get_port)"
     local REPO="$(get_repo)"
     
-    log "Starte MLX Server mit $(get_model) auf Port $PORT..."
+    log "Starte $provider_name Server mit $model auf Port $PORT..."
     
     cd ~/Spark-MLX-LLM
     source .venv/bin/activate
@@ -124,7 +234,7 @@ start_mlx() {
     sleep 5
     
     if ! pgrep -f "mlx_lm.server" > /dev/null 2>&1; then
-        log "ERROR: MLX Server konnte nicht gestartet werden!"
+        log "ERROR: $provider_name Server konnte nicht gestartet werden!"
         echo "Pruefe: $LOG_FILE"
         return 1
     fi
@@ -132,59 +242,98 @@ start_mlx() {
     touch "$LOCK_FILE"
     configure_opencode
     
-    echo ""
-    log "MLX Server gestartet!"
-    echo "Server: http://localhost:$PORT"
-    echo "Modell: $(get_model)"
-    echo ""
-    return 0
-}
-
-# Stop MLX Server
-stop_mlx() {
-    if ! pgrep -f "mlx_lm.server" > /dev/null 2>&1; then
-        log "MLX Server laeuft nicht"
-        rm -f "$LOCK_FILE"
-        return 0
+    # Schließe OpenCode, falls offen, um mit neuer Konfiguration zu starten
+    if pgrep -if "opencode" > /dev/null 2>&1; then
+        log "Schließe OpenCode für Neuladen der Konfiguration..."
+        pkill -f "OpenCode" 2>/dev/null
+        pkill -f "opencode" 2>/dev/null
+        sleep 2
     fi
     
-    log "Stoppe MLX Server..."
-    pkill -f "mlx_lm.server" 2>/dev/null
-    sleep 2
-    if pgrep -f "mlx_lm.server" > /dev/null 2>&1; then
-        pkill -9 -f "mlx_lm.server" 2>/dev/null
-        sleep 1
-    fi
-    rm -f "$LOCK_FILE"
-    log "MLX Server gestoppt"
+    open_opencode
+    
+    log "$provider_name Server gestartet!"
+    echo ""
     return 0
 }
 
-# Configure OpenCode
+# Stop MLX Server + OpenCode
+stop_mlx() {
+    local provider_name="$(get_provider_name)"
+    local model="$(get_model)"
+    local port="$(get_port)"
+    
+    # Stoppe MLX Server
+    if pgrep -f "mlx_lm.server" > /dev/null 2>&1; then
+        log "Stoppe $provider_name Server..."
+        pkill -f "mlx_lm.server" 2>/dev/null
+        sleep 2
+        if pgrep -f "mlx_lm.server" > /dev/null 2>&1; then
+            pkill -9 -f "mlx_lm.server" 2>/dev/null
+            sleep 1
+        fi
+    else
+        log "$provider_name Server laeuft nicht"
+    fi
+    
+    # Stoppe OpenCode (macOS App richtig beenden)
+    if pgrep -if "opencode" > /dev/null 2>&1; then
+        log "Stoppe OpenCode..."
+        osascript -e 'tell application "OpenCode" to quit' 2>/dev/null
+        sleep 2
+        # Falls osascript nicht funktioniert, pkill als Fallback
+        if pgrep -f "OpenCode" > /dev/null 2>&1; then
+            pkill -f "OpenCode" 2>/dev/null
+            sleep 1
+        fi
+    fi
+    
+    rm -f "$LOCK_FILE"
+    log "Alles gestoppt: $provider_name + OpenCode"
+    echo ""
+    echo "=========================================="
+    echo "  Provider:  $provider_name"
+    echo "  Framework: OpenCode"
+    echo "  KI-Modell: $model"
+    echo "  Server:    http://localhost:$port"
+    echo "  Status:    GESTOPPT"
+    echo "=========================================="
+    echo ""
+    return 0
+}
+
+# Configure OpenCode via CLI
 configure_opencode() {
-    local config_dir="$HOME/Library/Application Support/OpenCode/User"
-    local settings_file="$config_dir/settings.json"
     local port="$(get_port)"
     local model="$(get_model)"
+    local provider_name="$(get_provider_name)"
     
-    mkdir -p "$config_dir"
+    log "Konfiguriere OpenCode CLI fuer $provider_name..."
     
-    cat > "$settings_file" << EOF
-{
-  "providers": [
-    {
-      "name": "MLX Spark",
-      "baseUrl": "http://localhost:$port",
-      "apiKey": "not-needed",
-      "enabled": true,
-      "models": ["$model"]
-    }
-  ],
-  "defaultProvider": "MLX Spark"
-}
-EOF
+    # Provider hinzufuegen oder aktualisieren
+    if opencode providers list 2>/dev/null | grep -q "$provider_name"; then
+        # Provider existiert bereits - aktualisieren
+        opencode providers update "$provider_name" \
+            --url "http://localhost:$port" \
+            --api-key "not-needed" 2>/dev/null
+    else
+        # Provider neu hinzufuegen
+        opencode providers add "$provider_name" \
+            --url "http://localhost:$port" \
+            --api-key "not-needed" 2>/dev/null
+    fi
     
-    log "OpenCode konfiguriert"
+    # Modell dem Provider hinzufuegen
+    opencode providers models add "$provider_name" "$model" 2>/dev/null
+    
+    # Als Standard setzen
+    opencode settings set defaultProvider "$provider_name" 2>/dev/null
+    opencode settings set defaultModel "$model" 2>/dev/null
+    
+    # Provider aktivieren
+    opencode providers enable "$provider_name" 2>/dev/null
+    
+    log "OpenCode fuer $provider_name konfiguriert (Standard: $model)"
 }
 
 # Check if running
@@ -192,10 +341,24 @@ is_running() {
     [ -f "$LOCK_FILE" ] && pgrep -f "mlx_lm.server" > /dev/null 2>&1
 }
 
+# Get backend display name (flexibel) - verwendet Provider-Name
+get_backend_display() {
+    get_provider_name
+}
+
 # Setup config
 setup_config() {
+    local provider_name="$(get_provider_name)"
+    local model="$(get_model)"
+    
     echo ""
-    echo "MLX Spark - Konfiguration anpassen"
+    echo "=========================================="
+    echo "  Provider:  $provider_name"
+    echo "  Framework: OpenCode"
+    echo "  Aktuelle KI: $model"
+    echo "=========================================="
+    echo ""
+    echo "$provider_name - Konfiguration anpassen"
     echo ""
     
     local model="Spark-X2.5-4B"
@@ -218,7 +381,7 @@ setup_config() {
     
     if [[ $REPLY =~ ^[Jj][Aa]?$ ]]; then
         echo ""
-        echo "Lass leer für Standardwert"
+        echo "Lass leer fuer Standardwert"
         echo ""
         echo -n "Modell [Spark-X2.5-4B]: "
         read -r
@@ -241,6 +404,11 @@ setup_config() {
         dtype="${REPLY:-bfloat16}"
     fi
     
+    # Provider Name
+    echo -n "Provider Name [$model] (optional): "
+    read -r
+    local provider_input="${REPLY:-}"
+    
     cat > "$CONFIG_FILE" << EOF
 {
   "mlx": {
@@ -249,42 +417,57 @@ setup_config() {
     "device": "$device",
     "dtype": "$dtype",
     "port": $port
-  }
+  },
+  "provider_name": "${provider_input:-$model}"
 }
 EOF
     
     echo ""
     log "Konfiguration gespeichert"
-    echo "Neue Einstellungen:"
-    echo "  Modell: $model"
+    echo "=========================================="
+    echo "  Provider:  ${provider_input:-$model}"
+    echo "  Framework: OpenCode"
+    echo "  Neue KI:   $model"
     echo "  Repository: $repo"
-    echo "  Port: $port"
-    echo "  Device: $device"
-    echo "  Dtype: $dtype"
+    echo "  Port:       $port"
+    echo "  Device:     $device"
+    echo "  Dtype:      $dtype"
+    echo "=========================================="
     echo ""
 }
 
 # Main menu
 show_menu() {
+    local provider_name="$(get_provider_name)"
+    local model="$(get_model)"
+    
     while true; do
         echo ""
-        echo "Local Dev - MLX Spark + OpenCode"
+        echo "=========================================="
+        echo "  Local Dev - KI Provider Manager"
+        echo "=========================================="
         echo ""
+        echo "  Provider:  $provider_name"
+        echo "  Framework: OpenCode"
+        echo "  KI-Modell:  $model"
         
         if is_running; then
-            echo "Status: LAEUFT [Port $(get_port), Modell: $(get_model)]"
+            echo "  Status:     LAEUFT [Port: $(get_port)]"
         else
-            echo "Status: GESTOPPT"
+            echo "  Status:     GESTOPPT"
         fi
         
         echo ""
-        echo "1) Config starten     - MLX Server + OpenCode starten"
-        echo "2) Config stoppen     - MLX Server beenden"
-        echo "3) Config anpassen    - Einstellungen aendern"
-        echo "4) Beenden           - Skript schliessen"
+        echo "=========================================="
+        echo "  Verfuegbare Aktionen:"
+        echo "=========================================="
         echo ""
-        
-        echo -n "Wahl (1-4): "
+        echo "  1) Provider starten    - $provider_name Server + OpenCode starten"
+        echo "  2) Provider stoppen    - $provider_name Server + OpenCode beenden"
+        echo "  3) Provider anpassen   - KI/Provider Einstellungen"
+        echo "  4) Beenden            - Skript schliessen"
+        echo ""
+        echo -n "  Wahl (1-4): "
         read -r
         echo ""
         
@@ -293,14 +476,15 @@ show_menu() {
                 if ! is_running; then
                     start_mlx
                 else
-                    echo "MLX Server laeuft bereits!"
+                    echo "$provider_name Server laeuft bereits!"
+                    open_opencode
                 fi
                 ;;
             2)
                 if is_running; then
                     stop_mlx
                 else
-                    echo "MLX Server ist bereits gestoppt!"
+                    echo "$provider_name Server ist bereits gestoppt!"
                 fi
                 ;;
             3)
@@ -338,14 +522,24 @@ main() {
     "device": "gpu",
     "dtype": "bfloat16",
     "port": 8000
-  }
+  },
+  "provider_name": "MLX Spark-X2.5-4B"
 }
 EOF
         log "Standardkonfiguration erstellt"
     fi
     
-    # Show menu
-    show_menu
+    # Auto-Start: Wenn nichts laeuft, direkt starten
+    if ! is_running; then
+        local provider_name="$(get_provider_name)"
+        log "Auto-Start: $provider_name wird automatisch gestartet..."
+        start_mlx
+        # Nach dem Start: Zeige Menü für weitere Aktionen
+        show_menu
+    else
+        # Wenn schon laeuft: Zeige Menü
+        show_menu
+    fi
 }
 
 main

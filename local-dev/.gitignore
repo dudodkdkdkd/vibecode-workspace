@@ -7,6 +7,7 @@ mlx-config.json
 # Lock-Dateien
 .ollama-opencode.lock
 .mlx-spark.lock
+*.lock
 
 # Log-Dateien
 *.log
