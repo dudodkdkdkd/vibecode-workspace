@@ -12,6 +12,8 @@ LOCK_FILE="${LOCAL_DEV_DIR}/.ollama-opencode.lock"
 MLX_LOCK_FILE="${LOCAL_DEV_DIR}/.mlx-spark.lock"
 LOG_FILE="${LOCAL_DEV_DIR}/local-dev.log"
 MLX_LOG_FILE="${LOCAL_DEV_DIR}/mlx-spark.log"
+OPENCODE_NPM_PREFIX="$HOME/.npm-global"
+export PATH="${OPENCODE_NPM_PREFIX}:${HOME}/.local/bin:${HOME}/.opencode/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:${PATH:-}"
 
 # Logging
 log() {
@@ -51,17 +53,37 @@ check_python() {
 }
 
 check_opencode() {
-    if ! command -v open &> /dev/null; then
-        echo "open Befehl nicht gefunden!"
-        exit 1
+    if command -v opencode &> /dev/null || [ -d "/Applications/OpenCode.app" ] || [ -d "$HOME/Applications/OpenCode.app" ]; then
+        return 0
     fi
-    if [ ! -d "/Applications/OpenCode.app" ] && [ ! -d "~/Applications/OpenCode.app" ]; then
-        echo "OpenCode.app nicht gefunden!"
-        echo "   Installiere OpenCode in /Applications/ oder ~/Applications/"
-        echo -n "Druecke Enter zum Beenden..."
-        read -r
-        exit 1
+
+    echo "OpenCode ist noch nicht installiert."
+    echo -n "Jetzt automatisch installieren? (ja/nein): "
+    read -r
+    if [[ $REPLY =~ ^[Jj][Aa]?$ ]]; then
+        if ! command -v npm &> /dev/null; then
+            echo "npm wurde nicht gefunden. Bitte zuerst Node.js installieren (z. B. brew install node)."
+            exit 1
+        fi
+        mkdir -p "$OPENCODE_NPM_PREFIX"
+        npm config set prefix "$OPENCODE_NPM_PREFIX" >/dev/null 2>&1
+        local path_line='export PATH="$HOME/.npm-global:$HOME/.local/bin:$HOME/.opencode/bin:$PATH"'
+        if ! grep -Fqx "$path_line" "$HOME/.zprofile" 2>/dev/null; then
+            printf '\n# OpenCode CLI\n%s\n' "$path_line" >> "$HOME/.zprofile"
+        fi
+        export PATH="${OPENCODE_NPM_PREFIX}:${HOME}/.local/bin:${HOME}/.opencode/bin:${PATH}"
+        echo "Installiere OpenCode CLI fuer deinen Benutzer..."
+        npm install --global opencode-ai || exit 1
+        command -v opencode &> /dev/null || {
+            echo "OpenCode wurde installiert, aber die CLI ist noch nicht im PATH sichtbar."
+            echo "Starte ein neues Terminal und fuehre das Programm erneut aus."
+            exit 1
+        }
+        return 0
     fi
+
+    echo "OpenCode wird benoetigt. Installiere es spaeter ueber das Setup."
+    exit 1
 }
 
 get_model() {
@@ -70,6 +92,20 @@ get_model() {
     else
         echo "deepseek-coder:6.7b"
     fi
+}
+
+get_opencode_model() {
+    local provider="$1"
+    local model="$2"
+    echo "${provider}/${model}"
+}
+
+get_opencode_config() {
+    local provider="$1"
+    local model="$2"
+    local port="$3"
+    local provider_name="${provider} (local)"
+    echo "{\"provider\":{\"${provider}\":{\"npm\":\"@ai-sdk/openai-compatible\",\"name\":\"${provider_name}\",\"options\":{\"baseURL\":\"http://localhost:${port}/v1\"},\"models\":{\"${model}\":{\"name\":\"${model}\"}}}},\"model\":\"$(get_opencode_model "$provider" "$model")\"}"
 }
 
 get_mlx_model() {
@@ -141,6 +177,9 @@ pull_model() {
         return 0
     else
         log "ERROR: Modell '$model' konnte nicht geladen werden!"
+        echo "Das konfigurierte Ollama-Modell '$model' ist nicht verfuegbar."
+        echo "Pruefe den Modellnamen mit: ollama list"
+        echo "Passe ihn in local-dev/ollama-config.json an oder installiere es mit: ollama pull '$model'"
         return 1
     fi
 }
@@ -188,14 +227,31 @@ EOF
 }
 
 start_opencode() {
-    if pgrep -f "OpenCode" > /dev/null 2>&1; then
+    local provider="${1:-ollama}"
+    local model="${2:-$(get_model)}"
+    local port="${3:-11434}"
+    local opencode_model="$(get_opencode_model "$provider" "$model")"
+    if pgrep -if "opencode" > /dev/null 2>&1; then
         log "OpenCode laeuft bereits"
         return 0
     fi
     log "Starte OpenCode..."
-    open -a "OpenCode" --args --user-data-dir="$HOME/Library/Application Support/OpenCode" > /dev/null 2>&1 &
+    if [ -d "/Applications/OpenCode.app" ] || [ -d "$HOME/Applications/OpenCode.app" ]; then
+        open -a "OpenCode" --args --user-data-dir="$HOME/Library/Application Support/OpenCode" --model "$opencode_model" > /dev/null 2>&1 &
+    elif command -v opencode &> /dev/null; then
+        local opencode_config="$(get_opencode_config "$provider" "$model" "$port")"
+        osascript <<APPLESCRIPT >/dev/null 2>&1
+tell application "Terminal"
+    activate
+    do script "OPENCODE_CONFIG_CONTENT='${opencode_config}' opencode --model '${opencode_model}'; echo; echo 'OpenCode beendet. Dieses Terminal bleibt fuer weitere Befehle offen.'; exec zsh -l"
+end tell
+APPLESCRIPT
+    else
+        log "ERROR: Keine OpenCode App oder CLI gefunden"
+        return 1
+    fi
     sleep 2
-    if ! pgrep -f "OpenCode" > /dev/null 2>&1; then
+    if ! pgrep -if "opencode" > /dev/null 2>&1; then
         log "ERROR: OpenCode konnte nicht gestartet werden!"
         return 1
     fi
@@ -204,18 +260,20 @@ start_opencode() {
 }
 
 stop_opencode() {
-    if ! pgrep -f "OpenCode" > /dev/null 2>&1; then
+    if ! pgrep -if "opencode" > /dev/null 2>&1; then
         log "OpenCode laeuft nicht"
         return 0
     fi
     log "Stoppe OpenCode..."
     pkill -f "OpenCode" 2>/dev/null
+    pkill -f "opencode" 2>/dev/null
     sleep 2
-    if pgrep -f "OpenCode" > /dev/null 2>&1; then
+    if pgrep -if "opencode" > /dev/null 2>&1; then
         killall "OpenCode" 2>/dev/null
+        killall "opencode" 2>/dev/null
         sleep 1
     fi
-    if pgrep -f "OpenCode" > /dev/null 2>&1; then
+    if pgrep -if "opencode" > /dev/null 2>&1; then
         log "OpenCode konnte nicht vollstaendig gestoppt werden"
         return 1
     fi
@@ -367,7 +425,7 @@ start_ollama_all() {
     local MODEL="$(get_model)"
     pull_model "$MODEL" || return 1
     configure_opencode_ollama
-    start_opencode || return 1
+    start_opencode ollama "$MODEL" 11434 || return 1
     touch "$LOCK_FILE"
     echo ""
     log "OLLAMA SYSTEM GESTARTET!"
@@ -525,7 +583,7 @@ show_menu() {
         else
             echo "MLX:    STOPPED"
         fi
-        if pgrep -f "OpenCode" > /dev/null 2>&1; then
+        if pgrep -if "opencode" > /dev/null 2>&1; then
             echo "OpenCode: RUNNING"
         else
             echo "OpenCode: STOPPED"
@@ -590,8 +648,8 @@ show_menu() {
                         fi
                     fi
                     start_mlx_spark
-                    if [ $? -eq 0 ] && ! pgrep -f "OpenCode" > /dev/null 2>&1; then
-                        start_opencode
+                    if [ $? -eq 0 ] && ! pgrep -if "opencode" > /dev/null 2>&1; then
+                        start_opencode mlx "$(get_mlx_model)" "$(get_mlx_port)"
                     fi
                 else
                     echo "MLX laeuft bereits!"
@@ -625,8 +683,8 @@ show_menu() {
                     fi
                     start_mlx_spark
                 fi
-                if ! pgrep -f "OpenCode" > /dev/null 2>&1; then
-                    start_opencode
+                if ! pgrep -if "opencode" > /dev/null 2>&1; then
+                    start_opencode mlx "$(get_mlx_model)" "$(get_mlx_port)"
                 fi
                 echo ""
                 echo "ALLE SYSTEME GESTARTET!"

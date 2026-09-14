@@ -117,6 +117,13 @@ OpenCode
 ### Für Ollama:
 - **Ollama** muss installiert sein (`which ollama` im Terminal testen)
   → [Installationsanleitung](https://ollama.com)
+- Das konfigurierte Modell muss in Ollama existieren. Prüfe es mit `ollama list` und passe bei Bedarf `local-dev/ollama-config.json` an.
+
+### Für OpenCode:
+- Beim ersten Start fragt das Programm, ob die OpenCode CLI automatisch installiert werden soll.
+- Dafür wird **Node.js/npm** benötigt (`brew install node`), Adminrechte sind nicht erforderlich.
+- Die CLI wird benutzerbezogen nach `~/.npm-global` installiert und in `~/.zprofile` zum PATH hinzugefügt.
+- OpenCode wird mit dem jeweils gestarteten Provider als `provider/modell` gestartet: Ollama mit `ollama/<modell>`, Spark mit `mlx/<modell>`.
 
 ### Für MLX (Spark-X2.5-4B):
 - **Python 3.9+** muss installiert sein
