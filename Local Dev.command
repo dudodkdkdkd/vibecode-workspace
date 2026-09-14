@@ -1,459 +1,317 @@
 #!/bin/zsh
 
 # =============================================
-# Local Dev - Ollama + OpenCode Manager
-# Ein Skript für ALLES: Setup, Start/Stop, Reset
+# Local Dev - MLX Spark + OpenCode Manager
+# Einfaches Skript: Starten, Stoppen, Config
 # =============================================
 
 SCRIPT_DIR="$(cd "$(dirname "${0}")" && pwd)"
 LOCAL_DEV_DIR="${SCRIPT_DIR}/local-dev"
-CONFIG_FILE="${LOCAL_DEV_DIR}/ollama-config.json"
-LOCK_FILE="${LOCAL_DEV_DIR}/.ollama-opencode.lock"
-LOG_FILE="${LOCAL_DEV_DIR}/local-dev.log"
+CONFIG_FILE="${LOCAL_DEV_DIR}/mlx-config.json"
+LOCK_FILE="${LOCAL_DEV_DIR}/.mlx-spark.lock"
+LOG_FILE="${LOCAL_DEV_DIR}/mlx-spark.log"
 
 # Logging
 log() {
     echo "[$(date +'%H:%M:%S')] $1" | tee -a "$LOG_FILE"
 }
 
-# Check if local-dev directory exists
-check_local_dev() {
-    if [ ! -d "$LOCAL_DEV_DIR" ]; then
-        echo "❌ ERROR: local-dev Verzeichnis nicht gefunden!"
-        echo "   Erwartet: ${LOCAL_DEV_DIR}"
-        exit 1
-    fi
-}
-
 # Check dependencies
-check_ollama() {
-    if ! command -v ollama &> /dev/null; then
-        echo "❌ Ollama ist nicht installiert!"
-        echo "   Installiere Ollama: curl -fsSL https://ollama.com/install.sh | sh"
-        read -p "Drücke Enter zum Beenden..." -r
+check_python() {
+    if ! command -v python3 &> /dev/null; then
+        echo "Python3 ist nicht installiert!"
+        echo "Installiere Python3: brew install python"
+        echo -n "Druecke Enter zum Beenden..."
+        read -r
         exit 1
     fi
 }
 
 check_opencode() {
+    if ! command -v open &> /dev/null; then
+        echo "open Befehl nicht gefunden!"
+        exit 1
+    fi
     if [ ! -d "/Applications/OpenCode.app" ] && [ ! -d "~/Applications/OpenCode.app" ]; then
-        echo "❌ OpenCode.app nicht gefunden!"
-        echo "   Installiere OpenCode in /Applications/ oder ~/Applications/"
-        read -p "Drücke Enter zum Beenden..." -r
+        echo "OpenCode.app nicht gefunden!"
+        echo "Installiere OpenCode in /Applications/ oder ~/Applications/"
+        echo -n "Druecke Enter zum Beenden..."
+        read -r
         exit 1
     fi
 }
 
-# Setup function
-setup_config() {
-    echo ""
-    echo "╔════════════════════════════════════════╗"
-    echo "║      Local Dev - Erstes Setup                   ║"
-    echo "╚════════════════════════════════════════╝"
-    echo ""
-    
-    echo "📝 Standardmodell auswählen:"
-    echo "   1) llama3       (empfohlen)"
-    echo "   2) mistral:7b   (schnell, gut für Code)"
-    echo "   3) phi3         (leicht)"
-    echo "   4) Benutzerdefiniert"
-    echo ""
-    read -p "Wähle eine Option (1-4) oder Enter für llama3: " -r
-    echo ""
-    
-    local model="llama3"
-    case $REPLY in
-        2|mistral)
-            model="mistral:7b"
-            ;;
-        3|phi3)
-            model="phi3"
-            ;;
-        4)
-            read -p "Gib den Modellnamen ein: " -r
-            model="$REPLY"
-            ;;
-    esac
-    
-    if [ -z "$model" ]; then
-        model="llama3"
-    fi
-    
-    echo "✅ Gewähltes Modell: $model"
-    echo ""
-    
-    cat > "$CONFIG_FILE" << EOF
-{
-  "model": "$model",
-  "ollama": {
-    "host": "localhost",
-    "port": 11434
-  }
-}
-EOF
-    
-    log "✅ Konfiguration erstellt: $CONFIG_FILE (Modell: $model)"
-    echo "✅ Konfiguration gespeichert!"
-    echo ""
-}
-
-# Get model from config
+# Get config values
 get_model() {
     if [ -f "$CONFIG_FILE" ] && [ -s "$CONFIG_FILE" ]; then
-        grep -A1 '"model"' "$CONFIG_FILE" | tail -n1 | tr -d ' "{},' | head -n1
+        grep '"model"' "$CONFIG_FILE" | sed 's/.*: *"//;s/".*//' | head -n1
     else
-        echo "llama3"
+        echo "Spark-X2.5-4B"
     fi
 }
 
-# Get OpenCode app path
-get_opencode_path() {
-    if [ -d "/Applications/OpenCode.app" ]; then
-        echo "/Applications/OpenCode.app"
-    elif [ -d "~/Applications/OpenCode.app" ]; then
-        echo "~/Applications/OpenCode.app"
+get_repo() {
+    if [ -f "$CONFIG_FILE" ] && [ -s "$CONFIG_FILE" ]; then
+        grep '"repository"' "$CONFIG_FILE" | sed 's/.*: *"//;s/".*//' | head -n1
     else
-        echo ""
+        echo "XHToken/Spark-X2.5-4B"
     fi
 }
 
-# Start Ollama
-start_ollama() {
-    if pgrep -x "ollama" > /dev/null 2>&1; then
-        log "✅ Ollama läuft bereits"
-        return 0
+get_port() {
+    if [ -f "$CONFIG_FILE" ] && [ -s "$CONFIG_FILE" ]; then
+        grep '"port"' "$CONFIG_FILE" | sed 's/.*: *//;s/[^0-9].*//' | head -n1
+    else
+        echo "8000"
+    fi
+}
+
+get_device() {
+    if [ -f "$CONFIG_FILE" ] && [ -s "$CONFIG_FILE" ]; then
+        grep '"device"' "$CONFIG_FILE" | sed 's/.*: *"//;s/".*//' | head -n1
+    else
+        echo "gpu"
+    fi
+}
+
+get_dtype() {
+    if [ -f "$CONFIG_FILE" ] && [ -s "$CONFIG_FILE" ]; then
+        grep '"dtype"' "$CONFIG_FILE" | sed 's/.*: *"//;s/".*//' | head -n1
+    else
+        echo "bfloat16"
+    fi
+}
+
+# Start MLX Server
+start_mlx() {
+    check_python
+    check_opencode
+    
+    if [ -f "$LOCK_FILE" ]; then
+        if pgrep -f "mlx_lm.server" > /dev/null 2>&1; then
+            log "MLX Server laeuft bereits"
+            return 0
+        fi
     fi
     
-    log "🚀 Starte Ollama..."
-    ollama serve > /dev/null 2>&1 &
-    sleep 3
+    if [ ! -d "$HOME/Spark-MLX-LLM" ]; then
+        echo "Spark-MLX-LLM ist nicht installiert!"
+        echo -n "Jetzt installieren? (ja/nein): "
+        read -r
+        if [[ $REPLY =~ ^[Jj][Aa]?$ ]]; then
+            log "Installiere Spark-MLX-LLM..."
+            cd ~
+            git clone https://github.com/XHToken/Spark-MLX-LLM.git ~/Spark-MLX-LLM 2>> "$LOG_FILE"
+            cd ~/Spark-MLX-LLM
+            python3 -m venv .venv 2>> "$LOG_FILE"
+            source .venv/bin/activate
+            pip install -e . 2>> "$LOG_FILE"
+            deactivate
+            echo "Spark-MLX-LLM installiert!"
+        else
+            return 1
+        fi
+    fi
     
-    if ! pgrep -x "ollama" > /dev/null 2>&1; then
-        log "❌ ERROR: Ollama konnte nicht gestartet werden!"
-        echo "❌ Ollama-Start fehlgeschlagen!"
+    local PORT="$(get_port)"
+    local REPO="$(get_repo)"
+    
+    log "Starte MLX Server mit $(get_model) auf Port $PORT..."
+    
+    cd ~/Spark-MLX-LLM
+    source .venv/bin/activate
+    nohup mlx_lm.server --model "$REPO" --port $PORT >> "$LOG_FILE" 2>&1 &
+    sleep 5
+    
+    if ! pgrep -f "mlx_lm.server" > /dev/null 2>&1; then
+        log "ERROR: MLX Server konnte nicht gestartet werden!"
+        echo "Pruefe: $LOG_FILE"
         return 1
     fi
     
-    log "✅ Ollama gestartet (Port 11434)"
+    touch "$LOCK_FILE"
+    configure_opencode
+    
+    echo ""
+    log "MLX Server gestartet!"
+    echo "Server: http://localhost:$PORT"
+    echo "Modell: $(get_model)"
+    echo ""
     return 0
 }
 
-# Stop Ollama
-stop_ollama() {
-    if ! pgrep -x "ollama" > /dev/null 2>&1; then
-        log "✅ Ollama läuft nicht"
+# Stop MLX Server
+stop_mlx() {
+    if ! pgrep -f "mlx_lm.server" > /dev/null 2>&1; then
+        log "MLX Server laeuft nicht"
+        rm -f "$LOCK_FILE"
         return 0
     fi
     
-    log "🛑 Stoppe Ollama..."
-    pkill -x "ollama" 2>/dev/null
+    log "Stoppe MLX Server..."
+    pkill -f "mlx_lm.server" 2>/dev/null
     sleep 2
-    
-    if pgrep -x "ollama" > /dev/null 2>&1; then
-        log "❌ ERROR: Ollama konnte nicht gestoppt werden!"
-        return 1
+    if pgrep -f "mlx_lm.server" > /dev/null 2>&1; then
+        pkill -9 -f "mlx_lm.server" 2>/dev/null
+        sleep 1
     fi
-    
-    log "✅ Ollama gestoppt"
+    rm -f "$LOCK_FILE"
+    log "MLX Server gestoppt"
     return 0
-}
-
-# Pull model
-pull_model() {
-    local model="$1"
-    
-    if ollama list | grep -q "$model"; then
-        log "✅ Modell '$model' ist bereits geladen"
-        return 0
-    fi
-    
-    log "📥 Lade Modell '$model'..."
-    if ollama pull "$model" >> "$LOG_FILE" 2>&1; then
-        log "✅ Modell '$model' geladen"
-        return 0
-    else
-        log "❌ ERROR: Modell '$model' konnte nicht geladen werden!"
-        return 1
-    fi
-}
-
-# Remove model from RAM
-remove_model() {
-    local model="$1"
-    
-    if ! ollama list | grep -q "$model"; then
-        log "✅ Modell '$model' ist nicht im RAM"
-        return 0
-    fi
-    
-    log "🗑️  Entferne Modell '$model' aus RAM..."
-    if ollama rm "$model" >> "$LOG_FILE" 2>&1; then
-        log "✅ Modell '$model' aus RAM entfernt"
-        return 0
-    else
-        log "❌ ERROR: Modell '$model' konnte nicht entfernt werden!"
-        return 1
-    fi
 }
 
 # Configure OpenCode
 configure_opencode() {
-    local opencode_path="$(get_opencode_path)"
     local config_dir="$HOME/Library/Application Support/OpenCode/User"
     local settings_file="$config_dir/settings.json"
+    local port="$(get_port)"
+    local model="$(get_model)"
     
     mkdir -p "$config_dir"
     
-    if [ -f "$settings_file" ]; then
-        cp "$settings_file" "$settings_file.bak"
-    fi
-    
     cat > "$settings_file" << EOF
 {
-  "ollama.baseUrl": "http://localhost:11434",
-  "ollama.enabled": true,
-  "ollama.defaultModel": "$(get_model)"
+  "providers": [
+    {
+      "name": "MLX Spark",
+      "baseUrl": "http://localhost:$port",
+      "apiKey": "not-needed",
+      "enabled": true,
+      "models": ["$model"]
+    }
+  ],
+  "defaultProvider": "MLX Spark"
 }
 EOF
     
-    log "✅ OpenCode für Ollama konfiguriert"
+    log "OpenCode konfiguriert"
 }
 
-# Start OpenCode
-start_opencode() {
-    if pgrep -f "OpenCode" > /dev/null 2>&1; then
-        log "✅ OpenCode läuft bereits"
-        return 0
-    fi
-    
-    log "🚀 Starte OpenCode..."
-    open -a "OpenCode" --args --user-data-dir="$HOME/Library/Application Support/OpenCode" > /dev/null 2>&1 &
-    sleep 2
-    
-    if ! pgrep -f "OpenCode" > /dev/null 2>&1; then
-        log "❌ ERROR: OpenCode konnte nicht gestartet werden!"
-        return 1
-    fi
-    
-    log "✅ OpenCode gestartet"
-    return 0
-}
-
-# Stop OpenCode
-stop_opencode() {
-    if ! pgrep -f "OpenCode" > /dev/null 2>&1; then
-        log "✅ OpenCode läuft nicht"
-        return 0
-    fi
-    
-    log "🛑 Stoppe OpenCode..."
-    pkill -f "OpenCode" 2>/dev/null
-    sleep 2
-    
-    if pgrep -f "OpenCode" > /dev/null 2>&1; then
-        killall "OpenCode" 2>/dev/null
-        sleep 1
-    fi
-    
-    if pgrep -f "OpenCode" > /dev/null 2>&1; then
-        log "⚠️  OpenCode konnte nicht vollständig gestoppt werden"
-        return 1
-    fi
-    
-    log "✅ OpenCode gestoppt"
-    return 0
-}
-
-# Reset ALL models from disk
-reset_all_models() {
-    log "🗑️  Deinstalliere ALLE Ollama-Modelle von der Festplatte..."
-    local ollama_models_dir="$HOME/.ollama/models"
-    
-    if [ ! -d "$ollama_models_dir" ]; then
-        log "✅ Kein Ollama-Modellverzeichnis gefunden"
-        return 0
-    fi
-    
-    local model_dirs
-    model_dirs=$(ls -1 "$ollama_models_dir" 2>/dev/null | grep -v "^\.")
-    
-    if [ -z "$model_dirs" ]; then
-        log "✅ Keine Modelle zum Deinstallieren gefunden"
-        return 0
-    fi
-    
-    local count=0
-    for model_dir in $model_dirs; do
-        if [ -n "$model_dir" ]; then
-            local model_path="$ollama_models_dir/$model_dir"
-            if [ -d "$model_path" ]; then
-                log "   Deinstalliere Modell: $model_dir"
-                rm -rf "$model_path"
-                ((count++))
-            fi
-        fi
-    done
-    log "✅ $count Modell(e) deinstalliert"
-}
-
-# Clean up Ollama files
-cleanup_ollama_files() {
-    log "🧹 Bereinige Ollama-Cache..."
-    
-    if [ -d "$HOME/.ollama/manifests" ]; then
-        rm -f "$HOME/.ollama/manifests"/*.json 2>/dev/null
-        log "   Manifest-Dateien bereinigt"
-    fi
-    
-    if [ -d "$HOME/.ollama/blobs" ]; then
-        rm -rf "$HOME/.ollama/blobs"/* 2>/dev/null
-        log "   Blob-Cache bereinigt"
-    fi
-}
-
-# Check if system is running
+# Check if running
 is_running() {
-    [ -f "$LOCK_FILE" ] && pgrep -x "ollama" > /dev/null 2>&1
+    [ -f "$LOCK_FILE" ] && pgrep -f "mlx_lm.server" > /dev/null 2>&1
 }
 
-# Start everything
-start_all() {
-    check_ollama
-    check_opencode
-    
-    start_ollama || exit 1
-    
-    local MODEL="$(get_model)"
-    pull_model "$MODEL" || exit 1
-    
-    configure_opencode
-    start_opencode || exit 1
-    
-    touch "$LOCK_FILE"
-    
+# Setup config
+setup_config() {
     echo ""
-    log "✅ ALLES GESTARTET!"
-    echo "✅ Ollama läuft auf Port 11434"
-    echo "✅ Modell '$MODEL' geladen"
-    echo "✅ OpenCode konfiguriert und gestartet"
-    echo ""
-    echo "💡 Doppelklick auf das Skript zum STOPPEN"
-}
-
-# Stop everything
-stop_all() {
-    stop_opencode
-    stop_ollama
-    
-    local MODEL="$(get_model)"
-    remove_model "$MODEL"
-    
-    rm -f "$LOCK_FILE"
-    
-    echo ""
-    log "✅ ALLES GESTOPPT!"
-    echo "✅ OpenCode geschlossen"
-    echo "✅ Modell aus RAM entfernt"
-    echo "✅ Ollama gestoppt"
-}
-
-# Full reset
-full_reset() {
-    echo ""
-    echo "⚠️  WARNUNG: Diese Aktion wird ALLES zurücksetzen:"
-    echo "   - OpenCode stoppen"
-    echo "   - Ollama stoppen"
-    echo "   - ALLE Modelle aus RAM entfernen"
-    echo "   - ALLE Modelle von der Festplatte DEINSTALLIEREN"
-    echo ""
-    echo "💥 Diese Aktion kann nicht rückgängig gemacht werden!"
-    echo ""
-    read -p "Möchtest du wirklich ALLE Ollama-Modelle deinstallieren? (ja/nein): " -r
+    echo "MLX Spark - Konfiguration anpassen"
     echo ""
     
-    if [[ ! $REPLY =~ ^[Jj][Aa]?$ ]]; then
-        log "❌ Reset abgebrochen durch Benutzer"
-        echo "❌ Abgebrochen. Keine Änderungen vorgenommen."
-        return
+    local model="Spark-X2.5-4B"
+    local repo="XHToken/Spark-X2.5-4B"
+    local port="8000"
+    local device="gpu"
+    local dtype="bfloat16"
+    
+    echo "Aktuelle Einstellungen:"
+    echo "  Modell: $model"
+    echo "  Repository: $repo"
+    echo "  Port: $port"
+    echo "  Device: $device"
+    echo "  Dtype: $dtype"
+    echo ""
+    
+    echo "Moechtest du Aenderungen vornehmen? (ja/nein):"
+    echo -n " > "
+    read -r
+    
+    if [[ $REPLY =~ ^[Jj][Aa]?$ ]]; then
+        echo ""
+        echo "Lass leer für Standardwert"
+        echo ""
+        echo -n "Modell [Spark-X2.5-4B]: "
+        read -r
+        model="${REPLY:-Spark-X2.5-4B}"
+        
+        echo -n "Repository [XHToken/Spark-X2.5-4B]: "
+        read -r
+        repo="${REPLY:-XHToken/Spark-X2.5-4B}"
+        
+        echo -n "Port [8000]: "
+        read -r
+        port="${REPLY:-8000}"
+        
+        echo -n "Device [gpu/cpu] [gpu]: "
+        read -r
+        device="${REPLY:-gpu}"
+        
+        echo -n "Dtype [bfloat16/float16] [bfloat16]: "
+        read -r
+        dtype="${REPLY:-bfloat16}"
     fi
     
-    stop_all
-    reset_all_models
-    cleanup_ollama_files
+    cat > "$CONFIG_FILE" << EOF
+{
+  "mlx": {
+    "model": "$model",
+    "repository": "$repo",
+    "device": "$device",
+    "dtype": "$dtype",
+    "port": $port
+  }
+}
+EOF
     
     echo ""
-    log "✅ ALLES ZURÜCKGESETZT!"
-    echo "✅ Alle Modelle deinstalliert"
-    echo "✅ Cache bereinigt"
+    log "Konfiguration gespeichert"
+    echo "Neue Einstellungen:"
+    echo "  Modell: $model"
+    echo "  Repository: $repo"
+    echo "  Port: $port"
+    echo "  Device: $device"
+    echo "  Dtype: $dtype"
+    echo ""
 }
 
-# Show main menu
+# Main menu
 show_menu() {
     while true; do
         echo ""
-        echo "╔════════════════════════════════════════╗"
-        echo "║          Local Dev - Ollama Manager            ║"
-        echo "╚════════════════════════════════════════╝"
+        echo "Local Dev - MLX Spark + OpenCode"
         echo ""
         
-        # Check status
         if is_running; then
-            echo "🟢 Status: LÄUFT (Ollama + OpenCode aktiv)"
+            echo "Status: LAEUFT [Port $(get_port), Modell: $(get_model)]"
         else
-            echo "🔴 Status: GESTOPPT"
-        fi
-        
-        if [ -f "$CONFIG_FILE" ] && [ -s "$CONFIG_FILE" ]; then
-            echo "✅ Konfiguration: Vorhanden (Modell: $(get_model))"
-        else
-            echo "⚠️  Konfiguration: FEHLEND (Setup erforderlich)"
+            echo "Status: GESTOPPT"
         fi
         
         echo ""
-        echo "Wähle eine Aktion:"
-        echo "  1) Starten          - Ollama + OpenCode starten"
-        echo "  2) Stoppen          - Alles beenden"
-        echo "  3) Reset            - ALLES zurücksetzen + Modelle deinstallieren"
-        echo "  4) Setup            - Konfiguration anpassen"
-        echo "  5) Beenden          - Skript schließen"
+        echo "1) Config starten     - MLX Server + OpenCode starten"
+        echo "2) Config stoppen     - MLX Server beenden"
+        echo "3) Config anpassen    - Einstellungen aendern"
+        echo "4) Beenden           - Skript schliessen"
         echo ""
         
-        read -p "Deine Wahl (1-5): " -r
+        echo -n "Wahl (1-4): "
+        read -r
         echo ""
         
         case $REPLY in
             1)
                 if ! is_running; then
-                    # Check config
-                    if [ ! -f "$CONFIG_FILE" ] || [ ! -s "$CONFIG_FILE" ]; then
-                        setup_config
-                    fi
-                    start_all
+                    start_mlx
                 else
-                    echo "⚠️  System läuft bereits!"
-                    read -p "Drücke Enter zum Fortfahren..." -r
+                    echo "MLX Server laeuft bereits!"
                 fi
                 ;;
             2)
                 if is_running; then
-                    stop_all
+                    stop_mlx
                 else
-                    echo "⚠️  System ist bereits gestoppt!"
-                    read -p "Drücke Enter zum Fortfahren..." -r
+                    echo "MLX Server ist bereits gestoppt!"
                 fi
                 ;;
             3)
-                full_reset
-                ;;
-            4)
                 setup_config
                 ;;
-            5)
-                log "✅ Skript beendet"
+            4)
+                log "Skript beendet"
                 exit 0
                 ;;
             *)
-                echo "⚠️  Ungültige Auswahl!"
+                echo "Ungueltige Auswahl!"
                 ;;
         esac
     done
@@ -461,14 +319,29 @@ show_menu() {
 
 # Main
 main() {
-    check_local_dev
+    # Check local-dev directory
+    if [ ! -d "$LOCAL_DEV_DIR" ]; then
+        echo "local-dev Verzeichnis nicht gefunden!"
+        exit 1
+    fi
     
-    # Create log file if it doesn't exist
+    # Create log file
     touch "$LOG_FILE"
     
-    # Check if config exists
+    # Create default config if not exists
     if [ ! -f "$CONFIG_FILE" ] || [ ! -s "$CONFIG_FILE" ]; then
-        setup_config
+        cat > "$CONFIG_FILE" << EOF
+{
+  "mlx": {
+    "model": "Spark-X2.5-4B",
+    "repository": "XHToken/Spark-X2.5-4B",
+    "device": "gpu",
+    "dtype": "bfloat16",
+    "port": 8000
+  }
+}
+EOF
+        log "Standardkonfiguration erstellt"
     fi
     
     # Show menu
@@ -476,5 +349,4 @@ main() {
 }
 
 main
-
 exit 0
