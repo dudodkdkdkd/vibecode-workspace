@@ -73,48 +73,79 @@ function workspace(files, { selected = ['A', 'B'], autoStart = 'true' } = {}) {
     return JSON.parse(fs.readFileSync(files.output, 'utf8'));
 }
 
+test('setup offers the same ordered six terminals as the launcher defaults', () => {
+    const source = setupSource.replace('function run(argv) {', 'function configureRun(argv) {') + `
+function run() { return JSON.stringify(defaultTerminals()); }
+`;
+    const defaults = JSON.parse(jxa(source, []));
+    assert.deepEqual(defaults.map(({ name, type, cwd }) => ({ name, type, cwd })), [
+        { name: 'Frontend', type: 'Eigener Befehl', cwd: 'frontend' },
+        { name: 'Storybook', type: 'Eigener Befehl', cwd: 'frontend' },
+        { name: 'Codex 2', type: 'Codex 2', cwd: '' },
+        { name: 'Codex', type: 'Codex', cwd: '' },
+        { name: 'Claude', type: 'Claude Code', cwd: '' },
+        { name: 'agy', type: 'Antigravity', cwd: '' },
+    ]);
+    assert.equal(defaults[0].command, 'npm run dev');
+    assert.equal(defaults[1].command, 'npm run storybook');
+    assert.match(defaults[2].command, /CODEX_HOME="\$HOME\/\.codex-account2" exec codex --sandbox workspace-write --ask-for-approval never/);
+    assert.match(defaults[3].command, /exec codex --sandbox workspace-write --ask-for-approval never/);
+    assert.match(defaults[4].command, /exec claude --dangerously-skip-permissions/);
+    assert.match(defaults[5].command, /exec agy --dangerously-skip-permissions/);
+});
+
 test('setup stores counts, repeated agents, literal prompts and custom commands per repo', (t) => {
     const files = fixture(t);
     const prompt = "Check 'quotes', $HOME, $(touch nope), `id`, | and\nnew lines";
     const custom = "printf '%s\\n' 'hello | world' | cat";
     assert.equal(setup(files, [
-        ['A', 'B'], '4',
+        ['A', 'B'], '6',
         ['Claude Code'], prompt, 'Agent', '',
         ['Claude Code'], '', 'Agent', 'frontend',
         ['Codex'], '--looks-like-an-option', 'Codex', '',
+        ['Codex 2'], 'second account', 'Codex 2', '',
+        ['Antigravity'], 'turbo task', 'agy', '',
         ['Eigener Befehl'], custom, 'Server', '',
         '0',
     ]), 'saved');
     const saved = JSON.parse(fs.readFileSync(files.output, 'utf8'));
-    assert.equal(saved.projects[files.a].length, 4);
+    assert.equal(saved.projects[files.a].length, 6);
     assert.deepEqual(saved.projects[files.b], []);
     const terminals = saved.projects[files.a];
     assert.match(terminals[0].command, /claude --dangerously-skip-permissions/);
     assert.match(terminals[2].command, /codex --sandbox workspace-write --ask-for-approval never -- /);
-    assert.equal(terminals[3].command, custom);
+    assert.match(terminals[3].command, /CODEX_HOME="\$HOME\/\.codex-account2" exec codex --sandbox workspace-write --ask-for-approval never -- /);
+    assert.match(terminals[4].command, /agy --dangerously-skip-permissions --prompt-interactive /);
+    assert.equal(terminals[5].command, custom);
 
     // Execute generated agent commands against a fake CLI, never a real agent.
     const bin = path.join(files.dir, 'bin');
     fs.mkdirSync(bin);
-    for (const name of ['claude', 'codex']) {
+    for (const name of ['claude', 'codex', 'agy']) {
         fs.writeFileSync(path.join(bin, name), '#!/bin/zsh\nprintf "%s\\0" "$@"\n', { mode: 0o755 });
     }
-    for (const [index, flags, expectedPrompt] of [
-        [0, ['--dangerously-skip-permissions'], prompt],
-        [2, ['--sandbox', 'workspace-write', '--ask-for-approval', 'never'], '--looks-like-an-option'],
+    for (const [index, expectedArgs] of [
+        [0, ['--dangerously-skip-permissions', '--', prompt]],
+        [2, ['--sandbox', 'workspace-write', '--ask-for-approval', 'never', '--', '--looks-like-an-option']],
+        [3, ['--sandbox', 'workspace-write', '--ask-for-approval', 'never', '--', 'second account']],
+        [4, ['--dangerously-skip-permissions', '--prompt-interactive', 'turbo task']],
     ]) {
         const args = execFileSync('/bin/zsh', ['-c', terminals[index].command], {
             cwd: files.dir, env: { ...process.env, PATH: `${bin}:/usr/bin:/bin` },
         }).toString().split('\0').slice(0, -1);
-        assert.deepEqual(args, [...flags, '--', expectedPrompt]);
+        assert.deepEqual(args, expectedArgs);
     }
+    fs.writeFileSync(path.join(bin, 'codex'), '#!/bin/zsh\nprintf "%s" "$CODEX_HOME"\n', { mode: 0o755 });
+    assert.equal(execFileSync('/bin/zsh', ['-c', terminals[3].command], {
+        cwd: files.dir, env: { ...process.env, PATH: `${bin}:/usr/bin:/bin` },
+    }).toString(), path.join(process.env.HOME, '.codex-account2'));
     assert.equal(fs.existsSync(path.join(files.dir, 'nope')), false);
 
     fs.copyFileSync(files.output, files.saved);
     const result = workspace(files);
     assert.equal(result.folders.length, 2);
     assert.deepEqual(result.tasks.tasks.map((task) => task.label),
-        ['A · Agent', 'A · Agent (2)', 'A · Codex', 'A · Server']);
+        ['A · Agent', 'A · Agent (2)', 'A · Codex', 'A · Codex 2', 'A · agy', 'A · Server']);
     assert.equal(result.tasks.tasks[1].options.cwd, `${files.a}/frontend`);
     assert.equal(result.tasks.tasks[0].command, terminals[0].command);
     assert.ok(result.tasks.tasks.every((task) => task.runOptions.runOn === 'folderOpen'));
@@ -210,7 +241,7 @@ test('noninteractive setup preserves saved terminal settings and deduplicates fo
     assert.equal(fs.readFileSync(savedFile, 'utf8'), '{"version":1,"projects":{}}');
 });
 
-test('full launcher keeps Claude YOLO and Codex sandboxed without approvals, and applies per-repo overrides', (t) => {
+test('full launcher creates the ordered six-terminal stack and applies per-repo overrides', (t) => {
     const files = fixture(t);
     const script = path.join(files.dir, 'VibeCode Workspace.command');
     fs.writeFileSync(script, launcherSource);
@@ -239,15 +270,25 @@ source "$1"
         return JSON.parse(fs.readFileSync(path.join(files.dir, 'Vibe-Session.code-workspace')));
     };
     const defaults = launch().tasks.tasks;
-    assert.equal(defaults.length, 6);
+    assert.equal(defaults.length, 12);
+    assert.deepEqual(defaults.slice(0, 6).map((task) => task.label), [
+        'A · Frontend', 'A · Storybook', 'A · Codex 2',
+        'A · Codex', 'A · Claude', 'A · agy',
+    ]);
+    assert.equal(defaults[0].command, 'npm run dev');
+    assert.equal(defaults[0].options.cwd, `${files.a}/frontend`);
+    assert.equal(defaults[1].command, 'npm run storybook');
+    assert.equal(defaults[1].options.cwd, `${files.a}/frontend`);
     assert.equal(defaults.filter((task) => task.command.includes('exec claude --dangerously-skip-permissions')).length, 2);
-    assert.equal(defaults.filter((task) => task.command.includes('exec codex --sandbox workspace-write --ask-for-approval never')).length, 2);
+    assert.equal(defaults.filter((task) => task.command.includes('exec codex --sandbox workspace-write --ask-for-approval never')).length, 4);
+    assert.equal(defaults.filter((task) => task.command.includes('CODEX_HOME="$HOME/.codex-account2"')).length, 2);
+    assert.equal(defaults.filter((task) => task.command.includes('exec agy --dangerously-skip-permissions')).length, 2);
     const controlConfig = JSON.parse(fs.readFileSync(path.join(files.dir, 'remote', 'config.json')));
     assert.deepEqual(Object.keys(controlConfig).sort(), ['apps', 'keep_awake']);
     assert.equal(controlConfig.keep_awake, false);
     fs.writeFileSync(files.saved, JSON.stringify({ version: 1, projects: { [files.a]: [] } }));
     const tasks = launch().tasks.tasks;
-    assert.equal(tasks.length, 3);
+    assert.equal(tasks.length, 6);
     assert.ok(tasks.every((task) => task.label.startsWith('B · ')));
 
     // Three selected folders, each with several tasks, must have three colors.
@@ -257,12 +298,12 @@ source "$1"
     fs.unlinkSync(files.saved);
     fs.unlinkSync(path.join(files.dir, 'last-selection.txt'));
     const coloredTasks = launch().tasks.tasks;
-    assert.equal(coloredTasks.length, 9);
+    assert.equal(coloredTasks.length, 18);
     for (const [project, color] of [
         ['A', 'terminal.ansiBlue'], ['B', 'terminal.ansiGreen'], ['C', 'terminal.ansiMagenta'],
     ]) {
         const group = coloredTasks.filter((task) => task.presentation.group === project);
-        assert.equal(group.length, 3);
+        assert.equal(group.length, 6);
         assert.ok(group.every((task) => task.icon.id === 'terminal' && task.icon.color === color));
     }
 });

@@ -1,0 +1,18 @@
+{
+  "model": "llama3",
+  "ollama": {
+    "host": "localhost",
+    "port": 11434,
+    "serve_command": "ollama serve",
+    "pull_command": "ollama pull",
+    "remove_command": "ollama rm"
+  },
+  "opencode": {
+    "app_name": "OpenCode",
+    "config_path": "~/Library/Application Support/OpenCode/User/settings.json",
+    "ollama_settings": {
+      "ollama.baseUrl": "http://localhost:11434",
+      "ollama.enabled": true
+    }
+  }
+}

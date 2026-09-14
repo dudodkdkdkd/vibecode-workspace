@@ -1,0 +1,554 @@
+#!/bin/zsh
+#
+# ╔══════════════════════════════════════════════════════════════════════════════╗
+# ║                                                                              ║
+# ║   ██╗   ██╗██╗██████╗ ███████╗    ██╗    ██╗ ██████╗ ██████╗ ██╗  ██╗      ║
+# ║   ██║   ██║██║██╔══██╗██╔════╝    ██║    ██║██╔═══██╗██╔══██╗██║ ██╔╝      ║
+# ║   ██║   ██║██║██████╔╝█████╗      ██║ █╗ ██║██║   ██║██████╔╝█████╔╝       ║
+# ║   ╚██╗ ██╔╝██║██╔══██╗██╔══╝      ██║███╗██║██║   ██║██╔══██╗██╔═██╗       ║
+# ║    ╚████╔╝ ██║██████╔╝███████╗    ╚███╔███╔╝╚██████╔╝██║  ██║██║  ██╗      ║
+# ║     ╚═══╝  ╚═╝╚═════╝ ╚══════╝     ╚══╝╚══╝  ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝      ║
+# ║                                                                              ║
+# ║                    ┌─────────────────────────────┐                           ║
+# ║                    │  ◉  ◉  ◉    VIBE WORKSPACE │                           ║
+# ║                    ├─────────────────────────────┤                           ║
+# ║                    │                             │                           ║
+# ║                    │   ~/project-a    git:main   │                           ║
+# ║                    │      ├─ >_ terminal         │                           ║
+# ║                    │      ├─ >_ claude           │                           ║
+# ║                    │      └─ ⎇  git              │                           ║
+# ║                    │                             │                           ║
+# ║                    │   ~/project-b    git:dev    │                           ║
+# ║                    │      ├─ >_ terminal         │                           ║
+# ║                    │      ├─ >_ codex            │                           ║
+# ║                    │      └─ ⎇  git              │                           ║
+# ║                    │                             │                           ║
+# ║                    └─────────────────────────────┘                           ║
+# ║                                                                              ║
+# ║                 MULTI-REPO  •  TERMINALS  •  GIT  •  AI                     ║
+# ║                                                                              ║
+# ╚══════════════════════════════════════════════════════════════════════════════╝
+#
+# V I B E   W O R K S P A C E
+# ───────────────────────────
+#
+# Select repositories. Launch workspace. Start building.
+#
+# [✓] Multi-Repository Workspace       [✓] Git Source Control
+# [✓] Project Terminal Groups          [✓] Claude / Codex
+# [✓] Automatic Workspace Setup        [✓] One-Click Launch
+#
+#
+#                                  /\
+#                                 /  \
+#                                /____\
+#                               |      |
+#                               |  >_  |
+#                               |      |
+#                               |      |
+#                              /|      |\
+#                             /_|______|_\
+#                                /||\
+#                               /_||_\
+#                                ****
+#                               ******
+#                                ****
+#                                 **
+#
+#                            L A U N C H
+#
+# ===============================================================================
+#
+set -euo pipefail
+
+# Finder/Terminal können .command-Dateien mit einem stark eingeschränkten PATH
+# starten. Die macOS-Systemprogramme und übliche Homebrew-Installationen müssen
+# deshalb ausdrücklich verfügbar gemacht werden.
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
+
+# ${0:A} erzeugt einen absoluten Pfad und löst auch einen Schreibtisch-Alias auf.
+SCRIPT_FILE="${0:A}"
+SCRIPT_DIR="${SCRIPT_FILE:h}"
+
+if [[ "${1:-}" == "remote" ]]; then
+  exec "$SCRIPT_DIR/workspace" "$@"
+fi
+
+# ============================================================
+# VIBE WORKSPACE LAUNCHER
+# macOS + Visual Studio Code
+#
+# 1) Optional Repos unten im CONFIG-Bereich eintragen.
+# 2) Im Setup pro Repo Anzahl und Inhalt der integrierten Terminals festlegen.
+# 3) Repos können bequem im Setup per Finder ausgewählt werden.
+# 4) Datei doppelklicken -> Projekte auswählen -> VS Code öffnet alles.
+# ============================================================
+
+# ---------------------------- CONFIG ----------------------------
+# Format pro Repo:
+#   "Anzeigename|/absoluter/pfad/zum/repo"
+#
+# $HOME darf verwendet werden. Leer lassen = portable Ersteinrichtung per Finder.
+PROJECTS=()
+# Beispiele:
+# PROJECTS=(
+#   "Mein Projekt|$HOME/Documents/GitHub/mein-projekt"
+#   "Zweites Projekt|$HOME/Projects/zweites-projekt"
+# )
+
+# Optionale Terminals/Tasks.
+# Format:
+#   "Projektname|Terminalname|Befehl|relatives Arbeitsverzeichnis"
+#
+# Das letzte Feld darf leer sein; dann wird im Repo-Root gestartet.
+# Diese Tasks werden beim Öffnen des Workspace automatisch gestartet.
+TERMINALS=()
+# Beispiele:
+# TERMINALS=(
+#   "Mein Projekt|Shell|exec zsh -l|"
+#   "Mein Projekt|Frontend|npm run dev|frontend"
+# )
+
+# Diese Standard-Terminals gelten für Projekte ohne eigene Setup-Auswahl.
+# Falls Claude Code, Codex oder Antigravity fehlen, bleibt eine Shell mit
+# Installationshinweis geöffnet, statt dass der Task sofort verschwindet.
+# Claude Code und Antigravity ohne Sicherheitsabfragen; Codex mit Workspace-Sandbox.
+AUTO_TERMINALS=(
+  "Frontend|npm run dev|frontend"
+  "Storybook|npm run storybook|frontend"
+  "Codex 2|if command -v codex >/dev/null 2>&1; then CODEX_HOME=\"\$HOME/.codex-account2\" exec codex --sandbox workspace-write --ask-for-approval never; else echo 'Codex 2 ist nicht installiert.'; exec zsh -l; fi|"
+  "Codex|if command -v codex >/dev/null 2>&1; then exec codex --sandbox workspace-write --ask-for-approval never; else echo 'Codex ist nicht installiert.'; exec zsh -l; fi|"
+  "Claude|if command -v claude >/dev/null 2>&1; then exec claude --dangerously-skip-permissions; else echo 'Claude Code ist nicht installiert.'; exec zsh -l; fi|"
+  "agy|if command -v agy >/dev/null 2>&1; then exec agy --dangerously-skip-permissions; else echo 'Antigravity (agy) ist nicht installiert.'; exec zsh -l; fi|"
+)
+
+# Bevorzugter VS-Code-Befehl. Wenn er nicht im PATH liegt, wird die
+# installierte VS-Code-App automatisch verwendet.
+EDITOR_CMD="code"
+
+# Workspace-Datei wird hier abgelegt:
+WORKSPACE_DIR="$HOME/.vibe-workspaces"
+WORKSPACE_NAME="Vibe-Session.code-workspace"
+
+# Auf einem neuen Mac gewählte Repositories werden benutzerspezifisch hier
+# gespeichert. Dadurch enthält der Starter keine fremden absoluten Pfade.
+CONFIG_DIR="$HOME/.config/vibecode-workspace"
+SAVED_PROJECTS="$CONFIG_DIR/projects.tsv"
+LAST_SELECTION="$CONFIG_DIR/last-selection.txt"
+
+# true = definierte Terminals automatisch beim Öffnen starten.
+# false = Tasks werden angelegt, aber nicht automatisch gestartet.
+AUTO_START_TERMINALS=true
+
+# true = dieses Starter-Terminal nach dem Workspace-Start als einfaches
+# Kontrollterminal für Wachhalten + Apps weiterverwenden.
+OPEN_CONTROL_TERMINAL=true
+
+# true = den eigenen Apple-Terminal-Tab nach erfolgreichem Start schließen.
+# Bei Fehlern bleibt das Terminal offen und zeigt die Diagnose an.
+CLOSE_LAUNCHER_TERMINAL=true
+# ---------------------------------------------------------------
+
+# Persönliche Konfiguration neben dem Starter laden. Diese Datei ist absichtlich
+# nicht Teil von Git; eine Vorlage liegt als config.example.zsh im Repository.
+LOCAL_CONFIG="$SCRIPT_DIR/config.local.zsh"
+if [[ -f "$LOCAL_CONFIG" ]]; then
+  source "$LOCAL_CONFIG"
+fi
+
+if [[ "${1:-}" == "--remote-workspace" ]]; then
+  AUTO_START_TERMINALS="${VIBE_REMOTE_TERMINALS:-false}"
+  CLOSE_LAUNCHER_TERMINAL=false
+  OPEN_CONTROL_TERMINAL=false
+fi
+
+mkdir -p "$WORKSPACE_DIR"
+
+# Editor finden, auch wenn der VS-Code-CLI-Befehl nicht im PATH installiert ist.
+if ! command -v "$EDITOR_CMD" >/dev/null 2>&1; then
+  if [[ -x "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code" ]]; then
+    EDITOR_CMD="/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"
+  elif [[ -x "$HOME/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code" ]]; then
+    EDITOR_CMD="$HOME/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"
+  elif [[ -x "/Applications/Cursor.app/Contents/Resources/app/bin/cursor" ]]; then
+    EDITOR_CMD="/Applications/Cursor.app/Contents/Resources/app/bin/cursor"
+  else
+    osascript -e 'display alert "Code-Editor nicht gefunden" message "Bitte Visual Studio Code oder Cursor installieren. Alternativ EDITOR_CMD im Launcher anpassen." as critical'
+    exit 1
+  fi
+fi
+
+# Temporäre Dateien vorbereiten.
+TMP_NAMES="$(mktemp)"
+TMP_SELECTED="$(mktemp)"
+TMP_CONFIG="$(mktemp)"
+TMP_TERMINALS="$(mktemp)"
+TMP_DEFAULTS="$(mktemp)"
+LAUNCHER_TTY="$(tty 2>/dev/null || true)"
+LAUNCH_COMPLETED=false
+
+finish_launcher() {
+  local exit_code=$?
+  trap - EXIT
+
+  /bin/rm -f "$TMP_NAMES" "$TMP_SELECTED" "$TMP_CONFIG" "$TMP_TERMINALS" "$TMP_DEFAULTS"
+
+  if (( exit_code != 0 )); then
+    /usr/bin/osascript - "$exit_code" <<'ERROR_APPLESCRIPT' >/dev/null 2>&1 || true
+on run argv
+    set errorCode to item 1 of argv
+    display alert "VibeCode Workspace konnte nicht gestartet werden" message "Fehlercode: " & errorCode & return & return & "Das Terminal bleibt geöffnet. Dort stehen die technischen Details." as critical
+end run
+ERROR_APPLESCRIPT
+  elif [[ "$LAUNCH_COMPLETED" == "true" \
+       && "$CLOSE_LAUNCHER_TERMINAL" == "true" \
+       && "${TERM_PROGRAM:-}" == "Apple_Terminal" \
+       && "$LAUNCHER_TTY" == /dev/tty* ]]; then
+    /usr/bin/nohup /usr/bin/osascript \
+      -e 'on run argv' \
+      -e 'set targetTTY to item 1 of argv' \
+      -e 'delay 0.7' \
+      -e 'tell application "Terminal"' \
+      -e 'repeat with terminalWindow in windows' \
+      -e 'repeat with terminalTab in tabs of terminalWindow' \
+      -e 'if (tty of terminalTab) is targetTTY then' \
+      -e 'if (count of tabs of terminalWindow) is 1 then close terminalWindow' \
+      -e 'return' \
+      -e 'end if' \
+      -e 'end repeat' \
+      -e 'end repeat' \
+      -e 'end tell' \
+      -e 'end run' \
+      "$LAUNCHER_TTY" </dev/null >> "$CONFIG_DIR/terminal-close.log" 2>&1 &!
+  fi
+
+  return "$exit_code"
+}
+
+trap finish_launcher EXIT
+
+# Doppelte und nicht mehr vorhandene Projektpfade ausfiltern.
+typeset -A SEEN_PROJECT_PATHS
+typeset -A SEEN_PROJECT_NAMES
+
+add_project() {
+  local name="$1"
+  local input_path="$2"
+  local real_path base_name suffix
+
+  input_path="${input_path/#\~/$HOME}"
+  [[ -d "$input_path" ]] || return 0
+  real_path="$(cd "$input_path" 2>/dev/null && pwd -P)" || return 0
+  [[ -n "${SEEN_PROJECT_PATHS[$real_path]-}" ]] && return 0
+
+  base_name="$name"
+  suffix=2
+  while [[ -n "${SEEN_PROJECT_NAMES[$name]-}" ]]; do
+    name="$base_name ($suffix)"
+    (( suffix += 1 ))
+  done
+
+  SEEN_PROJECT_PATHS[$real_path]=1
+  SEEN_PROJECT_NAMES[$name]=1
+  printf '%s\n' "$name" >> "$TMP_NAMES"
+  printf '%s\t%s\n' "$name" "$real_path" >> "$TMP_CONFIG"
+}
+
+# Manuell im Starter konfigurierte Projekte einlesen.
+for entry in "${PROJECTS[@]}"; do
+  name="${entry%%|*}"
+  repo_path="${entry#*|}"
+  add_project "$name" "$repo_path"
+done
+
+# Vom Setup-Programm auf diesem Benutzerkonto gespeicherte Projekte laden.
+if [[ -f "$SAVED_PROJECTS" ]]; then
+  while IFS=$'\t' read -r saved_name saved_path; do
+    [[ -n "$saved_name" && -n "$saved_path" ]] || continue
+    add_project "$saved_name" "$saved_path"
+  done < "$SAVED_PROJECTS"
+fi
+
+# Diagnosemodus für Installation und Konfiguration, ohne Fenster zu öffnen.
+if [[ "${1:-}" == "--check" ]]; then
+  for required_command in osascript rm mktemp; do
+    command -v "$required_command" >/dev/null 2>&1 || {
+      printf 'FEHLER: %s wurde nicht gefunden.\n' "$required_command" >&2
+      exit 1
+    }
+  done
+  printf 'OK: VibeCode Workspace ist startbereit.\n'
+  printf 'Editor: %s\n' "$EDITOR_CMD"
+  printf 'Lokale Konfiguration: %s\n' "$LOCAL_CONFIG"
+  printf 'Gültige Projekte: %s\n' "${#SEEN_PROJECT_PATHS}"
+  printf 'Standard-Terminals pro Projekt ohne Setup-Auswahl: %s\n' "${#AUTO_TERMINALS}"
+  printf 'Terminal-Konfiguration aus dem Setup: %s\n' "$CONFIG_DIR/terminals.json"
+  exit 0
+fi
+
+# Ohne gültige Konfiguration auf das separate Setup-Programm verweisen.
+if [[ ! -s "$TMP_NAMES" ]]; then
+  if [[ "${1:-}" == "--remote-workspace" ]]; then
+    print -u2 'Remote: zuerst Repositories im Workspace-Setup einrichten.'
+    exit 1
+  fi
+  osascript -e 'display alert "Noch keine Repositories eingerichtet" message "Öffne im VibeCode-Workspace-Ordner die Datei ‚Setup VibeCode Workspace.command‘ und füge dort deine Repository-Ordner hinzu." as informational'
+  LAUNCH_COMPLETED=true
+  exit 0
+fi
+
+[[ -s "$TMP_NAMES" ]] || exit 0
+
+# Die zuletzt verwendete Auswahl erneut vorselektieren. Beim allerersten Start
+# sind alle vorhandenen Projekte markiert.
+if [[ -f "$LAST_SELECTION" ]]; then
+  while IFS= read -r selected_name; do
+    [[ -n "${SEEN_PROJECT_NAMES[$selected_name]-}" ]] || continue
+    printf '%s\n' "$selected_name" >> "$TMP_DEFAULTS"
+  done < "$LAST_SELECTION"
+fi
+
+if [[ ! -s "$TMP_DEFAULTS" ]]; then
+  cp "$TMP_NAMES" "$TMP_DEFAULTS"
+fi
+
+# Standardmäßiger macOS-Mehrfachauswahldialog. Zum Ändern mehrerer Einträge
+# verlangt macOS die Cmd-Taste; die gespeicherte Auswahl kann direkt bestätigt werden.
+if [[ "${1:-}" == "--remote-workspace" ]]; then
+  cp "$TMP_DEFAULTS" "$TMP_SELECTED"
+else
+osascript <<APPLESCRIPT > "$TMP_SELECTED"
+set namesFile to POSIX file "$TMP_NAMES"
+set defaultsFile to POSIX file "$TMP_DEFAULTS"
+set projectNames to paragraphs of (read namesFile as «class utf8»)
+set defaultNames to paragraphs of (read defaultsFile as «class utf8»)
+set chosen to choose from list projectNames with title "Vibe Workspace" with prompt "Welche Repositories sollen geöffnet werden? Zum Ändern der Ordnerliste ‚Setup VibeCode Workspace.command‘ erneut ausführen. Für die Mehrfachauswahl ⌘ gedrückt halten." default items defaultNames with multiple selections allowed
+if chosen is false then
+    return ""
+end if
+set oldDelims to AppleScript's text item delimiters
+set AppleScript's text item delimiters to linefeed
+set outputText to chosen as text
+set AppleScript's text item delimiters to oldDelims
+return outputText
+APPLESCRIPT
+fi
+
+# Abgebrochen / nichts gewählt.
+if [[ ! -s "$TMP_SELECTED" ]]; then
+  exit 0
+fi
+
+mkdir -p "$CONFIG_DIR"
+cp "$TMP_SELECTED" "$LAST_SELECTION"
+
+WORKSPACE_PATH="$WORKSPACE_DIR/$WORKSPACE_NAME"
+
+# Automatische Standard-Terminals für jedes konfigurierte Projekt vorbereiten.
+while IFS=$'\t' read -r project repo_path; do
+  for automatic_terminal in "${AUTO_TERMINALS[@]}"; do
+    terminal_name="${automatic_terminal%%|*}"
+    rest="${automatic_terminal#*|}"
+    command="${rest%%|*}"
+    cwd="${rest#*|}"
+    printf '%s\t%s\t%s\t%s\n' "$project" "$terminal_name" "$command" "$cwd" >> "$TMP_TERMINALS"
+  done
+done < "$TMP_CONFIG"
+
+# Zusätzliche projektspezifische Terminal-Konfiguration ergänzen.
+for t in "${TERMINALS[@]}"; do
+  project="${t%%|*}"
+  rest="${t#*|}"
+  terminal_name="${rest%%|*}"
+  rest="${rest#*|}"
+  command="${rest%%|*}"
+  cwd="${rest#*|}"
+  printf '%s\t%s\t%s\t%s\n' "$project" "$terminal_name" "$command" "$cwd" >> "$TMP_TERMINALS"
+done
+
+AUTO_START_VALUE="$AUTO_START_TERMINALS" \
+osascript -l JavaScript - "$TMP_SELECTED" "$TMP_CONFIG" "$TMP_TERMINALS" "$WORKSPACE_PATH" "$CONFIG_DIR/terminals.json" <<'JXA'
+ObjC.import("Foundation");
+
+function readText(path) {
+    const value = $.NSString.stringWithContentsOfFileEncodingError(
+        $(path),
+        $.NSUTF8StringEncoding,
+        null
+    );
+    if (!value) {
+        throw new Error(`Datei konnte nicht gelesen werden: ${path}`);
+    }
+    return ObjC.unwrap(value);
+}
+
+function nonEmptyLines(path) {
+    return readText(path)
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean);
+}
+
+function run(argv) {
+    const [selectedFile, configFile, terminalsFile, outputFile, savedTerminalsFile] = argv;
+    const selected = nonEmptyLines(selectedFile);
+
+    const projects = Object.create(null);
+    for (const line of nonEmptyLines(configFile)) {
+        const separator = line.indexOf("\t");
+        if (separator === -1) continue;
+        const name = line.slice(0, separator);
+        const path = line.slice(separator + 1);
+        projects[name] = path;
+    }
+
+    const missing = selected.filter((name) => !projects[name]);
+    if (missing.length) {
+        throw new Error(`Unbekannte Projekte: ${missing.join(", ")}`);
+    }
+
+    const folders = selected.map((name) => ({
+        name,
+        path: projects[name],
+    }));
+
+    const environment = $.NSProcessInfo.processInfo.environment;
+    const autoStartValue = ObjC.unwrap(
+        environment.objectForKey("AUTO_START_VALUE") || $("true")
+    );
+    const autoStart = String(autoStartValue).toLowerCase() === "true";
+
+    let savedTerminals = {};
+    if ($.NSFileManager.defaultManager.fileExistsAtPath($(savedTerminalsFile))) {
+        const saved = JSON.parse(readText(savedTerminalsFile));
+        if (!saved || saved.version !== 1 || !saved.projects || typeof saved.projects !== "object" || Array.isArray(saved.projects)) {
+            throw new Error("Ungültige Terminal-Konfiguration aus dem Setup.");
+        }
+        savedTerminals = saved.projects;
+    }
+
+    // Eine Setup-Auswahl ersetzt sämtliche Standard- und lokalen Zusatz-Terminals
+    // dieses Repositories. Eine leere Liste bedeutet ausdrücklich null Terminals.
+    const terminalDefinitions = [];
+    for (const raw of nonEmptyLines(terminalsFile)) {
+        const parts = raw.split("\t");
+        while (parts.length < 4) parts.push("");
+        const [project, terminalName, command, relativeCwd] = parts;
+        if (!selected.includes(project)) continue;
+        if (Object.prototype.hasOwnProperty.call(savedTerminals, projects[project])) continue;
+        terminalDefinitions.push({ project, terminalName, command, relativeCwd });
+    }
+    for (const project of selected) {
+        if (!Object.prototype.hasOwnProperty.call(savedTerminals, projects[project])) continue;
+        const entries = savedTerminals[projects[project]];
+        if (!Array.isArray(entries) || entries.some((entry) => !entry ||
+            typeof entry.name !== "string" || !entry.name.trim() ||
+            typeof entry.command !== "string" || !entry.command.trim() ||
+            typeof entry.cwd !== "string")) {
+            throw new Error(`Ungültige Terminals für ${project}. Bitte das Setup erneut ausführen.`);
+        }
+        for (const entry of entries) {
+            // Auch früher gespeicherte Codex-Vorlagen verwenden den neuen Standard.
+            // Nur den erzeugten Start ersetzen; eigene Befehle und Prompts bleiben erhalten.
+            const command = ["Codex", "Codex 2"].includes(entry.type)
+                ? entry.command.replace(
+                    /^(if command -v codex >\/dev\/null 2>&1; then (?:CODEX_HOME="?\$HOME\/\.codex-account2"? )?exec codex )--yolo(?=;| -- )/,
+                    "$1--sandbox workspace-write --ask-for-approval never")
+                : entry.command;
+            terminalDefinitions.push({ project, terminalName: entry.name, command, relativeCwd: entry.cwd });
+        }
+    }
+
+    // Pro ausgewähltem Ordner eine gemeinsame Symbolfarbe für sämtliche Tasks.
+    // Theme-Farben bleiben auch bei einem Wechsel zwischen hell/dunkel lesbar.
+    const terminalColors = [
+        "terminal.ansiBlue", "terminal.ansiGreen", "terminal.ansiMagenta",
+        "terminal.ansiCyan", "terminal.ansiYellow", "terminal.ansiRed",
+    ];
+    const projectColors = new Map(selected.map((project, index) =>
+        [project, terminalColors[index % terminalColors.length]]));
+
+    const tasks = [];
+    const usedLabels = new Set();
+    for (const { project, terminalName, command, relativeCwd } of terminalDefinitions) {
+        const repoPath = projects[project].replace(/\/$/, "");
+        const cwd = relativeCwd ? `${repoPath}/${relativeCwd}` : repoPath;
+        const baseLabel = `${project} · ${terminalName}`;
+        let label = baseLabel;
+        let suffix = 2;
+        while (usedLabels.has(label)) label = `${baseLabel} (${suffix++})`;
+        usedLabels.add(label);
+        const task = {
+            label,
+            type: "shell",
+            command,
+            options: { cwd },
+            icon: { id: "terminal", color: projectColors.get(project) },
+            problemMatcher: [],
+            presentation: {
+                echo: true,
+                reveal: "always",
+                focus: false,
+                panel: "dedicated",
+                showReuseMessage: false,
+                clear: false,
+                group: project,
+            },
+        };
+
+        if (autoStart) {
+            task.runOptions = { runOn: "folderOpen" };
+        }
+        tasks.push(task);
+    }
+
+    const workspace = {
+        folders,
+        settings: {
+            "git.autofetch": true,
+            "git.openRepositoryInParentFolders": "always",
+            "terminal.integrated.tabs.enabled": true,
+            "terminal.integrated.enableMultiLinePasteWarning": "auto",
+        },
+        tasks: {
+            version: "2.0.0",
+            tasks,
+        },
+    };
+
+    const output = `${JSON.stringify(workspace, null, 2)}\n`;
+    const written = $(output).writeToFileAtomicallyEncodingError(
+        $(outputFile),
+        true,
+        $.NSUTF8StringEncoding,
+        null
+    );
+    if (!written) {
+        throw new Error(`Workspace konnte nicht geschrieben werden: ${outputFile}`);
+    }
+    return outputFile;
+}
+JXA
+
+# Workspace öffnen.
+"$EDITOR_CMD" "$WORKSPACE_PATH"
+
+# Kurzer Hinweis beim ersten Start automatischer Tasks.
+if [[ "$AUTO_START_TERMINALS" == "true" ]]; then
+  osascript -e 'display notification "Falls VS Code fragt: automatische Tasks für diesen Workspace erlauben." with title "Vibe Workspace gestartet"'
+fi
+
+# Das beim Doppelklick ohnehin geöffnete Starter-Terminal wird zum dauerhaften
+# Kontrollterminal. Bei AN hält es den Mac wach und verwaltet die ausgewählten
+# Desktop-Apps beziehungsweise Agent-Terminals; q kehrt hierher zurück.
+if [[ "$OPEN_CONTROL_TERMINAL" == "true" && -f "$SCRIPT_DIR/remote.py" ]]; then
+  if command -v python3 >/dev/null 2>&1; then
+    VIBECODE_REMOTE_DIR="$CONFIG_DIR/remote" python3 "$SCRIPT_DIR/remote.py" control
+  else
+    printf 'Kontrollterminal benötigt Python 3.\n' >&2
+  fi
+fi
+
+# Erst jetzt gilt der Start als vollständig erfolgreich. Der EXIT-Handler darf
+# anschließend den eigenen Terminal-Tab schließen.
+LAUNCH_COMPLETED=true

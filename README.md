@@ -1,335 +1,368 @@
-# VibeCode Workspace
+# VibeCode Workspace - Modulares System
 
-Ein portabler macOS-Launcher für Multi-Repository-Workspaces in Visual Studio
-Code oder Cursor. Du wählst die gewünschten Projekte aus; der Launcher erzeugt
-einen gemeinsamen Workspace und startet pro Projekt die im Setup festgelegten
-Terminals. Claude Code startet standardmäßig im YOLO-Modus; Codex mit
-Workspace-Sandbox ohne Sicherheitsabfragen. Das Starter-Terminal dient danach
-als einfache AN/AUS-Steuerung zum Wachhalten des Macs und zum Öffnen ausgewählter
-Apps beziehungsweise Agenten.
+Ein **modulares macOS-System** für Entwickler, das **Workspaces, Remote-Management und lokale KI-Entwicklung** kombiniert.
 
-## Voraussetzungen
+Jedes Modul ist **unabhängig nutzbar** – du kannst genau die Features behalten, die du brauchst.
 
-- macOS
-- Visual Studio Code oder Cursor
-- optional: Claude Code, Codex CLI und OpenCode
+---
 
-Fehlt Claude Code oder Codex, bleibt das jeweilige Workspace-Terminal mit einem
-Hinweis als normale Shell geöffnet.
+## 🚀 Quick-Launch-Buttons (für den Schreibtisch)
 
-## Schnellstart
+Kopiere diese Dateien einfach auf deinen **Schreibtisch** und starte sie per Doppelklick:
 
-### 1. Repository herunterladen
+| Datei | Modul | Zweck |
+|-------|-------|-------|
+| `Setup Workspace.command` | Workspaces | Repository-Ordner einrichten |
+| `Launch Workspace.command` | Workspaces | Workspace mit Terminals starten |
+| `Toggle Ollama.command` | Local Dev | Ollama + OpenCode starten/stoppen |
 
-Entweder als ZIP über GitHub herunterladen oder mit Git klonen:
+**Tipp:** Erstelle **Aliase** (Rechtsklick → Alias erzeugen) statt Kopien, damit Updates automatisch übernommen werden!
 
-```zsh
-git clone https://github.com/dudodkdkdkd/vibecode-workspace.git
-cd vibecode-workspace
+---
+
+## 📚 Module Übersicht
+
+### 1️⃣ **Workspaces** (`workspaces/`)
+**Zweck:** Mehrere Repository-Workspaces in VS Code / Cursor / OpenCode verwalten
+
+| Feature | Beschreibung |
+|---------|-------------|
+| **Multi-Repo Workspace** | Mehrere Projekte in einem Fenster |
+| **Terminal-Management** | Automatische Terminals pro Projekt |
+| **Farbcodierung** | Unterschiedliche Farben pro Ordner |
+| **Agenten-Integration** | Claude Code, Codex, Antigravity |
+| **Wachhalten** | Verhindert macOS-Ruhezustand |
+
+**Hauptdateien:**
+- `workspace` – Einstiegspunkt (leitet an Remote oder Workspace weiter)
+- `VibeCode Workspace.command` – Hauptskript für Workspace-Launch
+- `Setup VibeCode Workspace.command` – Setup-Assistent
+- `terminal-setup.js` – Terminal-Konfiguration
+- `config.example.zsh` – Konfigurationsvorlage
+
+---
+
+### 2️⃣ **Remote Management** (`remote/`)
+**Zweck:** Fernverwaltung von Servern (Wake-on-LAN, SSH, Status-Check)
+
+| Feature | Beschreibung |
+|---------|-------------|
+| **Wake-on-LAN** | Weckt Server per Magic Packet |
+| **SSH-Verwaltung** | Einfache SSH-Verbindungen zu mehreren Servern |
+| **Port-Forwarding** | Leitet Ports für Remote-Zugriff weiter |
+| **Status-Monitoring** | Prüft, ob Server erreichbar sind |
+
+**Hauptdateien:**
+- `remote.py` – Hauptskript für Remote-Funktionen
+- `remote.example.json` – Beispiel-Konfiguration für Server
+
+---
+
+### 3️⃣ **Local Dev** (`local-dev/`)
+**Zweck:** Lokale KI-Entwicklung mit Ollama + OpenCode
+
+| Feature | Beschreibung |
+|---------|-------------|
+| **Ollama-Integration** | Automatisches Starten/Stoppen von Ollama |
+| **Modell-Management** | Lädt/entfernt Modelle aus dem Arbeitsspeicher |
+| **OpenCode-Konfig** | Automatische Konfiguration für lokale Modelle |
+| **Toggle-Funktion** | Einfach per Doppelklick alles starten/beenden |
+
+**Hauptdateien:**
+- `ollama-opencode.command` – Doppelklick-Skript (Toggle)
+- `ollama-config.json` – Modell-Konfiguration
+
+---
+
+## 🗑️ Module entfernen, die du nicht brauchst
+
+Du kannst **jederzeit Module löschen**, die du nicht benötigst:
+
+```bash
+# Beispiel: Nur Workspaces behalten
+rm -rf remote/ local-dev/
+
+# Beispiel: Nur Local Dev behalten
+rm -rf workspaces/ remote/
+
+# Beispiel: Nur Remote Management behalten
+rm -rf workspaces/ local-dev/
 ```
 
-### 2. Repository-Ordner einrichten
+**⚠️ Wichtig:**
+- Die Module sind **völlig unabhängig** – Löschen eines Moduls beeinträchtigt die anderen nicht
+- **Keine Abhängigkeiten** zwischen den Modulen
+- Jedes Modul hat seine **eigene Dokumentation** (README.md im Ordner)
 
-Im Finder doppelt auf **Setup VibeCode Workspace.command** klicken.
+---
 
-Beim ersten Start kann macOS die Datei blockieren. Dann:
+## 🚀 Zentrales Setup-Skript
 
-1. Rechtsklick auf **Setup VibeCode Workspace.command**
-2. **Öffnen** auswählen
-3. Den Start bestätigen
+Führe **`workspaces/Setup VibeCode Workspace.command`** aus, um:
 
-Im Setup gibt es drei Möglichkeiten:
+1. **Repository-Ordner** auszuwählen
+2. **Terminals pro Projekt** zu konfigurieren
+3. **Agenten (Claude, Codex, etc.)** einzurichten
+4. **Standard-Terminals** festzulegen
 
-- **Hinzufügen** behält alle vorhandenen Ordner und ergänzt neue.
-- **Ersetzen** erstellt eine komplett neue Ordnerliste.
-- **Terminals ändern** passt Anzahl und Inhalt für vorhandene Ordner an.
+**Verfügbare Optionen:**
+```bash
+# Vollständiges Setup
+./workspaces/Setup\ VibeCode\ Workspace.command
 
-Danach die gewünschten Repository-Ordner auswählen. Für mehrere einzelne
-Ordner beim Anklicken `⌘` gedrückt halten.
+# Nur Ordner hinzufügen
+./workspaces/Setup\ VibeCode\ Workspace.command --add /Pfad/zum/Projekt
 
-Anschließend die Repositories auswählen, deren Terminals du einrichten möchtest.
-Für jedes davon fragt das Setup:
+# Ordner ersetzen
+./workspaces/Setup\ VibeCode\ Workspace.command --replace /Pfad1 /Pfad2
 
-1. **Anzahl der Terminals** (auch `0` ist möglich).
-2. Pro Terminal: **Shell**, **Claude Code**, **Codex** oder **Eigener Befehl**.
-3. Bei Agenten einen optionalen **Startprompt**, bei eigenen Befehlen den
-   **Shell-Command** (z. B. `npm run dev`).
-4. **Terminalname** und optional einen **Unterordner** als Arbeitsverzeichnis.
+# Nur Terminals anpassen
+./workspaces/Setup\ VibeCode\ Workspace.command --terminals
 
-So sind beispielsweise zwei Claude-Terminals mit unterschiedlichen Aufgaben,
-ein Codex-Terminal und ein Dev-Server für dasselbe Repository möglich.
-Nicht ausgewählte Repositories behalten ihre Terminal-Einstellungen; ohne
-eigene Einstellungen gelten die drei Standard-Terminals. Abbrechen in einem
-Dialog verwirft die Änderungen des gesamten Setup-Durchlaufs.
-
-### 3. Starter auf den Schreibtisch legen
-
-Empfohlen ist ein Finder-Alias. Dadurch bleibt die Originaldatei im Repository
-und spätere Git-Updates gelten automatisch auch für den Schreibtisch-Starter:
-
-1. Rechtsklick auf **VibeCode Workspace.command**
-2. **Alias erzeugen** auswählen
-3. Den Alias auf den Schreibtisch ziehen
-4. Den Alias bei Bedarf in `VibeCode Workspace` umbenennen
-
-Alternativ beim Ziehen auf den Schreibtisch `⌥` + `⌘` gedrückt halten. Eine
-eigenständige Kopie entsteht beim Ziehen mit `⌥`; sie erhält jedoch keine
-späteren Updates aus dem Repository.
-
-### 4. Workspace starten
-
-Den Starter auf dem Schreibtisch doppelt anklicken, Repositories auswählen und
-**OK** drücken. Die zuletzt verwendete Auswahl wird beim nächsten Start wieder
-vorselektiert.
-
-## Später Ordner hinzufügen oder ändern
-
-Einfach jederzeit erneut **Setup VibeCode Workspace.command** im geklonten
-Repository ausführen:
-
-- **Hinzufügen** für weitere Repository-Ordner
-- **Ersetzen** zum vollständigen Neuaufbau der Liste
-- **Terminals ändern** zum Anpassen der Terminals ohne neue Ordnerauswahl
-- **Wachhalten & Apps** für das dauerhafte Kontrollterminal
-
-Der Schreibtisch-Starter muss danach nicht neu erstellt werden. Er liest die
-aktuelle Konfiguration bei jedem Start ein.
-
-Die Ordnerliste lässt sich auch ohne Dialog ändern. Bestehende
-Terminal-Einstellungen bleiben dabei erhalten; neue Repositories verwenden die
-Standard-Terminals:
-
-```zsh
-./Setup\ VibeCode\ Workspace.command --add "$HOME/Projects/projekt-a"
-./Setup\ VibeCode\ Workspace.command --replace "$HOME/Projects/projekt-a" "$HOME/Projects/projekt-b"
+# Remote-Management konfigurieren
+./workspaces/Setup\ VibeCode\ Workspace.command --remote
 ```
 
-Direkt die Terminal-Dialoge öffnen:
+---
 
+## 🔧 Modul-spezifische Konfiguration
+
+### Workspaces (`workspaces/`)
+| Datei | Zweck |
+|-------|-------|
+| `config.example.zsh` | Kopiere nach `config.local.zsh` für lokale Einstellungen |
+| `terminal-setup.js` | Terminal-Farben, Prompt, Aliases anpassen |
+
+**Beispiel-Konfiguration (`config.local.zsh`):**
 ```zsh
-./Setup\ VibeCode\ Workspace.command --terminals
-```
+# Terminal-Einstellungen
+TERMINAL_THEME="Dracula"
+TERMINAL_FONT_SIZE=14
 
-## Kontrollterminal: Wachhalten und Apps
-
-Nach jedem normalen Workspace-Start wird das ohnehin geöffnete Starter-Terminal
-automatisch zum Kontrollterminal. Es lässt sich außerdem jederzeit separat über
-**Setup → Wachhalten & Apps** öffnen. Darin gibt es nur zwei Einstellungen:
-
-1. **Wachhalten + Apps: AN/AUS**
-2. **Apps auswählen**
-
-Auswählbar sind die Claude-App sowie Claude Code, Codex und optional OpenCode.
-Die drei Coding-Agenten starten jeweils in einem eigenen Terminal. OpenCode wird
-nur gestartet, wenn der Befehl `opencode` installiert ist; eine fehlende
-Installation wird als Fehler im Kontrollterminal angezeigt.
-
-Bei **AN** verhindert macOS den Ruhezustand und öffnet nur die ausgewählten
-Apps beziehungsweise Agent-Terminals. Bei **AUS** wird die Wachhaltesperre
-gelöst. Die ausgewählten Desktop-Apps werden vollständig beendet und die eigens
-von VibeCode gestarteten Agent-Terminals samt Prozessen geschlossen. Reagiert
-eine Desktop-App nicht auf das normale Beenden, beendet VibeCode ihre noch
-laufenden App-Prozesse zwangsweise.
-
-**Achtung:** Nicht gespeicherte Arbeit in einer ausgewählten Desktop-App kann
-beim Ausschalten verloren gehen. `q` schließt dagegen nur das Kontrollterminal;
-der AN/AUS-Zustand bleibt unverändert. Erneut öffnen lässt es sich jederzeit
-über das Setup oder direkt mit:
-
-```zsh
-./workspace remote
-```
-
-Soll das Kontrollterminal ausnahmsweise nicht bei jedem Workspace-Start
-erscheinen, kann es in `config.local.zsh` deaktiviert werden:
-
-```zsh
-OPEN_CONTROL_TERMINAL=false
-```
-
-## Automatisch gestartete Terminals
-
-Für Repositories ohne eigene Terminal-Auswahl legt der Workspace diese Tasks an:
-
-- Shell
-- Claude Code mit `--dangerously-skip-permissions`
-- Codex mit `--sandbox workspace-write --ask-for-approval never`
-
-Bei Codex bleibt die Sandbox aktiv. Aktionen, die sie verbietet, scheitern,
-statt eine Freigabe anzufordern. Auch zuvor über das Setup gespeicherte
-Codex-Terminals mit YOLO verwenden beim nächsten Workspace-Start diesen neuen
-Standard; ihre Anzahl, Namen, Prompts und Arbeitsverzeichnisse bleiben erhalten.
-
-**Achtung:** Claude Code läuft weiterhin im YOLO-Modus ohne Sicherheitsabfragen.
-Verwende diese Starts nur in vertrauenswürdigen Projekten und vorzugsweise in
-einer isolierten Umgebung. Login, erste
-Einrichtung und Workspace-Vertrauen können weiterhin eine Bestätigung erfordern.
-
-Beim ersten Öffnen kann VS Code fragen, ob automatische Workspace-Tasks erlaubt
-werden. Diese Freigabe ist nötig, damit die Terminals automatisch starten.
-
-### Terminalfarben pro Ordner
-
-Alle vom Launcher gestarteten Terminals eines ausgewählten Repository-Ordners
-bekommen dieselbe Symbolfarbe in der Terminal-Liste. Die Farben werden in der
-Reihenfolge der ausgewählten Ordner vergeben: Blau, Grün, Magenta, Cyan, Gelb
-und Rot; danach wiederholt sich die Palette. Drei ausgewählte Ordner haben also
-drei unterschiedliche Farben, unabhängig von der Anzahl ihrer Terminals.
-
-Die Farbtöne folgen dem Editor-Theme. Hintergrund und Warnfarben bleiben
-unverändert. Die Farben gelten für neu gestartete Workspace-Tasks; bereits
-laufende oder manuell geöffnete Terminals werden nicht nachträglich umgefärbt.
-
-### Terminals und Commands frei festlegen
-
-Am einfachsten über **Terminals ändern** im Setup. Diese Auswahl gilt pro
-Repository und ersetzt dort sowohl `AUTO_TERMINALS` als auch `TERMINALS` aus
-`config.local.zsh`, damit genau die eingestellte Anzahl geöffnet wird. `0`
-unterdrückt auch lokale Zusatz-Terminals. Die Zuordnung erfolgt über den
-absoluten Repository-Pfad, unabhängig vom Anzeigenamen.
-
-Alternativ bestimmt `AUTO_TERMINALS` in `config.local.zsh` die Standard-Terminals
-für Repositories ohne Setup-Auswahl. Jede Zeile enthält Anzeigename, Command
-und optional ein relatives Arbeitsverzeichnis:
-
-```zsh
+# Standard-Terminals pro Projekt
 AUTO_TERMINALS=(
-  "Shell|exec zsh -l|"
-  "Claude Code|claude --dangerously-skip-permissions|"
-  "Codex|codex --sandbox workspace-write --ask-for-approval never|"
-  "Tests|npm test|frontend"
+  "Frontend|npm run dev|frontend"
+  "Backend|npm run server|backend"
 )
-```
 
-Eine Zeile entfernen deaktiviert dieses Terminal. Mit
-`AUTO_TERMINALS=()` werden keine allgemeinen Terminals angelegt. Commands dürfen
-beliebige Optionen enthalten, aber kein `|`, weil dieses Zeichen als
-Feldtrenner dient.
-
-Eigene Befehle im Setup dürfen auch Pipes (`|`) und Anführungszeichen enthalten.
-Startprompts werden als einzelnes Argument übergeben; enthaltene Shell-Zeichen
-werden dabei nicht als Befehle ausgeführt.
-
-Für einen Agentenstart mit den persönlichen CLI-Standardeinstellungen im Setup
-**Eigener Befehl** wählen und `claude` oder `codex` eintragen. Eigene Befehle und
-manuell angepasste Befehle in `config.local.zsh` werden nicht automatisch
-umgeschrieben.
-
-Zusätzliche projektspezifische Tasks für Repositories ohne Setup-Auswahl können
-in `config.local.zsh` definiert werden:
-
-```zsh
-TERMINALS=(
-  "Mein Projekt|Frontend|npm run dev|frontend"
-  "Mein Projekt|Backend|npm run dev|backend"
-)
-```
-
-Format:
-
-```text
-Projektname|Terminalname|Befehl|relatives Arbeitsverzeichnis
-```
-
-## Konfiguration und Datenschutz
-
-Das Setup speichert persönliche Ordnerpfade außerhalb des Repositories:
-
-```text
-~/.config/vibecode-workspace/projects.tsv
-~/.config/vibecode-workspace/terminals.json
-~/.config/vibecode-workspace/remote/config.json
-```
-
-Die Konfiguration des Kontrollterminals speichert ausschließlich den AN/AUS-
-Wert und die ausgewählten Apps beziehungsweise Plattformen.
-
-`terminals.json` enthält die Terminal-Anzahl, Typen, Namen, Startprompts, Befehle
-und Arbeitsverzeichnisse pro Repository. Diese Datei wird als JSON gelesen,
-nicht als Shell-Konfiguration ausgeführt. Befehle laufen erst mit den
-Workspace-Tasks. Auch diese Datei kann persönliche Aufgaben enthalten und
-gehört nicht in Git.
-
-Die zuletzt verwendete Auswahl liegt ebenfalls nur im Benutzerprofil:
-
-```text
-~/.config/vibecode-workspace/last-selection.txt
-```
-
-Für erweiterte Einstellungen kann `config.example.zsh` kopiert werden:
-
-```zsh
-cp config.example.zsh config.local.zsh
-```
-
-`config.local.zsh` ist in `.gitignore` eingetragen. Persönliche Pfade und lokale
-Befehle werden daher nicht committed. Zusätzlich ignoriert Git vorsorglich
-`projects.tsv`, `terminals.json`, `last-selection.txt`, `.code-workspace`-Dateien sowie übliche
-Editor-Metadaten.
-
-## Terminalfenster des Starters
-
-Nach einem erfolgreichen Durchlauf schließt der Launcher sein eigenes
-Apple-Terminal-Fenster, sofern darin nur der Starter läuft. Enthält das Fenster
-weitere Tabs, bleibt es zum Schutz dieser Sitzungen offen. Andere Fenster werden
-nicht verändert. Bei einem Fehler bleibt das Starterfenster geöffnet und macOS
-zeigt zusätzlich einen Fehlerdialog an.
-
-Das automatische Schließen lässt sich in `config.local.zsh` deaktivieren:
-
-```zsh
+# Wachhalten deaktivieren
+OPEN_CONTROL_TERMINAL=false
 CLOSE_LAUNCHER_TERMINAL=false
 ```
 
-## Dateien im Repository
+---
 
-- `VibeCode Workspace.command` – Schreibtisch-Launcher
-- `Setup VibeCode Workspace.command` – Ordner und Terminals einrichten
-- `terminal-setup.js` – macOS-Dialoge für die Terminal-Konfiguration
-- `workspace` / `remote.py` – Kontrollterminal, Wachhalten und App-Verwaltung
-- `config.example.zsh` – öffentliche Konfigurationsvorlage
-- `config.local.zsh` – optionale lokale Konfiguration, von Git ignoriert
-- `.gitignore` – Schutz für lokale und generierte Dateien
+### Remote Management (`remote/`)
+| Datei | Zweck |
+|-------|-------|
+| `remote.example.json` | Kopiere nach `remote.json` und trage deine Server ein |
 
-## Fehlerbehebung
-
-### Starter öffnet sich nur als Text
-
-Die `.command`-Datei im Finder öffnen, nicht im VS-Code-Dateibaum. Beim ersten
-Start Rechtsklick → **Öffnen** verwenden.
-
-### Keine Repositories eingerichtet
-
-**Setup VibeCode Workspace.command** ausführen und mindestens einen Ordner
-hinzufügen.
-
-### VS Code oder Cursor wird nicht gefunden
-
-Eine der beiden Apps in `/Applications` installieren. Der Launcher findet die
-App auch dann, wenn `code` oder `cursor` nicht im Terminal-PATH liegen.
-
-### Diagnose ohne Fenster
-
-```zsh
-./VibeCode\ Workspace.command --check
+**Beispiel-Konfiguration (`remote.json`):**
+```json
+{
+  "servers": [
+    {
+      "name": "Mein Server",
+      "host": "192.168.1.100",
+      "mac": "00:11:22:33:44:55",
+      "wake_on_lan": true,
+      "ssh_port": 22,
+      "user": "benutzer"
+    }
+  ]
+}
 ```
 
-Das prüft Editor, Systembefehle und die Anzahl gültiger Projekte, ohne einen
-Workspace zu öffnen.
+**Usage:**
+```bash
+# Server wecken
+python3 remote/remote.py --wake "Mein Server"
 
-### Änderungen testen
+# Alle Server prüfen
+python3 remote/remote.py --check-all
 
-Auf macOS mit installiertem Node.js:
-
-```zsh
-node --test tests/terminals.test.js
+# SSH-Verbindung
+python3 remote/remote.py --ssh "Mein Server"
 ```
 
-Die Tests prüfen Setup-Speicherung, Abbrechen, Startprompts und die erzeugten
-Workspace-Tasks in temporären Ordnern. Dialogantworten werden simuliert; es
-werden weder ein Editor noch echte Agentensitzungen geöffnet.
+---
 
-## Artwork
+### Local Dev (`local-dev/`)
+| Datei | Zweck |
+|-------|-------|
+| `ollama-config.json` | Modell und Ollama-Einstellungen |
 
-Das Artwork am Anfang des Starters ist vollständig auskommentiert und verändert
-die Ausführung nicht. Finder kann es als Vorschau der `.command`-Datei anzeigen.
+**Beispiel-Konfiguration:**
+```json
+{
+  "model": "llama3",
+  "ollama": {
+    "host": "localhost",
+    "port": 11434
+  }
+}
+```
+
+**Usage:**
+- **Doppelklick auf `ollama-opencode.command`** → Startet alles
+- **Nochmal Doppelklick** → Stoppt alles
+
+---
+
+## 📋 Schnellstart-Anleitung
+
+### 1️⃣ Alles behalten (Vollständige Installation)
+```bash
+# Quick-Launch-Buttons auf den Schreibtisch kopieren:
+cp Setup\ Workspace.command ~/Desktop/
+cp Launch\ Workspace.command ~/Desktop/
+cp Toggle\ Ollama.command ~/Desktop/
+
+# Oder Aliase erstellen (besser für Updates):
+# Rechtsklick auf die Dateien → Alias erzeugen → Auf Desktop ziehen
+
+# Setup ausführen (per Doppelklick oder CLI)
+./Setup\ Workspace.command
+
+# Ollama + OpenCode einrichten (optional)
+# Doppelklick auf Toggle\ Ollama.command
+
+# Remote-Server einrichten (optional)
+# Kopiere remote/remote.example.json nach remote/remote.json und passe an
+```
+
+### 2️⃣ Nur Workspaces nutzen
+```bash
+# Quick-Launch-Buttons auf den Schreibtisch:
+cp Setup\ Workspace.command ~/Desktop/
+cp Launch\ Workspace.command ~/Desktop/
+
+# Module entfernen, die du nicht brauchst
+rm -rf remote/ local-dev/
+
+# Setup ausführen
+./Setup\ Workspace.command
+```
+
+### 3️⃣ Nur Local Dev (Ollama) nutzen
+```bash
+# Quick-Launch-Button auf den Schreibtisch:
+cp Toggle\ Ollama.command ~/Desktop/
+
+# Module entfernen, die du nicht brauchst
+rm -rf workspaces/ remote/
+
+# Doppelklick auf Toggle\ Ollama.command
+```
+
+### 4️⃣ Nur Remote Management nutzen
+```bash
+# Module entfernen, die du nicht brauchst
+rm -rf workspaces/ local-dev/
+
+# Server konfigurieren
+cp remote/remote.example.json remote/remote.json
+# Anpassen und nutzen
+python3 remote/remote.py --wake server1
+```
+
+---
+
+## 🔍 Dateistruktur
+
+```
+vibecode-workspace/
+├── README.md                    # Diese Datei – Modul-Übersicht
+├── .gitignore                  # Git-Ignore-Regeln
+│
+├── Setup Workspace.command     # ⭐ Quick-Launch: Setup-Assistent
+├── Launch Workspace.command    # ⭐ Quick-Launch: Workspace starten
+├── Toggle Ollama.command       # ⭐ Quick-Launch: Ollama Toggle
+│
+├── workspaces/                 # Modul 1: Workspace-Management
+│   ├── workspace               # Einstiegspunkt
+│   ├── VibeCode Workspace.command
+│   ├── Setup VibeCode Workspace.command
+│   ├── terminal-setup.js
+│   └── config.example.zsh
+│
+├── remote/                    # Modul 2: Remote-Management
+│   ├── remote.py
+│   └── remote.example.json
+│
+└── local-dev/                  # Modul 3: Lokale KI-Entwicklung
+    ├── ollama-opencode.command
+    ├── ollama-config.json
+    └── README.md
+```
+
+---
+
+## 🛠️ Anforderungen
+
+### Workspaces
+- macOS
+- VS Code oder Cursor (optional: Claude Code, Codex, Antigravity)
+- Node.js (für `terminal-setup.js`)
+
+### Remote Management
+- Python 3.x
+- Network-Tools (`ping`, `arp`, `nc`)
+
+### Local Dev
+- [Ollama](https://ollama.com) installiert
+- OpenCode in `/Applications/` oder `~/Applications/`
+
+---
+
+## 📝 Konfigurationsdateien
+
+| Datei | Ort | Zweck |
+|-------|-----|-------|
+| `config.local.zsh` | `workspaces/` | Lokale Workspace-Einstellungen |
+| `remote.json` | `remote/` | Server-Konfiguration |
+| `ollama-config.json` | `local-dev/` | Ollama-Modell-Einstellungen |
+
+**⚠️ Wichtig:**
+- Alle `*.example.*`-Dateien sind **Beispiele** – kopiere sie und passe sie an
+- `.gitignore` schützt deine lokalen Konfigurationen
+
+---
+
+## 🎯 Nächste Schritte
+
+1. **Module auswählen** – Entscheide, welche du brauchst
+2. **Unnötige löschen** – `rm -rf modulname/`
+3. **Konfiguration anpassen** – Kopiere `*.example.*`-Dateien und passe sie an
+4. **Setup ausführen** – Starte das zentrale Setup-Skript
+
+---
+
+## 💡 Tipps
+
+- **Modularität:** Jedes Modul funktioniert **ständig allein**
+- **Keine Konflikte:** Die Module stören sich nicht gegenseitig
+- **Einfache Updates:** Git-Pulls aktualisieren nur die Module, die du behältst
+- **Wiederherstellen:** Einfach das Repository neu klonen, wenn du ein Modul zurückholen willst
+
+---
+
+## 📞 Hilfe & Fehlerbehebung
+
+### Workspaces
+- **Starter öffnet sich als Text:** Rechtsklick → Öffnen im Finder
+- **Keine Repositories:** `Setup VibeCode Workspace.command` ausführen
+- **VS Code nicht gefunden:** VS Code oder Cursor in `/Applications` installieren
+
+### Remote Management
+- **Python fehlt:** `brew install python`
+- **Server nicht erreichbar:** IP-Adresse und MAC-Adresse prüfen
+
+### Local Dev
+- **Ollama nicht installiert:** [ollama.com](https://ollama.com)
+- **Modell lädt nicht:** `ollama pull modellname` manuell ausführen
+- **OpenCode nicht gefunden:** App in `/Applications` installieren
+
+---
+
+**Viel Erfolg mit deinem modularen VibeCode Workspace! 🚀**

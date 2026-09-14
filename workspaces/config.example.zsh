@@ -14,11 +14,14 @@ PROJECTS=(
 # Diese Terminals gelten für Projekte OHNE eigene Terminal-Auswahl im Setup.
 # Zeilen entfernen, ergänzen oder den Befehl frei anpassen.
 # Format: "Terminalname|Befehl|relatives Arbeitsverzeichnis"
-# Claude Code: YOLO. Codex: Workspace-Sandbox ohne Sicherheitsabfragen.
+# Claude Code und Antigravity ohne Sicherheitsabfragen; Codex mit Workspace-Sandbox.
 AUTO_TERMINALS=(
-  "Shell|exec zsh -l|"
-  "Claude Code|if command -v claude >/dev/null 2>&1; then exec claude --dangerously-skip-permissions; else echo 'Claude Code ist nicht installiert.'; exec zsh -l; fi|"
+  "Frontend|npm run dev|frontend"
+  "Storybook|npm run storybook|frontend"
+  "Codex 2|if command -v codex >/dev/null 2>&1; then CODEX_HOME=\"\$HOME/.codex-account2\" exec codex --sandbox workspace-write --ask-for-approval never; else echo 'Codex 2 ist nicht installiert.'; exec zsh -l; fi|"
   "Codex|if command -v codex >/dev/null 2>&1; then exec codex --sandbox workspace-write --ask-for-approval never; else echo 'Codex ist nicht installiert.'; exec zsh -l; fi|"
+  "Claude|if command -v claude >/dev/null 2>&1; then exec claude --dangerously-skip-permissions; else echo 'Claude Code ist nicht installiert.'; exec zsh -l; fi|"
+  "agy|if command -v agy >/dev/null 2>&1; then exec agy --dangerously-skip-permissions; else echo 'Antigravity (agy) ist nicht installiert.'; exec zsh -l; fi|"
 )
 
 # Zusätzliche Tasks nur für ein bestimmtes Projekt OHNE Setup-Terminal-Auswahl.
