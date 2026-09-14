@@ -4,6 +4,6 @@ ROOT="${0:A:h}"
 if [[ "${1:-}" == remote ]]; then
   shift
   command -v python3 >/dev/null || { print -u2 'Remote benötigt Python 3 (z. B. brew install python).'; exit 1; }
-  exec python3 "$ROOT/remote.py" "$@"
+  exec python3 "$ROOT/../remote/remote.py" "$@"
 fi
 exec "$ROOT/VibeCode Workspace.command" "$@"

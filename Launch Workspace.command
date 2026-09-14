@@ -71,7 +71,7 @@ SCRIPT_FILE="${0:A}"
 SCRIPT_DIR="${SCRIPT_FILE:h}"
 
 if [[ "${1:-}" == "remote" ]]; then
-  exec "$SCRIPT_DIR/workspace" "$@"
+  exec "$SCRIPT_DIR/workspaces/workspace" "$@"
 fi
 
 # ============================================================
@@ -110,13 +110,16 @@ TERMINALS=()
 # )
 
 # Diese Standard-Terminals gelten für Projekte ohne eigene Setup-Auswahl.
-# Falls Claude Code oder Codex fehlen, bleibt eine Shell mit Installationshinweis
-# geöffnet, statt dass der Task sofort verschwindet.
-# Keine Sicherheitsabfragen: Claude Code im YOLO-Modus, Codex mit Workspace-Sandbox.
+# Falls Claude Code, Codex oder Antigravity fehlen, bleibt eine Shell mit
+# Installationshinweis geöffnet, statt dass der Task sofort verschwindet.
+# Claude Code und Antigravity ohne Sicherheitsabfragen; Codex mit Workspace-Sandbox.
 AUTO_TERMINALS=(
-  "Shell|exec zsh -l|"
-  "Claude Code|if command -v claude >/dev/null 2>&1; then exec claude --dangerously-skip-permissions; else echo 'Claude Code ist nicht installiert.'; exec zsh -l; fi|"
+  "Frontend|npm run dev|frontend"
+  "Storybook|npm run storybook|frontend"
+  "Codex 2|if command -v codex >/dev/null 2>&1; then CODEX_HOME=\"\$HOME/.codex-account2\" exec codex --sandbox workspace-write --ask-for-approval never; else echo 'Codex 2 ist nicht installiert.'; exec zsh -l; fi|"
   "Codex|if command -v codex >/dev/null 2>&1; then exec codex --sandbox workspace-write --ask-for-approval never; else echo 'Codex ist nicht installiert.'; exec zsh -l; fi|"
+  "Claude|if command -v claude >/dev/null 2>&1; then exec claude --dangerously-skip-permissions; else echo 'Claude Code ist nicht installiert.'; exec zsh -l; fi|"
+  "agy|if command -v agy >/dev/null 2>&1; then exec agy --dangerously-skip-permissions; else echo 'Antigravity (agy) ist nicht installiert.'; exec zsh -l; fi|"
 )
 
 # Bevorzugter VS-Code-Befehl. Wenn er nicht im PATH liegt, wird die
@@ -148,7 +151,7 @@ CLOSE_LAUNCHER_TERMINAL=true
 
 # Persönliche Konfiguration neben dem Starter laden. Diese Datei ist absichtlich
 # nicht Teil von Git; eine Vorlage liegt als config.example.zsh im Repository.
-LOCAL_CONFIG="$SCRIPT_DIR/config.local.zsh"
+LOCAL_CONFIG="$SCRIPT_DIR/workspaces/config.local.zsh"
 if [[ -f "$LOCAL_CONFIG" ]]; then
   source "$LOCAL_CONFIG"
 fi
@@ -447,9 +450,9 @@ function run(argv) {
         for (const entry of entries) {
             // Auch früher gespeicherte Codex-Vorlagen verwenden den neuen Standard.
             // Nur den erzeugten Start ersetzen; eigene Befehle und Prompts bleiben erhalten.
-            const command = entry.type === "Codex"
+            const command = ["Codex", "Codex 2"].includes(entry.type)
                 ? entry.command.replace(
-                    /^(if command -v codex >\/dev\/null 2>&1; then exec codex )--yolo(?=;| -- )/,
+                    /^(if command -v codex >\/dev\/null 2>&1; then (?:CODEX_HOME="?\$HOME\/\.codex-account2"? )?exec codex )--yolo(?=;| -- )/,
                     "$1--sandbox workspace-write --ask-for-approval never")
                 : entry.command;
             terminalDefinitions.push({ project, terminalName: entry.name, command, relativeCwd: entry.cwd });
@@ -538,9 +541,9 @@ fi
 # Das beim Doppelklick ohnehin geöffnete Starter-Terminal wird zum dauerhaften
 # Kontrollterminal. Bei AN hält es den Mac wach und verwaltet die ausgewählten
 # Desktop-Apps beziehungsweise Agent-Terminals; q kehrt hierher zurück.
-if [[ "$OPEN_CONTROL_TERMINAL" == "true" && -f "$SCRIPT_DIR/remote.py" ]]; then
+if [[ "$OPEN_CONTROL_TERMINAL" == "true" && -f "$SCRIPT_DIR/remote/remote.py" ]]; then
   if command -v python3 >/dev/null 2>&1; then
-    VIBECODE_REMOTE_DIR="$CONFIG_DIR/remote" python3 "$SCRIPT_DIR/remote.py" control
+    VIBECODE_REMOTE_DIR="$CONFIG_DIR/remote" python3 "$SCRIPT_DIR/remote/remote.py" control
   else
     printf 'Kontrollterminal benötigt Python 3.\n' >&2
   fi

@@ -16,17 +16,29 @@ function shellQuote(value) {
 function terminalCommand(type, prompt) {
     if (type === "Shell") return "exec zsh -l";
     if (type === "Eigener Befehl") return prompt;
+    if (type === "Antigravity") {
+        const argument = prompt ? ` --prompt-interactive ${shellQuote(prompt)}` : "";
+        return `if command -v agy >/dev/null 2>&1; then exec agy --dangerously-skip-permissions${argument}; else echo 'Antigravity (agy) ist nicht installiert.'; exec zsh -l; fi`;
+    }
     const executable = type === "Claude Code" ? "claude" : "codex";
     const flag = type === "Claude Code"
         ? "--dangerously-skip-permissions"
         : "--sandbox workspace-write --ask-for-approval never";
+    const account = type === "Codex 2" ? 'CODEX_HOME="$HOME/.codex-account2" ' : "";
     const argument = prompt ? ` -- ${shellQuote(prompt)}` : "";
-    return `if command -v ${executable} >/dev/null 2>&1; then exec ${executable} ${flag}${argument}; else echo '${type} ist nicht installiert.'; exec zsh -l; fi`;
+    return `if command -v ${executable} >/dev/null 2>&1; then ${account}exec ${executable} ${flag}${argument}; else echo '${type} ist nicht installiert.'; exec zsh -l; fi`;
 }
 
 function defaultTerminals() {
-    return ["Shell", "Claude Code", "Codex"].map((type) => ({
-        name: type, type, prompt: "", command: terminalCommand(type, ""), cwd: "",
+    return [
+        { name: "Frontend", type: "Eigener Befehl", prompt: "npm run dev", cwd: "frontend" },
+        { name: "Storybook", type: "Eigener Befehl", prompt: "npm run storybook", cwd: "frontend" },
+        { name: "Codex 2", type: "Codex 2", prompt: "", cwd: "" },
+        { name: "Codex", type: "Codex", prompt: "", cwd: "" },
+        { name: "Claude", type: "Claude Code", prompt: "", cwd: "" },
+        { name: "agy", type: "Antigravity", prompt: "", cwd: "" },
+    ].map((terminal) => ({
+        ...terminal, command: terminalCommand(terminal.type, terminal.prompt),
     }));
 }
 
@@ -45,7 +57,7 @@ function configureProject(app, project, existing) {
     let count;
     while (true) {
         const answer = ask(app,
-            `Wie viele Terminals sollen für „${project.name}“ geöffnet werden?\n\n0 = keine Terminals. Claude Code startet im YOLO-Modus. Codex startet mit Workspace-Sandbox ohne Sicherheitsabfragen; durch die Sandbox verbotene Aktionen werden blockiert.`,
+            `Wie viele Terminals sollen für „${project.name}“ geöffnet werden?\n\n0 = keine Terminals. Claude Code und Antigravity starten ohne Sicherheitsabfragen. Codex startet mit Workspace-Sandbox ohne Sicherheitsabfragen; durch die Sandbox verbotene Aktionen werden blockiert.`,
             String(existing.length), title).trim();
         if (/^\d+$/.test(answer) && Number.isSafeInteger(Number(answer))) {
             count = Number(answer);
@@ -55,7 +67,7 @@ function configureProject(app, project, existing) {
     }
 
     const terminals = [];
-    const types = ["Shell", "Claude Code", "Codex", "Eigener Befehl"];
+    const types = ["Shell", "Claude Code", "Codex", "Codex 2", "Antigravity", "Eigener Befehl"];
     for (let index = 0; index < count; index += 1) {
         const previous = existing[index];
         const terminalTitle = `${project.name} · Terminal ${index + 1} von ${count}`;
@@ -114,7 +126,7 @@ function run(argv) {
         if (Object.prototype.hasOwnProperty.call(saved.projects, project.path)) {
             const entries = saved.projects[project.path];
             if (!Array.isArray(entries) || entries.some((entry) => !entry ||
-                !["Shell", "Claude Code", "Codex", "Eigener Befehl"].includes(entry.type) ||
+                !["Shell", "Claude Code", "Codex", "Codex 2", "Antigravity", "Eigener Befehl"].includes(entry.type) ||
                 [entry.name, entry.prompt, entry.command, entry.cwd].some((value) => typeof value !== "string"))) {
                 throw new Error(`Ungültige Terminals für ${project.name}.`);
             }
@@ -125,7 +137,7 @@ function run(argv) {
     try {
         const selected = app.chooseFromList(projects.map((project) => project.name), {
             withTitle: "VibeCode Workspace Setup",
-            withPrompt: "Für welche Repositories möchtest du Anzahl und Inhalt der Terminals festlegen? Mehrfachauswahl mit ⌘. Nicht ausgewählte Ordner behalten ihre bisherigen Terminals oder die drei Standard-Terminals.",
+            withPrompt: "Für welche Repositories möchtest du Anzahl und Inhalt der Terminals festlegen? Mehrfachauswahl mit ⌘. Nicht ausgewählte Ordner behalten ihre bisherigen Terminals oder die sechs Standard-Terminals.",
             defaultItems: projects.map((project) => project.name),
             multipleSelectionsAllowed: true,
         });
