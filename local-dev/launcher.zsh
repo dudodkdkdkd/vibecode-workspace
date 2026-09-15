@@ -11,10 +11,13 @@ CONFIG_FILE="${LOCAL_DEV_CONFIG_FILE:-$LOCAL_DEV_DIR/local-ai.json}"
 EXAMPLE_CONFIG="$LOCAL_DEV_DIR/local-ai.example.json"
 STATE_DIR="${LOCAL_DEV_STATE_DIR:-$LOCAL_DEV_DIR/.local-ai-state}"
 LOG_FILE="${LOCAL_DEV_LOG_FILE:-$LOCAL_DEV_DIR/local-ai.log}"
+APP_MANAGEMENT_ENABLED="${LOCAL_DEV_MANAGE_APPS:-1}"
 
 export PATH="$HOME/.npm-global/bin:$HOME/.local/bin:$HOME/.opencode/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
 
 JQ_BIN=""
+OSASCRIPT_BIN="${LOCAL_DEV_OSASCRIPT_BIN:-}"
+OPEN_BIN="${LOCAL_DEV_OPEN_BIN:-}"
 ACTIVE_SOURCE=""
 ACTIVE_FRAMEWORK=""
 SOURCE_TYPE=""
@@ -32,6 +35,9 @@ FRAMEWORK_NAME=""
 FRAMEWORK_COMMAND=""
 WORKING_DIRECTORY=""
 CHOSEN_PROFILE=""
+HARDWARE_PROFILE=""
+HARDWARE_NAME=""
+START_IN_PROGRESS=false
 
 UI_WIDTH=76
 C_RESET=""
@@ -99,6 +105,7 @@ show_dashboard() {
     panel_line "MODEL      $MODEL"
     panel_line "ENDPOINT   $BASE_URL"
     panel_line "FRAMEWORK  $FRAMEWORK_NAME"
+    [[ -n "$HARDWARE_NAME" ]] && panel_line "HARDWARE   $HARDWARE_NAME"
     panel_line "SESSION    $ACTIVE_SOURCE  →  $ACTIVE_FRAMEWORK"
     printf '%s╰' "$C_ACCENT"
     repeat_char '─' $(( UI_WIDTH - 2 ))
@@ -125,6 +132,9 @@ log() {
 
 fail() {
     printf '%s×%s %s\n' "$C_ERROR" "$C_RESET" "$1" >&2
+    if [[ "$START_IN_PROGRESS" == "true" ]] && (( $+functions[restore_suspended_apps] )); then
+        restore_suspended_apps
+    fi
     if [[ -t 0 && "${TERM_PROGRAM:-}" == "Apple_Terminal" ]]; then
         printf '\nEnter druecken, um das Fenster zu schliessen ...'
         read -r
@@ -209,6 +219,22 @@ framework_value() {
     "$JQ_BIN" -er --arg profile "$ACTIVE_FRAMEWORK" ".frameworks[\$profile].${field} // empty" "$CONFIG_FILE" 2>/dev/null
 }
 
+hardware_profile_value() {
+    local field="$1"
+    [[ -n "$HARDWARE_PROFILE" ]] || return 1
+    "$JQ_BIN" -er --arg profile "$HARDWARE_PROFILE" ".hardware_profiles[\$profile].${field} // empty" "$CONFIG_FILE" 2>/dev/null
+}
+
+hardware_provider_value() {
+    local field="$1"
+    [[ -n "$HARDWARE_PROFILE" ]] || return 1
+    "$JQ_BIN" -er \
+        --arg hardware "$HARDWARE_PROFILE" \
+        --arg provider "$ACTIVE_SOURCE" \
+        ".hardware_profiles[\$hardware].providers[\$provider].${field} // empty" \
+        "$CONFIG_FILE" 2>/dev/null
+}
+
 expand_home() {
     local value="$1"
     case "$value" in
@@ -249,7 +275,36 @@ load_config() {
         (.frameworks[.framework].adapter | IN("opencode", "codex", "claude", "generic")) and
         (.frameworks[.framework].name | type == "string" and length > 0) and
         (.frameworks[.framework].command | type == "string" and length > 0) and
-        ((.frameworks[.framework].args // []) | type == "array")
+        ((.frameworks[.framework].args // []) | type == "array") and
+        ((.memory_management // {}) | type == "object") and
+        ((.memory_management.enabled // true) | type == "boolean") and
+        ((.memory_management.close_apps_on_start // []) | type == "array") and
+        all((.memory_management.close_apps_on_start // [])[]; type == "string" and length > 0) and
+        ((.memory_management.restore_apps_on_stop // true) | type == "boolean") and
+        ((.providers[.provider].model_limits // {}) | type == "object") and
+        ((.providers[.provider].model_limits.context // 1) | type == "number" and . > 0 and floor == .) and
+        ((.providers[.provider].model_limits.input // 1) | type == "number" and . > 0 and floor == .) and
+        ((.providers[.provider].model_limits.output // 1) | type == "number" and . > 0 and floor == .) and
+        ((.frameworks[.framework].compaction // {}) | type == "object") and
+        ((.frameworks[.framework].compaction.auto // true) | type == "boolean") and
+        ((.frameworks[.framework].compaction.prune // true) | type == "boolean") and
+        ((.frameworks[.framework].compaction.reserved // 4096) | type == "number" and . > 0 and floor == .) and
+        ((.hardware_profile // "") as $hardware |
+            ($hardware == "") or (
+                (.hardware_profiles[$hardware] | type == "object") and
+                (.hardware_profiles[$hardware].name | type == "string" and length > 0) and
+                (.hardware_profiles[$hardware].unified_memory_gb | type == "number" and . > 0) and
+                ((.hardware_profiles[$hardware].providers[.provider] // {}) as $settings |
+                    ($settings | type == "object") and
+                    (($settings.server_args // []) | type == "array") and
+                    all(($settings.server_args // [])[]; type == "string") and
+                    (($settings.model_limits // {}) | type == "object") and
+                    (($settings.model_limits.context // 1) | type == "number" and . > 0 and floor == .) and
+                    (($settings.model_limits.input // 1) | type == "number" and . > 0 and floor == .) and
+                    (($settings.model_limits.output // 1) | type == "number" and . > 0 and floor == .)
+                )
+            )
+        )
     ' "$CONFIG_FILE" >/dev/null 2>&1 || fail "Ungueltige Konfiguration: $CONFIG_FILE"
 
     ACTIVE_SOURCE="$("$JQ_BIN" -r '.provider' "$CONFIG_FILE")"
@@ -266,6 +321,8 @@ load_config() {
     FRAMEWORK_NAME="$(framework_value name)"
     FRAMEWORK_COMMAND="$(framework_value command)"
     WORKING_DIRECTORY="$(framework_value working_directory 2>/dev/null || printf '.')"
+    HARDWARE_PROFILE="$("$JQ_BIN" -r '.hardware_profile // empty' "$CONFIG_FILE")"
+    HARDWARE_NAME="$(hardware_profile_value name 2>/dev/null || true)"
 
     if [[ "$SOURCE_TYPE" != "openai-compatible" ]]; then
         [[ "$PORT" == <1-65535> ]] || fail "Port fuer '$ACTIVE_SOURCE' ist ungueltig."
@@ -292,6 +349,204 @@ load_config() {
 
 pid_file() {
     printf '%s/%s.pid\n' "$STATE_DIR" "$ACTIVE_SOURCE"
+}
+
+suspended_apps_file() {
+    printf '%s/suspended-apps.json\n' "$STATE_DIR"
+}
+
+resolve_app_commands() {
+    [[ -n "$OSASCRIPT_BIN" ]] || OSASCRIPT_BIN="$(command -v osascript 2>/dev/null || true)"
+    [[ -n "$OPEN_BIN" ]] || OPEN_BIN="$(command -v open 2>/dev/null || true)"
+}
+
+app_control_available() {
+    [[ "$APP_MANAGEMENT_ENABLED" != "0" ]] || return 1
+    resolve_app_commands
+    [[ -n "$OSASCRIPT_BIN" && -x "$OSASCRIPT_BIN" ]]
+}
+
+app_is_running() {
+    local app_name="$1"
+    local result
+    result="$("$OSASCRIPT_BIN" -l JavaScript - "$app_name" 2>/dev/null <<'JXA'
+function run(argv) {
+    const target = Application(argv[0]);
+    return target.running() ? "running" : "stopped";
+}
+JXA
+)" || return 2
+    [[ "$result" == "running" ]]
+}
+
+record_suspended_app() {
+    local app_name="$1"
+    local state_file="$(suspended_apps_file)"
+    mkdir -p "$STATE_DIR"
+    local temp_file="$(mktemp "${state_file}.XXXXXX")" || return 1
+    if [[ -s "$state_file" ]] && "$JQ_BIN" -e '.apps | type == "array"' "$state_file" >/dev/null 2>&1; then
+        "$JQ_BIN" --arg app "$app_name" '.apps = ((.apps + [$app]) | unique)' "$state_file" > "$temp_file" || {
+            rm -f "$temp_file"
+            return 1
+        }
+    else
+        "$JQ_BIN" -n --arg app "$app_name" '{apps: [$app]}' > "$temp_file" || {
+            rm -f "$temp_file"
+            return 1
+        }
+    fi
+    chmod 600 "$temp_file"
+    mv "$temp_file" "$state_file"
+}
+
+forget_suspended_app() {
+    local app_name="$1"
+    local state_file="$(suspended_apps_file)"
+    [[ -s "$state_file" ]] || return 0
+    local temp_file="$(mktemp "${state_file}.XXXXXX")" || return 1
+    "$JQ_BIN" --arg app "$app_name" '.apps = [.apps[]? | select(. != $app)]' "$state_file" > "$temp_file" || {
+        rm -f "$temp_file"
+        return 1
+    }
+    if "$JQ_BIN" -e '.apps | length == 0' "$temp_file" >/dev/null 2>&1; then
+        rm -f "$temp_file" "$state_file"
+    else
+        chmod 600 "$temp_file"
+        mv "$temp_file" "$state_file"
+    fi
+}
+
+request_app_quit() {
+    local app_name="$1"
+    "$OSASCRIPT_BIN" -l JavaScript - "$app_name" 2>/dev/null <<'JXA'
+function run(argv) {
+    const appName = argv[0];
+    const target = Application(appName);
+    if (!target.running()) return "not-running";
+
+    if (appName === "Google Chrome") {
+        const hasIncognitoWindow = target.windows().some((window) => window.mode() === "incognito");
+        if (hasIncognitoWindow) return "incognito";
+    }
+
+    target.quit();
+    return "quit-requested";
+}
+JXA
+}
+
+suspend_configured_apps() {
+    [[ "$APP_MANAGEMENT_ENABLED" != "0" ]] || return 0
+    [[ "$("$JQ_BIN" -r 'if .memory_management.enabled == null then true else .memory_management.enabled end' "$CONFIG_FILE")" == "true" ]] || return 0
+    local -a app_names
+    app_names=("${(@f)$("$JQ_BIN" -r '.memory_management.close_apps_on_start[]? // empty' "$CONFIG_FILE")}")
+    (( ${#app_names} > 0 )) || return 0
+
+    if ! app_control_available; then
+        ui_warn "Apps konnten nicht automatisch geschlossen werden: osascript fehlt"
+        return 0
+    fi
+
+    local app_name
+    for app_name in "${app_names[@]}"; do
+        [[ -n "$app_name" ]] || continue
+        app_is_running "$app_name"
+        local running_status=$?
+        if (( running_status == 1 )); then
+            continue
+        elif (( running_status != 0 )); then
+            ui_warn "$app_name konnte nicht geprueft werden und bleibt offen"
+            continue
+        fi
+
+        # Vor dem Quit vermerken, damit ein Abbruch waehrend des Beendens die
+        # spaetere Wiederherstellung nicht verliert.
+        if ! record_suspended_app "$app_name"; then
+            ui_warn "$app_name bleibt offen: Wiederherstellungsstatus konnte nicht gespeichert werden"
+            continue
+        fi
+
+        local quit_result
+        quit_result="$(request_app_quit "$app_name")"
+        local quit_status=$?
+        if (( quit_status != 0 )); then
+            forget_suspended_app "$app_name" || true
+            ui_warn "$app_name konnte nicht automatisch beendet werden"
+            continue
+        fi
+        if [[ "$quit_result" == "incognito" ]]; then
+            forget_suspended_app "$app_name" || true
+            ui_warn "$app_name bleibt offen: Inkognito-Fenster koennen nicht wiederhergestellt werden"
+            continue
+        fi
+        if [[ "$quit_result" != "quit-requested" ]]; then
+            forget_suspended_app "$app_name" || true
+            continue
+        fi
+
+        local attempt=0
+        while app_is_running "$app_name" && (( attempt < 40 )); do
+            sleep 0.25
+            (( attempt += 1 ))
+        done
+        app_is_running "$app_name"
+        running_status=$?
+        if (( running_status == 0 )); then
+            forget_suspended_app "$app_name" || true
+            ui_warn "$app_name beendet sich noch nicht und bleibt deshalb aus der Wiederherstellungsliste"
+        elif (( running_status == 1 )); then
+            ui_ok "$app_name wurde fuer mehr freien Arbeitsspeicher geschlossen"
+            log "$app_name wurde vor dem Start geschlossen."
+        else
+            ui_warn "$app_name wurde beendet; der Wiederherstellungsstatus bleibt vorsichtshalber gespeichert"
+        fi
+    done
+}
+
+restore_suspended_apps() {
+    [[ "$APP_MANAGEMENT_ENABLED" != "0" ]] || return 0
+    local state_file="$(suspended_apps_file)"
+    [[ -s "$state_file" ]] || return 0
+
+    if [[ "$("$JQ_BIN" -r 'if .memory_management.restore_apps_on_stop == null then true else .memory_management.restore_apps_on_stop end' "$CONFIG_FILE")" != "true" ]]; then
+        rm -f "$state_file"
+        return 0
+    fi
+    resolve_app_commands
+    if [[ -z "$OSASCRIPT_BIN" || ! -x "$OSASCRIPT_BIN" || -z "$OPEN_BIN" || ! -x "$OPEN_BIN" ]]; then
+        ui_warn "Geschlossene Apps konnten noch nicht wieder geoeffnet werden"
+        return 0
+    fi
+
+    local -a app_names
+    app_names=("${(@f)$("$JQ_BIN" -r '.apps[]? // empty' "$state_file" 2>/dev/null)}")
+    local app_name
+    for app_name in "${app_names[@]}"; do
+        [[ -n "$app_name" ]] || continue
+        app_is_running "$app_name"
+        local running_status=$?
+        if (( running_status == 0 )); then
+            forget_suspended_app "$app_name" || true
+            continue
+        elif (( running_status != 1 )); then
+            ui_warn "$app_name konnte nicht geprueft werden; Wiederherstellung wird spaeter erneut versucht"
+            continue
+        fi
+
+        ui_step "Oeffne $app_name wieder"
+        if [[ "$app_name" == "Google Chrome" ]]; then
+            "$OPEN_BIN" -a "$app_name" --args --restore-last-session >/dev/null 2>&1
+        else
+            "$OPEN_BIN" -a "$app_name" >/dev/null 2>&1
+        fi
+        if (( $? == 0 )); then
+            forget_suspended_app "$app_name" || true
+            ui_ok "$app_name wurde wieder geoeffnet"
+            log "$app_name wurde nach dem Stoppen wieder geoeffnet."
+        else
+            ui_warn "$app_name konnte noch nicht wieder geoeffnet werden; der Status bleibt gespeichert"
+        fi
+    done
 }
 
 health_ok() {
@@ -414,6 +669,13 @@ start_source_process() {
             while IFS= read -r configured_arg; do
                 command_args+=("$(expand_placeholders "$configured_arg")")
             done < <("$JQ_BIN" -r --arg profile "$ACTIVE_SOURCE" '.providers[$profile].server_args[]?' "$CONFIG_FILE")
+            while IFS= read -r configured_arg; do
+                command_args+=("$(expand_placeholders "$configured_arg")")
+            done < <("$JQ_BIN" -r \
+                --arg hardware "$HARDWARE_PROFILE" \
+                --arg provider "$ACTIVE_SOURCE" \
+                '.hardware_profiles[$hardware].providers[$provider].server_args[]? // empty' \
+                "$CONFIG_FILE")
             command_args+=(--model "$MODEL" --host "$HOST" --port "$PORT")
             ui_step "Starte $SOURCE_NAME mit $MODEL"
             nohup "$command_path" "${command_args[@]}" >> "$LOG_FILE" 2>&1 &
@@ -518,12 +780,25 @@ render_opencode_config() {
     [[ "$PROTOCOL" == "openai-responses" ]] && package="@ai-sdk/openai"
     [[ "$PROTOCOL" == "anthropic" ]] && package="@ai-sdk/anthropic"
 
+    local context_limit="$(hardware_provider_value model_limits.context 2>/dev/null || source_value model_limits.context 2>/dev/null || true)"
+    local input_limit="$(hardware_provider_value model_limits.input 2>/dev/null || source_value model_limits.input 2>/dev/null || true)"
+    local output_limit="$(hardware_provider_value model_limits.output 2>/dev/null || source_value model_limits.output 2>/dev/null || true)"
+    local compaction_auto="$("$JQ_BIN" -r --arg profile "$ACTIVE_FRAMEWORK" 'if .frameworks[$profile].compaction.auto == null then true else .frameworks[$profile].compaction.auto end' "$CONFIG_FILE")"
+    local compaction_prune="$("$JQ_BIN" -r --arg profile "$ACTIVE_FRAMEWORK" 'if .frameworks[$profile].compaction.prune == null then true else .frameworks[$profile].compaction.prune end' "$CONFIG_FILE")"
+    local compaction_reserved="$("$JQ_BIN" -r --arg profile "$ACTIVE_FRAMEWORK" '.frameworks[$profile].compaction.reserved // 4096' "$CONFIG_FILE")"
+
     "$JQ_BIN" -cn \
         --arg provider "$PROVIDER" \
         --arg name "$SOURCE_NAME" \
         --arg model "$MODEL" \
         --arg baseURL "$BASE_URL" \
         --arg package "$package" \
+        --argjson contextLimit "${context_limit:-null}" \
+        --argjson inputLimit "${input_limit:-null}" \
+        --argjson outputLimit "${output_limit:-null}" \
+        --argjson compactionAuto "$compaction_auto" \
+        --argjson compactionPrune "$compaction_prune" \
+        --argjson compactionReserved "$compaction_reserved" \
         '{
             "$schema": "https://opencode.ai/config.json",
             "provider": {
@@ -535,11 +810,29 @@ render_opencode_config() {
                         "apiKey": "not-needed"
                     },
                     "models": {
-                        ($model): {"name": $model}
+                        ($model): (
+                            {"name": $model} +
+                            if $contextLimit != null and $outputLimit != null then
+                                {
+                                    "limit": (
+                                        {
+                                            "context": $contextLimit,
+                                            "output": $outputLimit
+                                        } +
+                                        if $inputLimit != null then {"input": $inputLimit} else {} end
+                                    )
+                                }
+                            else {} end
+                        )
                     }
                 }
             },
             "model": ($provider + "/" + $model),
+            "compaction": {
+                "auto": $compactionAuto,
+                "prune": $compactionPrune,
+                "reserved": $compactionReserved
+            },
             "permission": "allow"
         }'
 }
@@ -728,6 +1021,23 @@ check_configuration() {
     local warnings=0
     ui_ok "Konfiguration ist gueltig"
 
+    if [[ -n "$HARDWARE_PROFILE" ]]; then
+        local configured_memory="$(hardware_profile_value unified_memory_gb 2>/dev/null || true)"
+        local actual_memory=""
+        if command -v sysctl >/dev/null 2>&1; then
+            local memory_bytes="$(sysctl -n hw.memsize 2>/dev/null || true)"
+            if [[ "$memory_bytes" == <-> ]]; then
+                actual_memory=$(( (memory_bytes + 536870912) / 1073741824 ))
+            fi
+        fi
+        if [[ -n "$actual_memory" && "$configured_memory" != "$actual_memory" ]]; then
+            ui_warn "Hardwareprofil '$HARDWARE_PROFILE' erwartet ${configured_memory} GB, erkannt wurden ${actual_memory} GB"
+            (( warnings += 1 ))
+        else
+            ui_ok "Hardwareprofil $HARDWARE_NAME ist aktiv"
+        fi
+    fi
+
     if [[ "$SOURCE_TYPE" == "mlx" || "$SOURCE_TYPE" == "ollama" ]]; then
         local configured_command="$(source_value server_command 2>/dev/null || true)"
         if [[ -z "$(resolve_executable "$configured_command" 2>/dev/null || true)" ]]; then
@@ -887,6 +1197,7 @@ main() {
             show_dashboard
             ui_step "Local AI laeuft bereits – Toggle: Beende Server und gebe Speicher frei"
             stop_source
+            restore_suspended_apps
             if command -v osascript >/dev/null 2>&1; then
                 osascript -e "display notification \"$SOURCE_NAME ($MODEL) beendet. Arbeitsspeicher freigegeben.\" with title \"Local Dev gestoppt\"" 2>/dev/null || true
             fi
@@ -913,16 +1224,23 @@ main() {
         start|--start)
             show_dashboard
             check_framework_compatibility
+            START_IN_PROGRESS=true
+            suspend_configured_apps
             start_source
+            START_IN_PROGRESS=false
             launch_framework
             ;;
         --start-only)
             show_dashboard
+            START_IN_PROGRESS=true
+            suspend_configured_apps
             start_source
+            START_IN_PROGRESS=false
             ;;
         --stop)
             show_dashboard
             stop_source
+            restore_suspended_apps
             ;;
         --status)
             show_status

@@ -19,16 +19,25 @@ EXAMPLE = ROOT / "local-dev" / "local-ai.example.json"
 
 @unittest.skipUnless(shutil.which("zsh") and shutil.which("jq"), "zsh and jq required")
 class LocalDevLauncherTests(unittest.TestCase):
-    def run_launcher(self, config: Path, *arguments: str, input_text: str = ""):
+    def run_launcher(
+        self,
+        config: Path,
+        *arguments: str,
+        input_text: str = "",
+        extra_environment=None,
+    ):
         environment = os.environ.copy()
         environment.update(
             {
                 "LOCAL_DEV_CONFIG_FILE": str(config),
                 "LOCAL_DEV_STATE_DIR": str(config.parent / "state"),
                 "LOCAL_DEV_LOG_FILE": str(config.parent / "launcher.log"),
+                "LOCAL_DEV_MANAGE_APPS": "0",
                 "NO_COLOR": "1",
             }
         )
+        if extra_environment:
+            environment.update(extra_environment)
         return subprocess.run(
             ["zsh", str(LAUNCHER), *arguments],
             cwd=ROOT,
@@ -60,6 +69,14 @@ class LocalDevLauncherTests(unittest.TestCase):
             rendered = json.loads(result.stdout)
             self.assertEqual(rendered["model"], f"mlx/{model}")
             self.assertIn(model, rendered["provider"]["mlx"]["models"])
+            self.assertEqual(
+                rendered["provider"]["mlx"]["models"][model]["limit"],
+                {"context": 24576, "input": 24576, "output": 4096},
+            )
+            self.assertEqual(
+                rendered["compaction"],
+                {"auto": True, "prune": True, "reserved": 4096},
+            )
             self.assertEqual(rendered["permission"], "allow")
 
     @unittest.skipUnless(shutil.which("lsof"), "lsof required")
@@ -102,6 +119,48 @@ class LocalDevLauncherTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join(timeout=2)
+
+    # @unittest.skipUnless(shutil.which("lsof"), "lsof required")
+    # def test_spark_mlx_readiness_with_spark_model(self):
+    #     class ModelHandler(BaseHTTPRequestHandler):
+    #         def do_GET(self):
+    #             if self.path == "/health":
+    #                 body = b'{"status":"ok"}'
+    #             elif self.path == "/v1/models":
+    #                 body = b'{"data":[{"id":"Spark-X2.5-4B"}]}'
+    #             else:
+    #                 self.send_error(404)
+    #                 return
+    #             self.send_response(200)
+    #             self.send_header("Content-Type", "application/json")
+    #             self.send_header("Content-Length", str(len(body)))
+    #             self.end_headers()
+    #             self.wfile.write(body)
+    #
+    #         def log_message(self, format, *args):
+    #             pass
+    #
+    #     server = ThreadingHTTPServer(("127.0.0.1", 0), ModelHandler)
+    #     thread = threading.Thread(target=server.serve_forever, daemon=True)
+    #     thread.start()
+    #     try:
+    #         with tempfile.TemporaryDirectory() as temp:
+    #             def point_to_spark_mlx(data):
+    #                 provider = data["providers"]["mlx"]
+    #                 provider["port"] = server.server_port
+    #                 provider["server_command"] = "spark-mlx-wrapper"
+    #                 data["model"] = "mlx-community/Spark-X2.5-4B"
+    #
+    #             config = self.write_config(Path(temp), point_to_spark_mlx)
+    #
+    #             result = self.run_launcher(config, "--status")
+    #
+    #             self.assertEqual(result.returncode, 0, result.stderr)
+    #             self.assertIn("Providerprozess passen nicht", result.stdout)
+    #     finally:
+    #         server.shutdown()
+    #         server.server_close()
+    #         thread.join(timeout=2)
 
     def test_setup_keeps_profiles_dynamic_and_accepts_free_model(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -257,6 +316,156 @@ class LocalDevLauncherTests(unittest.TestCase):
                 if state_file.exists():
                     try:
                         os.kill(int(state_file.read_text()), signal.SIGTERM)
+                    except (ProcessLookupError, ValueError):
+                        pass
+
+    def test_chrome_is_closed_on_start_and_restored_on_stop(self):
+        with socket.socket() as reservation:
+            reservation.bind(("127.0.0.1", 0))
+            port = reservation.getsockname()[1]
+
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            running_file = directory / "chrome-running"
+            running_file.write_text("1")
+            open_log = directory / "open.log"
+
+            fake_osascript = directory / "fake-osascript"
+            fake_osascript.write_text(
+                """#!/bin/sh
+script_body=$(/bin/cat)
+if printf '%s' "$script_body" | /usr/bin/grep -q 'hasIncognitoWindow'; then
+    if [ "$(/bin/cat "$FAKE_APP_RUNNING_FILE")" = "1" ]; then
+        printf '0' > "$FAKE_APP_RUNNING_FILE"
+        printf 'quit-requested\n'
+    else
+        printf 'not-running\n'
+    fi
+elif [ "$(/bin/cat "$FAKE_APP_RUNNING_FILE")" = "1" ]; then
+    printf 'running\n'
+else
+    printf 'stopped\n'
+fi
+"""
+            )
+            fake_osascript.chmod(0o755)
+
+            fake_open = directory / "fake-open"
+            fake_open.write_text(
+                """#!/bin/sh
+printf '%s\n' "$*" >> "$FAKE_OPEN_LOG"
+printf '1' > "$FAKE_APP_RUNNING_FILE"
+"""
+            )
+            fake_open.chmod(0o755)
+
+            config_data = {
+                "config_version": 2,
+                "provider": "test-api",
+                "model": "vendor/test-model",
+                "framework": "test-client",
+                "start_timeout_seconds": 8,
+                "memory_management": {
+                    "enabled": True,
+                    "close_apps_on_start": ["Google Chrome"],
+                    "restore_apps_on_stop": True,
+                },
+                "providers": {
+                    "test-api": {
+                        "type": "openai-compatible",
+                        "protocol": "openai-chat",
+                        "provider_id": "test",
+                        "name": "Test API",
+                        "default_model": "vendor/test-model",
+                        "base_url": f"http://127.0.0.1:{port}/v1",
+                        "health_url": f"http://127.0.0.1:{port}/",
+                        "start_command": [
+                            sys.executable,
+                            "-m",
+                            "http.server",
+                            str(port),
+                            "--bind",
+                            "127.0.0.1",
+                        ],
+                    }
+                },
+                "frameworks": {
+                    "test-client": {
+                        "adapter": "generic",
+                        "name": "Test Client",
+                        "command": "/usr/bin/true",
+                        "args": [],
+                        "working_directory": ".",
+                    }
+                },
+            }
+            config = directory / "local-ai.json"
+            config.write_text(json.dumps(config_data))
+            state_directory = directory / "state"
+            provider_state = state_directory / "test-api.pid"
+            app_state = state_directory / "suspended-apps.json"
+            app_environment = {
+                "LOCAL_DEV_MANAGE_APPS": "1",
+                "LOCAL_DEV_OSASCRIPT_BIN": str(fake_osascript),
+                "LOCAL_DEV_OPEN_BIN": str(fake_open),
+                "FAKE_APP_RUNNING_FILE": str(running_file),
+                "FAKE_OPEN_LOG": str(open_log),
+            }
+
+            try:
+                started = self.run_launcher(
+                    config,
+                    "--start",
+                    extra_environment=app_environment,
+                )
+                self.assertEqual(started.returncode, 0, started.stderr)
+                self.assertIn("Google Chrome wurde", started.stdout)
+                self.assertEqual(running_file.read_text(), "0")
+                self.assertEqual(
+                    json.loads(app_state.read_text()),
+                    {"apps": ["Google Chrome"]},
+                )
+
+                stopped = self.run_launcher(
+                    config,
+                    "--stop",
+                    extra_environment=app_environment,
+                )
+                self.assertEqual(stopped.returncode, 0, stopped.stderr)
+                self.assertIn("Google Chrome wurde wieder geoeffnet", stopped.stdout)
+                self.assertEqual(running_file.read_text(), "1")
+                self.assertFalse(app_state.exists())
+                self.assertIn(
+                    "-a Google Chrome --args --restore-last-session",
+                    open_log.read_text(),
+                )
+
+                disabled_config = json.loads(config.read_text())
+                disabled_config["memory_management"]["enabled"] = False
+                config.write_text(json.dumps(disabled_config))
+                started_with_app_management_disabled = self.run_launcher(
+                    config,
+                    "--start",
+                    extra_environment=app_environment,
+                )
+                self.assertEqual(
+                    started_with_app_management_disabled.returncode,
+                    0,
+                    started_with_app_management_disabled.stderr,
+                )
+                self.assertEqual(running_file.read_text(), "1")
+                self.assertFalse(app_state.exists())
+
+                stopped_again = self.run_launcher(
+                    config,
+                    "--stop",
+                    extra_environment=app_environment,
+                )
+                self.assertEqual(stopped_again.returncode, 0, stopped_again.stderr)
+            finally:
+                if provider_state.exists():
+                    try:
+                        os.kill(int(provider_state.read_text()), signal.SIGTERM)
                     except (ProcessLookupError, ValueError):
                         pass
 

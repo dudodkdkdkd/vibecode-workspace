@@ -10,6 +10,48 @@
     "model": { "type": "string", "minLength": 1 },
     "framework": { "type": "string", "minLength": 1 },
     "start_timeout_seconds": { "type": "integer", "minimum": 1 },
+    "memory_management": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "close_apps_on_start": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        },
+        "restore_apps_on_stop": { "type": "boolean" }
+      }
+    },
+    "hardware_profile": { "type": "string", "minLength": 1 },
+    "hardware_profiles": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["name", "unified_memory_gb", "providers"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1 },
+          "chip": { "type": "string", "minLength": 1 },
+          "unified_memory_gb": { "type": "number", "exclusiveMinimum": 0 },
+          "providers": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "properties": {
+                "server_args": { "type": "array", "items": { "type": "string" } },
+                "model_limits": {
+                  "type": "object",
+                  "properties": {
+                    "context": { "type": "integer", "minimum": 1 },
+                    "input": { "type": "integer", "minimum": 1 },
+                    "output": { "type": "integer", "minimum": 1 }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "providers": {
       "type": "object",
       "additionalProperties": {
@@ -31,7 +73,15 @@
           "readiness_max_tokens": { "type": "integer", "minimum": 1, "maximum": 64 },
           "server_command": { "type": "string" },
           "server_args": { "type": "array", "items": { "type": "string" } },
-          "start_command": { "type": "array", "items": { "type": "string" } }
+          "start_command": { "type": "array", "items": { "type": "string" } },
+          "model_limits": {
+            "type": "object",
+            "properties": {
+              "context": { "type": "integer", "minimum": 1 },
+              "input": { "type": "integer", "minimum": 1 },
+              "output": { "type": "integer", "minimum": 1 }
+            }
+          }
         }
       }
     },
@@ -45,7 +95,15 @@
           "name": { "type": "string", "minLength": 1 },
           "command": { "type": "string", "minLength": 1 },
           "args": { "type": "array", "items": { "type": "string" } },
-          "working_directory": { "type": "string" }
+          "working_directory": { "type": "string" },
+          "compaction": {
+            "type": "object",
+            "properties": {
+              "auto": { "type": "boolean" },
+              "prune": { "type": "boolean" },
+              "reserved": { "type": "integer", "minimum": 1 }
+            }
+          }
         }
       }
     }

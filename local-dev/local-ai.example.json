@@ -5,6 +5,35 @@
   "model": "XHToken/Spark-X2.5-4B",
   "framework": "opencode",
   "start_timeout_seconds": 180,
+  "memory_management": {
+    "enabled": true,
+    "close_apps_on_start": ["Google Chrome"],
+    "restore_apps_on_stop": true
+  },
+  "hardware_profile": "m2-max-32gb",
+  "hardware_profiles": {
+    "m2-max-32gb": {
+      "name": "Apple M2 Max · 32 GB",
+      "chip": "Apple M2 Max",
+      "unified_memory_gb": 32,
+      "providers": {
+        "mlx": {
+          "server_args": [
+            "--prompt-cache-size", "1",
+            "--prompt-cache-bytes", "4GB",
+            "--prompt-concurrency", "1",
+            "--decode-concurrency", "2",
+            "--prefill-step-size", "1024"
+          ],
+          "model_limits": {
+            "context": 24576,
+            "input": 24576,
+            "output": 4096
+          }
+        }
+      }
+    }
+  },
   "providers": {
     "mlx": {
       "type": "mlx",
@@ -39,7 +68,12 @@
       "name": "OpenCode",
       "command": "opencode",
       "args": [],
-      "working_directory": "."
+      "working_directory": ".",
+      "compaction": {
+        "auto": true,
+        "prune": true,
+        "reserved": 4096
+      }
     },
     "codex": {
       "adapter": "codex",
