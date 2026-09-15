@@ -6,7 +6,8 @@ import tempfile
 import unittest
 from unittest.mock import patch, Mock, call
 
-spec = importlib.util.spec_from_file_location('remote', Path(__file__).resolve().parents[1] / 'remote.py')
+spec = importlib.util.spec_from_file_location(
+    'remote', Path(__file__).resolve().parents[1] / 'remote' / 'remote.py')
 r = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(r)
 

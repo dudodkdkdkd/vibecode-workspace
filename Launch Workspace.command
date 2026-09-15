@@ -140,11 +140,11 @@ LAST_SELECTION="$CONFIG_DIR/last-selection.txt"
 # false = Tasks werden angelegt, aber nicht automatisch gestartet.
 AUTO_START_TERMINALS=true
 
-# true = dieses Starter-Terminal nach dem Workspace-Start als einfaches
-# Kontrollterminal für Wachhalten + Apps weiterverwenden.
+# true = das Kontrollterminal für Wachhalten + Apps automatisch im
+# integrierten Terminal des geöffneten VS-Code-Workspaces starten.
 OPEN_CONTROL_TERMINAL=true
 
-# true = den eigenen Apple-Terminal-Tab nach erfolgreichem Start schließen.
+# true = den Apple-Terminal-Tab des Starters nach erfolgreichem Start schließen.
 # Bei Fehlern bleibt das Terminal offen und zeigt die Diagnose an.
 CLOSE_LAUNCHER_TERMINAL=true
 # ---------------------------------------------------------------
@@ -366,7 +366,16 @@ for t in "${TERMINALS[@]}"; do
   printf '%s\t%s\t%s\t%s\n' "$project" "$terminal_name" "$command" "$cwd" >> "$TMP_TERMINALS"
 done
 
+CONTROL_SCRIPT="$SCRIPT_DIR/remote/remote.py"
+CONTROL_TERMINAL_ENABLED=false
+if [[ "$OPEN_CONTROL_TERMINAL" == "true" && -f "$CONTROL_SCRIPT" ]]; then
+  CONTROL_TERMINAL_ENABLED=true
+fi
+
 AUTO_START_VALUE="$AUTO_START_TERMINALS" \
+CONTROL_TERMINAL_ENABLED_VALUE="$CONTROL_TERMINAL_ENABLED" \
+CONTROL_SCRIPT_VALUE="$CONTROL_SCRIPT" \
+CONTROL_CONFIG_DIR_VALUE="$CONFIG_DIR/remote" \
 osascript -l JavaScript - "$TMP_SELECTED" "$TMP_CONFIG" "$TMP_TERMINALS" "$WORKSPACE_PATH" "$CONFIG_DIR/terminals.json" <<'JXA'
 ObjC.import("Foundation");
 
@@ -417,6 +426,16 @@ function run(argv) {
         environment.objectForKey("AUTO_START_VALUE") || $("true")
     );
     const autoStart = String(autoStartValue).toLowerCase() === "true";
+    const controlEnabledValue = ObjC.unwrap(
+        environment.objectForKey("CONTROL_TERMINAL_ENABLED_VALUE") || $("false")
+    );
+    const controlEnabled = String(controlEnabledValue).toLowerCase() === "true";
+    const controlScript = ObjC.unwrap(
+        environment.objectForKey("CONTROL_SCRIPT_VALUE") || $("")
+    );
+    const controlConfigDir = ObjC.unwrap(
+        environment.objectForKey("CONTROL_CONFIG_DIR_VALUE") || $("")
+    );
 
     let savedTerminals = {};
     if ($.NSFileManager.defaultManager.fileExistsAtPath($(savedTerminalsFile))) {
@@ -502,6 +521,30 @@ function run(argv) {
         tasks.push(task);
     }
 
+    if (controlEnabled) {
+        tasks.push({
+            label: "VibeCode · Wachhalten + Apps",
+            type: "process",
+            command: "/usr/bin/env",
+            args: ["python3", controlScript, "control"],
+            options: {
+                env: { VIBECODE_REMOTE_DIR: controlConfigDir },
+            },
+            icon: { id: "terminal", color: "terminal.ansiYellow" },
+            problemMatcher: [],
+            presentation: {
+                echo: false,
+                reveal: "always",
+                focus: false,
+                panel: "dedicated",
+                showReuseMessage: false,
+                clear: false,
+                close: true,
+            },
+            runOptions: { runOn: "folderOpen" },
+        });
+    }
+
     const workspace = {
         folders,
         settings: {
@@ -534,21 +577,10 @@ JXA
 "$EDITOR_CMD" "$WORKSPACE_PATH"
 
 # Kurzer Hinweis beim ersten Start automatischer Tasks.
-if [[ "$AUTO_START_TERMINALS" == "true" ]]; then
+if [[ "$AUTO_START_TERMINALS" == "true" || "$CONTROL_TERMINAL_ENABLED" == "true" ]]; then
   osascript -e 'display notification "Falls VS Code fragt: automatische Tasks für diesen Workspace erlauben." with title "Vibe Workspace gestartet"'
 fi
 
-# Das beim Doppelklick ohnehin geöffnete Starter-Terminal wird zum dauerhaften
-# Kontrollterminal. Bei AN hält es den Mac wach und verwaltet die ausgewählten
-# Desktop-Apps beziehungsweise Agent-Terminals; q kehrt hierher zurück.
-if [[ "$OPEN_CONTROL_TERMINAL" == "true" && -f "$SCRIPT_DIR/remote/remote.py" ]]; then
-  if command -v python3 >/dev/null 2>&1; then
-    VIBECODE_REMOTE_DIR="$CONFIG_DIR/remote" python3 "$SCRIPT_DIR/remote/remote.py" control
-  else
-    printf 'Kontrollterminal benötigt Python 3.\n' >&2
-  fi
-fi
-
-# Erst jetzt gilt der Start als vollständig erfolgreich. Der EXIT-Handler darf
-# anschließend den eigenen Terminal-Tab schließen.
+# Das Kontrollterminal läuft als eigener VS-Code-Task. Der Starter ist damit
+# fertig und sein Apple-Terminal-Tab darf jetzt geschlossen werden.
 LAUNCH_COMPLETED=true

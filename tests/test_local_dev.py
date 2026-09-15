@@ -60,6 +60,7 @@ class LocalDevLauncherTests(unittest.TestCase):
             rendered = json.loads(result.stdout)
             self.assertEqual(rendered["model"], f"mlx/{model}")
             self.assertIn(model, rendered["provider"]["mlx"]["models"])
+            self.assertEqual(rendered["permission"], "allow")
 
     @unittest.skipUnless(shutil.which("lsof"), "lsof required")
     def test_mlx_readiness_rejects_wrong_server_runtime(self):
@@ -248,8 +249,9 @@ class LocalDevLauncherTests(unittest.TestCase):
                     result.stdout,
                 )
 
-                stopped = self.run_launcher(config, "--stop")
+                stopped = self.run_launcher(config)
                 self.assertEqual(stopped.returncode, 0, stopped.stderr)
+                self.assertIn("Toggle: Beende Server", stopped.stdout)
                 self.assertIn("wurde gestoppt", stopped.stdout)
             finally:
                 if state_file.exists():
