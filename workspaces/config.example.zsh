@@ -100,10 +100,10 @@ EDITOR_CMD="code"
 # true startet die definierten Terminals automatisch beim Öffnen.
 AUTO_START_TERMINALS=true
 
-# true nutzt das Starter-Terminal anschließend als Kontrollterminal für
-# Wachhalten + Apps. Dort selbst gibt es nur AN/AUS und die App-Auswahl.
+# true öffnet das Kontrollterminal für Wachhalten + Apps automatisch im
+# integrierten Terminal des VS-Code-Workspaces.
 OPEN_CONTROL_TERMINAL=true
 
-# true schließt den Terminal-Tab des Starters nur nach erfolgreichem Durchlauf.
+# true schließt den macOS-Terminal-Tab des Starters nach erfolgreichem Start.
 # Bei einem Fehler bleibt er zur Diagnose geöffnet.
 CLOSE_LAUNCHER_TERMINAL=true

@@ -539,7 +539,8 @@ render_opencode_config() {
                     }
                 }
             },
-            "model": ($provider + "/" + $model)
+            "model": ($provider + "/" + $model),
+            "permission": "allow"
         }'
 }
 
@@ -648,33 +649,66 @@ launch_framework() {
 
 stop_source() {
     local state_file="$(pid_file)"
-    if [[ ! -f "$state_file" ]]; then
+    local stopped_any=false
+
+    if [[ -f "$state_file" ]]; then
+        local source_pid="$(<"$state_file")"
+        if [[ "$source_pid" == <-> ]] && kill -0 "$source_pid" 2>/dev/null; then
+            ui_step "Stoppe $SOURCE_NAME (PID $source_pid)"
+            kill "$source_pid" 2>/dev/null || true
+            local attempt=0
+            while kill -0 "$source_pid" 2>/dev/null && (( attempt < 20 )); do
+                sleep 0.25
+                (( attempt += 1 ))
+            done
+            if kill -0 "$source_pid" 2>/dev/null; then
+                kill -9 "$source_pid" 2>/dev/null || true
+            fi
+            stopped_any=true
+        fi
+        rm -f "$state_file"
+    fi
+
+    if [[ "$SOURCE_TYPE" == "mlx" ]] && command -v lsof >/dev/null 2>&1; then
+        local -a listener_pids
+        listener_pids=("${(@f)$(lsof -nP -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null)}")
+        if (( ${#listener_pids} > 0 )); then
+            for lpid in "${listener_pids[@]}"; do
+                [[ "$lpid" == <-> ]] || continue
+                local listener_command="$(ps -p "$lpid" -o command= 2>/dev/null)"
+                local configured_command="$(source_value server_command 2>/dev/null || true)"
+                local expected_name="${$(expand_home "$configured_command"):t}"
+                if [[ "$listener_command" == *mlx_lm.server* || "$listener_command" == *spark-mlx-server* || ( -n "$expected_name" && "$listener_command" == *"$expected_name"* ) ]]; then
+                    ui_step "Stoppe MLX-Server $lpid auf Port $PORT"
+                    kill "$lpid" 2>/dev/null || true
+                    local attempt=0
+                    while kill -0 "$lpid" 2>/dev/null && (( attempt < 20 )); do
+                        sleep 0.25
+                        (( attempt += 1 ))
+                    done
+                    if kill -0 "$lpid" 2>/dev/null; then
+                        kill -9 "$lpid" 2>/dev/null || true
+                    fi
+                    stopped_any=true
+                fi
+            done
+        fi
+    fi
+
+    if command -v pkill >/dev/null 2>&1; then
+        pkill -f "opencode.*--model.*${MODEL}" 2>/dev/null || true
+    fi
+
+    if [[ "$stopped_any" == "true" ]]; then
+        log "$SOURCE_NAME wurde gestoppt."
+        ui_ok "$SOURCE_NAME wurde gestoppt"
+    else
         if health_ok; then
             ui_warn "$SOURCE_NAME laeuft extern und wird deshalb nicht beendet"
         else
             ui_ok "$SOURCE_NAME ist bereits gestoppt"
         fi
-        return 0
     fi
-
-    local source_pid="$(<"$state_file")"
-    if [[ "$source_pid" != <-> ]] || ! kill -0 "$source_pid" 2>/dev/null; then
-        rm -f "$state_file"
-        ui_ok "$SOURCE_NAME ist bereits gestoppt"
-        return 0
-    fi
-
-    ui_step "Stoppe $SOURCE_NAME"
-    kill "$source_pid" 2>/dev/null || true
-    local attempt=0
-    while kill -0 "$source_pid" 2>/dev/null && (( attempt < 20 )); do
-        sleep 0.25
-        (( attempt += 1 ))
-    done
-    kill -0 "$source_pid" 2>/dev/null && fail "$SOURCE_NAME konnte nicht beendet werden."
-    rm -f "$state_file"
-    log "$SOURCE_NAME wurde gestoppt."
-    ui_ok "$SOURCE_NAME wurde gestoppt"
 }
 
 show_status() {
@@ -788,12 +822,42 @@ setup_configuration() {
     printf 'Beim naechsten Doppelklick startet genau Provider → Modell → Framework aus der Konfiguration.\n'
 }
 
+provider_is_active() {
+    local state_file="$(pid_file)"
+    if [[ -f "$state_file" ]]; then
+        local source_pid="$(<"$state_file")"
+        if [[ "$source_pid" == <-> ]] && kill -0 "$source_pid" 2>/dev/null; then
+            return 0
+        fi
+    fi
+    if [[ "$SOURCE_TYPE" == "mlx" ]] && command -v lsof >/dev/null 2>&1; then
+        local -a listener_pids
+        listener_pids=("${(@f)$(lsof -nP -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null)}")
+        if (( ${#listener_pids} > 0 )); then
+            for lpid in "${listener_pids[@]}"; do
+                [[ "$lpid" == <-> ]] || continue
+                local listener_command="$(ps -p "$lpid" -o command= 2>/dev/null)"
+                local configured_command="$(source_value server_command 2>/dev/null || true)"
+                local expected_name="${$(expand_home "$configured_command"):t}"
+                if [[ "$listener_command" == *mlx_lm.server* || "$listener_command" == *spark-mlx-server* || ( -n "$expected_name" && "$listener_command" == *"$expected_name"* ) ]]; then
+                    return 0
+                fi
+            done
+        fi
+    fi
+    # Fuer den Ein/Aus-Schalter reicht ein schneller Health-Check. source_ready
+    # wuerde eine echte Modell-Inferenz ausloesen und den Stopp unnoetig bremsen.
+    health_ok && return 0
+    return 1
+}
+
 show_help() {
     cat <<'EOF'
 Verwendung: Local Dev.command [Aktion]
 
-Ohne Argument       Provider starten, Modell laden und Framework oeffnen
---setup              Provider, Modell und Framework konfigurieren
+Ohne Argument       Toggle: Wenn aus -> starten; wenn an -> stoppen & Speicher freigeben
+--toggle             Explizit als Ein/Aus-Schalter ausfuehren
+--start              Provider starten, Modell laden und Framework oeffnen
 --start-only         Aktiven Provider ohne Framework starten
 --stop               Vom Starter gestarteten Provider stoppen
 --status             Auswahl und Erreichbarkeit anzeigen
@@ -807,10 +871,45 @@ EOF
 
 main() {
     init_ui
-    local action="${1:-start}"
+    local action="${1:-}"
     load_config
 
+    if [[ -z "$action" || "$action" == "--toggle" ]]; then
+        if provider_is_active; then
+            action="--toggle-stop"
+        else
+            action="start"
+        fi
+    fi
+
     case "$action" in
+        --toggle-stop)
+            show_dashboard
+            ui_step "Local AI laeuft bereits – Toggle: Beende Server und gebe Speicher frei"
+            stop_source
+            if command -v osascript >/dev/null 2>&1; then
+                osascript -e "display notification \"$SOURCE_NAME ($MODEL) beendet. Arbeitsspeicher freigegeben.\" with title \"Local Dev gestoppt\"" 2>/dev/null || true
+            fi
+            local launcher_tty="$(tty 2>/dev/null || true)"
+            if [[ -t 0 && "${TERM_PROGRAM:-}" == "Apple_Terminal" && "$launcher_tty" == /dev/tty* ]]; then
+                /usr/bin/nohup /usr/bin/osascript \
+                    -e 'on run argv' \
+                    -e 'set targetTTY to item 1 of argv' \
+                    -e 'delay 1.0' \
+                    -e 'tell application "Terminal"' \
+                    -e 'repeat with terminalWindow in windows' \
+                    -e 'repeat with terminalTab in tabs of terminalWindow' \
+                    -e 'if (tty of terminalTab) is targetTTY then' \
+                    -e 'if (count of tabs of terminalWindow) is 1 then close terminalWindow' \
+                    -e 'return' \
+                    -e 'end if' \
+                    -e 'end repeat' \
+                    -e 'end repeat' \
+                    -e 'end tell' \
+                    -e 'end run' \
+                    "$launcher_tty" </dev/null >/dev/null 2>&1 &!
+            fi
+            ;;
         start|--start)
             show_dashboard
             check_framework_compatibility

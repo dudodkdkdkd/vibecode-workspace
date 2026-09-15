@@ -7,8 +7,10 @@ const path = require('node:path');
 const { execFileSync } = require('node:child_process');
 
 const root = path.resolve(__dirname, '..');
-const setupSource = fs.readFileSync(path.join(root, 'terminal-setup.js'), 'utf8');
-const launcherSource = fs.readFileSync(path.join(root, 'VibeCode Workspace.command'), 'utf8');
+const workspacesRoot = path.join(root, 'workspaces');
+const remoteRoot = path.join(root, 'remote');
+const setupSource = fs.readFileSync(path.join(workspacesRoot, 'terminal-setup.js'), 'utf8');
+const launcherSource = fs.readFileSync(path.join(workspacesRoot, 'VibeCode Workspace.command'), 'utf8');
 const workspaceSource = launcherSource.split("<<'JXA'\n")[1].split('\nJXA\n')[0];
 const quote = (value) => "'" + value.replace(/'/g, "'\\''") + "'";
 
@@ -230,7 +232,7 @@ test('noninteractive setup preserves saved terminal settings and deduplicates fo
     const configDir = path.join(files.dir, 'config');
     fs.mkdirSync(configDir);
     const script = path.join(files.dir, 'Setup.command');
-    const source = fs.readFileSync(path.join(root, 'Setup VibeCode Workspace.command'), 'utf8')
+    const source = fs.readFileSync(path.join(workspacesRoot, 'Setup VibeCode Workspace.command'), 'utf8')
         .replace('CONFIG_DIR="$HOME/.config/vibecode-workspace"', `CONFIG_DIR=${quote(configDir)}`);
     fs.writeFileSync(script, source);
     const savedFile = path.join(configDir, 'terminals.json');
@@ -245,8 +247,8 @@ test('full launcher creates the ordered six-terminal stack and applies per-repo 
     const files = fixture(t);
     const script = path.join(files.dir, 'VibeCode Workspace.command');
     fs.writeFileSync(script, launcherSource);
-    fs.copyFileSync(path.join(root, 'remote.py'), path.join(files.dir, 'remote.py'));
-    fs.copyFileSync(path.join(root, 'remote.example.json'), path.join(files.dir, 'remote.example.json'));
+    fs.copyFileSync(path.join(remoteRoot, 'remote.py'), path.join(files.dir, 'remote.py'));
+    fs.copyFileSync(path.join(remoteRoot, 'remote.example.json'), path.join(files.dir, 'remote.example.json'));
     fs.writeFileSync(path.join(files.dir, 'config.local.zsh'), `
 CONFIG_DIR=${quote(files.dir)}
 SAVED_PROJECTS=${quote(files.projects)}
@@ -270,26 +272,34 @@ source "$1"
         return JSON.parse(fs.readFileSync(path.join(files.dir, 'Vibe-Session.code-workspace')));
     };
     const defaults = launch().tasks.tasks;
-    assert.equal(defaults.length, 12);
-    assert.deepEqual(defaults.slice(0, 6).map((task) => task.label), [
+    const defaultProjectTasks = defaults.filter((task) => task.label !== 'VibeCode · Wachhalten + Apps');
+    const controlTask = defaults.find((task) => task.label === 'VibeCode · Wachhalten + Apps');
+    assert.equal(defaults.length, 13);
+    assert.deepEqual(defaultProjectTasks.slice(0, 6).map((task) => task.label), [
         'A · Frontend', 'A · Storybook', 'A · Codex 2',
         'A · Codex', 'A · Claude', 'A · agy',
     ]);
-    assert.equal(defaults[0].command, 'npm run dev');
-    assert.equal(defaults[0].options.cwd, `${files.a}/frontend`);
-    assert.equal(defaults[1].command, 'npm run storybook');
-    assert.equal(defaults[1].options.cwd, `${files.a}/frontend`);
-    assert.equal(defaults.filter((task) => task.command.includes('exec claude --dangerously-skip-permissions')).length, 2);
-    assert.equal(defaults.filter((task) => task.command.includes('exec codex --sandbox workspace-write --ask-for-approval never')).length, 4);
-    assert.equal(defaults.filter((task) => task.command.includes('CODEX_HOME="$HOME/.codex-account2"')).length, 2);
-    assert.equal(defaults.filter((task) => task.command.includes('exec agy --dangerously-skip-permissions')).length, 2);
-    const controlConfig = JSON.parse(fs.readFileSync(path.join(files.dir, 'remote', 'config.json')));
-    assert.deepEqual(Object.keys(controlConfig).sort(), ['apps', 'keep_awake']);
-    assert.equal(controlConfig.keep_awake, false);
+    assert.equal(defaultProjectTasks[0].command, 'npm run dev');
+    assert.equal(defaultProjectTasks[0].options.cwd, `${files.a}/frontend`);
+    assert.equal(defaultProjectTasks[1].command, 'npm run storybook');
+    assert.equal(defaultProjectTasks[1].options.cwd, `${files.a}/frontend`);
+    assert.equal(defaultProjectTasks.filter((task) => task.command.includes('exec claude --dangerously-skip-permissions')).length, 2);
+    assert.equal(defaultProjectTasks.filter((task) => task.command.includes('exec codex --sandbox workspace-write --ask-for-approval never')).length, 4);
+    assert.equal(defaultProjectTasks.filter((task) => task.command.includes('CODEX_HOME="$HOME/.codex-account2"')).length, 2);
+    assert.equal(defaultProjectTasks.filter((task) => task.command.includes('exec agy --dangerously-skip-permissions')).length, 2);
+    assert.equal(controlTask.type, 'process');
+    assert.equal(controlTask.command, '/usr/bin/env');
+    assert.deepEqual(controlTask.args, ['python3', path.join(files.dir, 'remote.py'), 'control']);
+    assert.equal(controlTask.options.env.VIBECODE_REMOTE_DIR, path.join(files.dir, 'remote'));
+    assert.equal(controlTask.runOptions.runOn, 'folderOpen');
+    assert.equal(controlTask.presentation.close, true);
+    assert.equal(fs.existsSync(path.join(files.dir, 'remote', 'config.json')), false);
     fs.writeFileSync(files.saved, JSON.stringify({ version: 1, projects: { [files.a]: [] } }));
     const tasks = launch().tasks.tasks;
-    assert.equal(tasks.length, 6);
-    assert.ok(tasks.every((task) => task.label.startsWith('B · ')));
+    const projectTasks = tasks.filter((task) => task.label !== 'VibeCode · Wachhalten + Apps');
+    assert.equal(tasks.length, 7);
+    assert.equal(projectTasks.length, 6);
+    assert.ok(projectTasks.every((task) => task.label.startsWith('B · ')));
 
     // Three selected folders, each with several tasks, must have three colors.
     const c = path.join(files.dir, 'Repo C');
@@ -298,7 +308,7 @@ source "$1"
     fs.unlinkSync(files.saved);
     fs.unlinkSync(path.join(files.dir, 'last-selection.txt'));
     const coloredTasks = launch().tasks.tasks;
-    assert.equal(coloredTasks.length, 18);
+    assert.equal(coloredTasks.length, 19);
     for (const [project, color] of [
         ['A', 'terminal.ansiBlue'], ['B', 'terminal.ansiGreen'], ['C', 'terminal.ansiMagenta'],
     ]) {
@@ -315,7 +325,7 @@ test('cancelling terminal setup also discards newly selected repository folders'
     fs.writeFileSync(files.projects, originalProjects);
     fs.writeFileSync(files.saved, originalTerminals);
     const script = path.join(files.dir, 'Setup.command');
-    const source = fs.readFileSync(path.join(root, 'Setup VibeCode Workspace.command'), 'utf8')
+    const source = fs.readFileSync(path.join(workspacesRoot, 'Setup VibeCode Workspace.command'), 'utf8')
         .replace('CONFIG_DIR="$HOME/.config/vibecode-workspace"', `CONFIG_DIR=${quote(files.dir)}`);
     fs.writeFileSync(script, source);
     const wrapper = `

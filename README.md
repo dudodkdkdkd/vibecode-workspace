@@ -163,8 +163,9 @@ AUTO_OPEN_URLS=(
 VSCODE_TERMINAL_LAYOUT="split"
 
 # ========== WACHHALTEN ==========
-OPEN_CONTROL_TERMINAL=false
-CLOSE_LAUNCHER_TERMINAL=false
+# Kontrollterminal integriert in VS Code starten und macOS-Starter schließen
+OPEN_CONTROL_TERMINAL=true
+CLOSE_LAUNCHER_TERMINAL=true
 ```
 
 **💡 Split-Screen in VS Code (manuell):**
