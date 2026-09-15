@@ -19,7 +19,20 @@
           "items": { "type": "string", "minLength": 1 },
           "uniqueItems": true
         },
+        "app_choices": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        },
         "restore_apps_on_stop": { "type": "boolean" }
+      }
+    },
+    "repository_selection": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "projects_file": { "type": "string", "minLength": 1 },
+        "remember_last": { "type": "boolean" }
       }
     },
     "hardware_profile": { "type": "string", "minLength": 1 },

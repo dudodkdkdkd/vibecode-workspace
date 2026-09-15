@@ -34,7 +34,13 @@ FRAMEWORK_ADAPTER=""
 FRAMEWORK_NAME=""
 FRAMEWORK_COMMAND=""
 WORKING_DIRECTORY=""
+REPOSITORY_SELECTION_ENABLED="false"
+REPOSITORIES_FILE=""
+REMEMBER_LAST_REPOSITORY="true"
+SELECTED_WORKING_DIRECTORY=""
+SELECTED_REPOSITORY_NAME=""
 CHOSEN_PROFILE=""
+CHOSEN_MEMORY_SETTINGS=""
 HARDWARE_PROFILE=""
 HARDWARE_NAME=""
 START_IN_PROGRESS=false
@@ -106,6 +112,7 @@ show_dashboard() {
     panel_line "ENDPOINT   $BASE_URL"
     panel_line "FRAMEWORK  $FRAMEWORK_NAME"
     [[ -n "$HARDWARE_NAME" ]] && panel_line "HARDWARE   $HARDWARE_NAME"
+    [[ -n "$SELECTED_REPOSITORY_NAME" ]] && panel_line "REPOSITORY $SELECTED_REPOSITORY_NAME"
     panel_line "SESSION    $ACTIVE_SOURCE  →  $ACTIVE_FRAMEWORK"
     printf '%s╰' "$C_ACCENT"
     repeat_char '─' $(( UI_WIDTH - 2 ))
@@ -280,7 +287,13 @@ load_config() {
         ((.memory_management.enabled // true) | type == "boolean") and
         ((.memory_management.close_apps_on_start // []) | type == "array") and
         all((.memory_management.close_apps_on_start // [])[]; type == "string" and length > 0) and
+        ((.memory_management.app_choices // []) | type == "array") and
+        all((.memory_management.app_choices // [])[]; type == "string" and length > 0) and
         ((.memory_management.restore_apps_on_stop // true) | type == "boolean") and
+        ((.repository_selection // {}) | type == "object") and
+        ((.repository_selection.enabled // false) | type == "boolean") and
+        ((.repository_selection.projects_file // "~/.config/vibecode-workspace/projects.tsv") | type == "string" and length > 0) and
+        ((.repository_selection.remember_last // true) | type == "boolean") and
         ((.providers[.provider].model_limits // {}) | type == "object") and
         ((.providers[.provider].model_limits.context // 1) | type == "number" and . > 0 and floor == .) and
         ((.providers[.provider].model_limits.input // 1) | type == "number" and . > 0 and floor == .) and
@@ -321,6 +334,9 @@ load_config() {
     FRAMEWORK_NAME="$(framework_value name)"
     FRAMEWORK_COMMAND="$(framework_value command)"
     WORKING_DIRECTORY="$(framework_value working_directory 2>/dev/null || printf '.')"
+    REPOSITORY_SELECTION_ENABLED="$("$JQ_BIN" -r 'if .repository_selection.enabled == null then false else .repository_selection.enabled end' "$CONFIG_FILE")"
+    REPOSITORIES_FILE="$(expand_home "$("$JQ_BIN" -r '.repository_selection.projects_file // "~/.config/vibecode-workspace/projects.tsv"' "$CONFIG_FILE")")"
+    REMEMBER_LAST_REPOSITORY="$("$JQ_BIN" -r 'if .repository_selection.remember_last == null then true else .repository_selection.remember_last end' "$CONFIG_FILE")"
     HARDWARE_PROFILE="$("$JQ_BIN" -r '.hardware_profile // empty' "$CONFIG_FILE")"
     HARDWARE_NAME="$(hardware_profile_value name 2>/dev/null || true)"
 
@@ -838,12 +854,131 @@ render_opencode_config() {
 }
 
 resolve_working_directory() {
-    local expanded="$(expand_home "$WORKING_DIRECTORY")"
+    local configured_directory="${SELECTED_WORKING_DIRECTORY:-$WORKING_DIRECTORY}"
+    local expanded="$(expand_home "$configured_directory")"
     if [[ "$expanded" != /* ]]; then
         expanded="$PROJECT_ROOT/$expanded"
     fi
     [[ -d "$expanded" ]] || fail "Arbeitsordner des Frameworks fehlt: $expanded"
     (cd "$expanded" && pwd -P)
+}
+
+last_repository_file() {
+    printf '%s/last-repository.txt\n' "$STATE_DIR"
+}
+
+select_repository() {
+    [[ "${LOCAL_DEV_SELECT_REPOSITORY:-1}" != "0" ]] || return 0
+
+    local requested_path="${LOCAL_DEV_REPOSITORY_PATH:-}"
+    if [[ -n "$requested_path" ]]; then
+        requested_path="$(expand_home "$requested_path")"
+        [[ -d "$requested_path" ]] || fail "Ausgewaehltes Repository fehlt: $requested_path"
+        SELECTED_WORKING_DIRECTORY="$(cd "$requested_path" && pwd -P)"
+        SELECTED_REPOSITORY_NAME="${SELECTED_WORKING_DIRECTORY:t}"
+        return 0
+    fi
+
+    [[ "$REPOSITORY_SELECTION_ENABLED" == "true" ]] || return 0
+
+    local fallback_directory="$(resolve_working_directory)"
+    local -a repository_names repository_paths
+    local -A seen_paths seen_names
+    repository_names=()
+    repository_paths=()
+
+    if [[ -f "$REPOSITORIES_FILE" ]]; then
+        local repository_name repository_path canonical_path base_name suffix
+        while IFS=$'\t' read -r repository_name repository_path; do
+            [[ -n "$repository_name" && -d "$repository_path" ]] || continue
+            canonical_path="$(cd "$repository_path" 2>/dev/null && pwd -P)" || continue
+            [[ -n "${seen_paths[$canonical_path]-}" ]] && continue
+
+            base_name="$repository_name"
+            suffix=2
+            while [[ -n "${seen_names[$repository_name]-}" ]]; do
+                repository_name="$base_name ($suffix)"
+                (( suffix += 1 ))
+            done
+
+            seen_paths[$canonical_path]=1
+            seen_names[$repository_name]=1
+            repository_names+=("$repository_name")
+            repository_paths+=("$canonical_path")
+        done < "$REPOSITORIES_FILE"
+    fi
+
+    if [[ -z "${seen_paths[$fallback_directory]-}" ]]; then
+        local fallback_name="${fallback_directory:t}"
+        local fallback_base="$fallback_name"
+        local fallback_suffix=2
+        while [[ -n "${seen_names[$fallback_name]-}" ]]; do
+            fallback_name="$fallback_base ($fallback_suffix)"
+            (( fallback_suffix += 1 ))
+        done
+        repository_names+=("$fallback_name")
+        repository_paths+=("$fallback_directory")
+        seen_paths[$fallback_directory]=1
+        seen_names[$fallback_name]=1
+    fi
+
+    (( ${#repository_names} > 0 )) || return 0
+
+    local default_path="$fallback_directory"
+    local remembered_file="$(last_repository_file)"
+    if [[ "$REMEMBER_LAST_REPOSITORY" == "true" && -s "$remembered_file" ]]; then
+        local remembered_path="$(<"$remembered_file")"
+        [[ -n "${seen_paths[$remembered_path]-}" ]] && default_path="$remembered_path"
+    fi
+
+    local default_name="${repository_names[1]}"
+    local index
+    for index in {1..${#repository_paths}}; do
+        if [[ "${repository_paths[$index]}" == "$default_path" ]]; then
+            default_name="${repository_names[$index]}"
+            break
+        fi
+    done
+
+    resolve_app_commands
+    if [[ -z "$OSASCRIPT_BIN" || ! -x "$OSASCRIPT_BIN" ]]; then
+        ui_warn "Repository-Auswahl nicht verfuegbar; verwende ${default_path:t}"
+        SELECTED_WORKING_DIRECTORY="$default_path"
+        SELECTED_REPOSITORY_NAME="${default_path:t}"
+        return 0
+    fi
+
+    local selected_name
+    selected_name="$("$OSASCRIPT_BIN" - "$default_name" "${repository_names[@]}" <<'REPOSITORY_APPLESCRIPT'
+on run argv
+    set defaultName to item 1 of argv
+    set repositoryNames to {}
+    repeat with itemIndex from 2 to count argv
+        set end of repositoryNames to item itemIndex of argv
+    end repeat
+    set chosenRepository to choose from list repositoryNames with title "VibeCode Local AI" with prompt "In welchem Repository soll das Framework gestartet werden?" default items {defaultName}
+    if chosenRepository is false then return ""
+    return item 1 of chosenRepository
+end run
+REPOSITORY_APPLESCRIPT
+)" || return 1
+    [[ -n "$selected_name" ]] || return 1
+
+    for index in {1..${#repository_names}}; do
+        if [[ "${repository_names[$index]}" == "$selected_name" ]]; then
+            SELECTED_REPOSITORY_NAME="$selected_name"
+            SELECTED_WORKING_DIRECTORY="${repository_paths[$index]}"
+            if [[ "$REMEMBER_LAST_REPOSITORY" == "true" ]]; then
+                mkdir -p "$STATE_DIR"
+                printf '%s\n' "$SELECTED_WORKING_DIRECTORY" > "$remembered_file"
+                chmod 600 "$remembered_file"
+            fi
+            log "Framework-Repository ausgewaehlt: $SELECTED_REPOSITORY_NAME ($SELECTED_WORKING_DIRECTORY)"
+            return 0
+        fi
+    done
+
+    fail "Repository-Auswahl ist ungueltig: $selected_name"
 }
 
 profiles_are_compatible() {
@@ -1055,6 +1190,22 @@ check_configuration() {
         ui_ok "Framework-Befehl gefunden"
     fi
 
+    if [[ "$REPOSITORY_SELECTION_ENABLED" == "true" ]]; then
+        local valid_repositories=0
+        if [[ -f "$REPOSITORIES_FILE" ]]; then
+            local checked_name checked_path
+            while IFS=$'\t' read -r checked_name checked_path; do
+                [[ -n "$checked_name" && -d "$checked_path" ]] || continue
+                (( valid_repositories += 1 ))
+            done < "$REPOSITORIES_FILE"
+        fi
+        if (( valid_repositories > 0 )); then
+            ui_ok "$valid_repositories Repositories fuer den Startdialog gefunden"
+        else
+            ui_warn "Keine Workspace-Repositories gefunden; der Framework-Arbeitsordner wird verwendet"
+        fi
+    fi
+
     check_framework_compatibility
     (( warnings == 0 ))
 }
@@ -1086,6 +1237,60 @@ choose_profile() {
     CHOSEN_PROFILE="$keys[$selection]"
 }
 
+choose_memory_apps() {
+    CHOSEN_MEMORY_SETTINGS=""
+    if [[ "${LOCAL_DEV_CONFIGURE_APPS:-0}" != "1" ]]; then
+        [[ -t 0 && "$APP_MANAGEMENT_ENABLED" != "0" ]] || return 0
+    fi
+
+    resolve_app_commands
+    [[ -n "$OSASCRIPT_BIN" && -x "$OSASCRIPT_BIN" ]] || return 0
+
+    local choices_json="$("$JQ_BIN" -c '
+        reduce ((.memory_management.app_choices // []) + (.memory_management.close_apps_on_start // []))[] as $app
+            ([]; if index($app) then . else . + [$app] end)
+    ' "$CONFIG_FILE")"
+    local selected_json="$("$JQ_BIN" -c '.memory_management.close_apps_on_start // []' "$CONFIG_FILE")"
+    local enabled="$("$JQ_BIN" -r 'if .memory_management.enabled == null then true else .memory_management.enabled end' "$CONFIG_FILE")"
+    [[ "$choices_json" != "[]" ]] || return 0
+
+    local result
+    result="$("$OSASCRIPT_BIN" -l JavaScript - "$choices_json" "$selected_json" "$enabled" <<'APPS_JXA'
+function run(argv) {
+    const app = Application.currentApplication();
+    app.includeStandardAdditions = true;
+
+    const choices = JSON.parse(argv[0]);
+    const selected = JSON.parse(argv[1]);
+    const enabled = argv[2] === "true";
+    const none = "Keine Apps automatisch schließen";
+    const items = [none].concat(choices);
+    const defaults = enabled && selected.length > 0 ? selected : [none];
+    const chosen = app.chooseFromList(items, {
+        withTitle: "VibeCode Local AI Setup",
+        withPrompt: "Welche Apps sollen beim Start geschlossen und beim Stoppen wieder geöffnet werden? Für mehrere Apps ⌘ gedrückt halten.",
+        defaultItems: defaults,
+        multipleSelectionsAllowed: true,
+        okButtonName: "Speichern",
+        cancelButtonName: "Unverändert"
+    });
+
+    if (chosen === false) return "";
+    if (chosen.indexOf(none) !== -1) return JSON.stringify({ enabled: false, apps: [] });
+    return JSON.stringify({ enabled: true, apps: chosen });
+}
+APPS_JXA
+)" || return 0
+
+    if [[ -n "$result" ]] && printf '%s' "$result" | "$JQ_BIN" -e '
+        (.enabled | type == "boolean") and
+        (.apps | type == "array") and
+        all(.apps[]; type == "string" and length > 0)
+    ' >/dev/null 2>&1; then
+        CHOSEN_MEMORY_SETTINGS="$result"
+    fi
+}
+
 setup_configuration() {
     show_dashboard
     choose_profile providers "$ACTIVE_SOURCE" Provider || fail "Ungueltige Providerauswahl."
@@ -1112,15 +1317,22 @@ setup_configuration() {
     selected_model="${selected_model:-$current_model}"
     [[ -n "$selected_model" ]] || fail "Modell-ID darf nicht leer sein."
 
+    choose_memory_apps
+
     local temp_file="$(mktemp "${CONFIG_FILE}.XXXXXX")" || fail "Temporaere Datei konnte nicht angelegt werden."
     "$JQ_BIN" \
         --arg source "$selected_source" \
         --arg framework "$selected_framework" \
         --arg model "$selected_model" \
+        --argjson memorySettings "${CHOSEN_MEMORY_SETTINGS:-null}" \
         '.provider = $source |
          .framework = $framework |
          .model = $model |
-         .providers[$source].default_model = $model' \
+         .providers[$source].default_model = $model |
+         if $memorySettings != null then
+             .memory_management.enabled = $memorySettings.enabled |
+             .memory_management.close_apps_on_start = $memorySettings.apps
+         else . end' \
         "$CONFIG_FILE" > "$temp_file" || fail "Konfiguration konnte nicht gespeichert werden."
     mv "$temp_file" "$CONFIG_FILE"
 
@@ -1129,7 +1341,7 @@ setup_configuration() {
     ui_ok "Profil gespeichert"
     show_dashboard
     check_framework_compatibility
-    printf 'Beim naechsten Doppelklick startet genau Provider → Modell → Framework aus der Konfiguration.\n'
+    printf 'Beim naechsten Doppelklick Repository waehlen; danach startet Provider → Modell → Framework.\n'
 }
 
 provider_is_active() {
@@ -1167,11 +1379,12 @@ Verwendung: Local Dev.command [Aktion]
 
 Ohne Argument       Toggle: Wenn aus -> starten; wenn an -> stoppen & Speicher freigeben
 --toggle             Explizit als Ein/Aus-Schalter ausfuehren
---start              Provider starten, Modell laden und Framework oeffnen
+--start              Repository waehlen, Provider starten und Framework oeffnen
 --start-only         Aktiven Provider ohne Framework starten
 --stop               Vom Starter gestarteten Provider stoppen
 --status             Auswahl und Erreichbarkeit anzeigen
 --check              Installation und Kompatibilitaet pruefen
+--setup              Provider, Modell, Framework und Apps konfigurieren
 --config-path        Pfad der lokalen Konfiguration ausgeben
 --render-opencode-config
                      Generierte OpenCode-Konfiguration ausgeben
@@ -1222,6 +1435,10 @@ main() {
             fi
             ;;
         start|--start)
+            if ! select_repository; then
+                ui_warn "Start abgebrochen; es wurde nichts gestartet"
+                return 0
+            fi
             show_dashboard
             check_framework_compatibility
             START_IN_PROGRESS=true
