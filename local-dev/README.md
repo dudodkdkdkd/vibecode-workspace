@@ -12,7 +12,7 @@ Im mitgelieferten Standardprofil bedeutet das:
 MLX → XHToken/Spark-X2.5-4B → OpenCode
 ```
 
-Der Provider wird gestartet, das konfigurierte Modell wird bereitgestellt und danach öffnet sich das konfigurierte Terminal-Framework im selben Fenster. Provider-Details, Endpoint, Startbefehl und Arbeitsordner liegen ebenfalls in der lokalen JSON-Konfiguration. Die Terminalansicht baut sich dynamisch aus diesen Werten und der verfügbaren Fensterbreite auf.
+Vor dem Start wird ein Repository aus der bereits eingerichteten VibeCode-Workspace-Liste gewählt. Der Provider wird gestartet, das konfigurierte Modell wird bereitgestellt und danach öffnet sich das konfigurierte Terminal-Framework direkt in diesem Repository. Provider-Details, Endpoint, Startbefehl und der Arbeitsordner-Fallback liegen ebenfalls in der lokalen JSON-Konfiguration. Die Terminalansicht baut sich dynamisch aus diesen Werten und der verfügbaren Fensterbreite auf.
 
 Vor dem Start kann der Launcher speicherintensive Apps kontrolliert beenden. Im Standardprofil wird Google Chrome geschlossen und nur dann in einer Statusdatei vermerkt, wenn es zuvor wirklich lief. Beim nächsten Doppelklick (Toggle-Stopp) oder bei `--stop` wird Chrome mit seiner letzten Sitzung wieder geöffnet. Chrome stellt dadurch seine normalen Fenster und Tabs wieder her. Sobald ein Inkognito-Fenster offen ist, bleibt Chrome zum Schutz dieser nicht wiederherstellbaren Tabs vollständig geöffnet.
 
@@ -20,7 +20,7 @@ Vor dem Start kann der Launcher speicherintensive Apps kontrolliert beenden. Im 
 
 1. Im Finder auf `Local Dev.command` rechtsklicken, **Alias erzeugen** wählen und den Alias auf den Schreibtisch ziehen.
 2. Den Alias doppelklicken.
-3. Der Launcher erkennt einen bereits laufenden Provider oder startet ihn, prüft den Health-Endpunkt und öffnet das konfigurierte Framework mit dem passenden Modell.
+3. Im Startdialog das Repository wählen. Der Launcher startet anschließend den Provider, prüft den Health-Endpunkt und öffnet das konfigurierte Framework mit dem passenden Modell in diesem Repository.
 
 Beim ersten Start wird automatisch `local-dev/local-ai.json` aus der Vorlage erzeugt. Diese persönliche Datei wird nicht in Git gespeichert.
 
@@ -49,12 +49,27 @@ Die automatische Speicherfreigabe ist ebenfalls konfigurierbar:
   "memory_management": {
     "enabled": true,
     "close_apps_on_start": ["Google Chrome"],
+    "app_choices": ["Google Chrome", "Spotify", "Mail", "Notion"],
     "restore_apps_on_stop": true
   }
 }
 ```
 
-Mit `enabled: false` lässt sich das automatische Schließen vollständig ausschalten. Weitere macOS-App-Namen können in `close_apps_on_start` ergänzt oder Chrome daraus entfernt werden. Wieder geöffnet werden ausschließlich Apps, die der Launcher selbst geschlossen hat. Für Chrome erzwingt der Launcher beim Öffnen die Wiederherstellung der letzten Sitzung; wichtige Seiten sollten trotzdem wie üblich als Lesezeichen gesichert sein.
+Mit `enabled: false` lässt sich das automatische Schließen vollständig ausschalten. Beim interaktiven `--setup` können die Einträge aus `app_choices` bequem mehrfach ausgewählt werden; die Auswahl wird in `close_apps_on_start` gespeichert. Weitere macOS-App-Namen können beiden Listen hinzugefügt werden. Wieder geöffnet werden ausschließlich Apps, die der Launcher selbst geschlossen hat. Für Chrome erzwingt der Launcher beim Öffnen die Wiederherstellung der letzten Sitzung; wichtige Seiten sollten trotzdem wie üblich als Lesezeichen gesichert sein.
+
+Die Repository-Auswahl verwendet dieselbe Liste wie der Workspace-Starter:
+
+```json
+{
+  "repository_selection": {
+    "enabled": true,
+    "projects_file": "~/.config/vibecode-workspace/projects.tsv",
+    "remember_last": true
+  }
+}
+```
+
+Beim Start erscheint eine Einzelauswahl; das zuletzt verwendete Repository ist vorausgewählt. Mit `enabled: false` wird der Dialog übersprungen und wieder `working_directory` des gewählten Frameworks verwendet. Wenn die Workspace-Liste fehlt oder leer ist, nimmt der Launcher ebenfalls diesen Arbeitsordner als sichere Rückfalloption.
 
 Das aktive Hardwareprofil wird ebenfalls nur über die JSON-Datei gewählt:
 
@@ -70,8 +85,8 @@ Das aktive Hardwareprofil wird ebenfalls nur über die JSON-Datei gewählt:
         "mlx": {
           "server_args": ["--prompt-cache-size", "1"],
           "model_limits": {
-            "context": 24576,
-            "input": 24576,
+            "context": 32768,
+            "input": 32768,
             "output": 4096
           }
         }
@@ -104,7 +119,7 @@ Ein Providerprofil enthält die technischen Details:
 
 Die aktive `model`-ID ist frei wählbar: Spark, Gemma, Qwen oder jedes andere vom gewählten Provider unterstützte Modell. `default_model` merkt sich beim Wechsel lediglich die letzte Auswahl des jeweiligen Providers. Der vorkonfigurierte `spark-mlx-server` registriert zusätzlich die Spark-Architektur und reicht anschließend an den normalen MLX-LM-Server weiter; er kann daher auch reguläre MLX-LM-Modelle laden. Beim Wechsel prüft der Launcher `/v1/models`, damit das Framework niemals versehentlich auf das zuvor geladene Modell zeigt.
 
-Das mitgelieferte Hardwareprofil `m2-max-32gb` ist für diesen Mac konservativ begrenzt: MLX hält nur den letzten Prompt-Cache, nutzt höchstens 4 GB Cache-Budget und verarbeitet nur einen großen Prompt gleichzeitig. Zwei parallele Decodes verhindern, dass die kurze OpenCode-Titelgenerierung den eigentlichen Auftrag blockiert. OpenCode kennt außerdem ein praktisches Kontextlimit von 24.576 Tokens und komprimiert mit 4.096 Tokens Reserve automatisch. Diese Werte liegen absichtlich unter dem theoretischen Modelllimit, weil Modellgewichte, KV-Cache, Metal-Zwischenspeicher und normale Apps denselben Arbeitsspeicher verwenden.
+Das mitgelieferte Hardwareprofil `m2-max-32gb` ist für diesen Mac ausgewogen begrenzt: MLX hält nur den letzten Prompt-Cache, nutzt höchstens 5 GB Cache-Budget und verarbeitet nur einen großen Prompt gleichzeitig. Zwei parallele Decodes verhindern, dass die kurze OpenCode-Titelgenerierung den eigentlichen Auftrag blockiert. OpenCode kennt außerdem ein praktisches Kontextlimit von 32.768 Tokens und komprimiert mit 4.096 Tokens Reserve automatisch ab ungefähr 28.672 Tokens. Diese Werte liegen absichtlich unter dem theoretischen Modelllimit, weil Modellgewichte, KV-Cache, Metal-Zwischenspeicher und normale Apps denselben Arbeitsspeicher verwenden.
 
 Weitere MLX-, Ollama- oder kompatible API-Provider werden als zusätzliche Objekte unter `providers` eingetragen. Eigene Server können über ein `start_command`-Array ohne Shell-`eval` gestartet werden. In Argumenten sind `{provider}`, `{model}`, `{model_ref}` und `{base_url}` als Platzhalter verfügbar.
 
@@ -130,7 +145,7 @@ Konfigurationen aus der ersten Version mit `active_source`, `active_framework` u
 | Befehl | Funktion |
 |---|---|
 | `./Local\ Dev.command` | Toggle: starten und konfigurierte Apps schließen; erneut ausführen zum Stoppen und Wiederöffnen |
-| `./Local\ Dev.command --setup` | Profile und Modell auswählen |
+| `./Local\ Dev.command --setup` | Profile, Modell und automatisch geschlossene Apps auswählen |
 | `./Local\ Dev.command --status` | Auswahl und API-Status anzeigen |
 | `./Local\ Dev.command --check` | Konfiguration, Programme und Kompatibilität prüfen |
 | `./Local\ Dev.command --start-only` | Nur den aktiven Provider starten |

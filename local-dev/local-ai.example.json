@@ -8,7 +8,13 @@
   "memory_management": {
     "enabled": true,
     "close_apps_on_start": ["Google Chrome"],
+    "app_choices": ["Google Chrome", "Spotify", "Mail", "Notion"],
     "restore_apps_on_stop": true
+  },
+  "repository_selection": {
+    "enabled": true,
+    "projects_file": "~/.config/vibecode-workspace/projects.tsv",
+    "remember_last": true
   },
   "hardware_profile": "m2-max-32gb",
   "hardware_profiles": {
@@ -20,14 +26,14 @@
         "mlx": {
           "server_args": [
             "--prompt-cache-size", "1",
-            "--prompt-cache-bytes", "4GB",
+            "--prompt-cache-bytes", "5GB",
             "--prompt-concurrency", "1",
             "--decode-concurrency", "2",
             "--prefill-step-size", "1024"
           ],
           "model_limits": {
-            "context": 24576,
-            "input": 24576,
+            "context": 32768,
+            "input": 32768,
             "output": 4096
           }
         }

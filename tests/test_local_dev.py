@@ -71,7 +71,7 @@ class LocalDevLauncherTests(unittest.TestCase):
             self.assertIn(model, rendered["provider"]["mlx"]["models"])
             self.assertEqual(
                 rendered["provider"]["mlx"]["models"][model]["limit"],
-                {"context": 24576, "input": 24576, "output": 4096},
+                {"context": 32768, "input": 32768, "output": 4096},
             )
             self.assertEqual(
                 rendered["compaction"],
@@ -182,6 +182,38 @@ class LocalDevLauncherTests(unittest.TestCase):
                 "mlx-community/gemma-example-4bit",
             )
 
+    def test_setup_can_configure_apps_to_close(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            config = self.write_config(directory)
+            fake_osascript = directory / "fake-osascript"
+            fake_osascript.write_text(
+                "#!/bin/sh\n/bin/cat >/dev/null\nprintf '%s\\n' "
+                "\"$FAKE_APP_SETTINGS\"\n"
+            )
+            fake_osascript.chmod(0o755)
+
+            result = self.run_launcher(
+                config,
+                "--setup",
+                input_text="\n\n\n",
+                extra_environment={
+                    "LOCAL_DEV_CONFIGURE_APPS": "1",
+                    "LOCAL_DEV_OSASCRIPT_BIN": str(fake_osascript),
+                    "FAKE_APP_SETTINGS": json.dumps(
+                        {"enabled": True, "apps": ["Spotify", "Mail", "Notion"]}
+                    ),
+                },
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            saved = json.loads(config.read_text())
+            self.assertTrue(saved["memory_management"]["enabled"])
+            self.assertEqual(
+                saved["memory_management"]["close_apps_on_start"],
+                ["Spotify", "Mail", "Notion"],
+            )
+
     def test_switching_provider_uses_its_configured_default_model(self):
         with tempfile.TemporaryDirectory() as temp:
             config = self.write_config(Path(temp))
@@ -259,12 +291,30 @@ class LocalDevLauncherTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp:
             directory = Path(temp)
+            selected_repository = directory / "selected-repository"
+            selected_repository.mkdir()
+            selected_repository_real = selected_repository.resolve()
+            projects_file = directory / "projects.tsv"
+            projects_file.write_text(
+                f"Selected Repository\t{selected_repository}\n"
+            )
+            fake_osascript = directory / "fake-osascript"
+            fake_osascript.write_text(
+                "#!/bin/sh\n/bin/cat >/dev/null\nprintf '%s\\n' "
+                "\"$FAKE_REPOSITORY_NAME\"\n"
+            )
+            fake_osascript.chmod(0o755)
             config_data = {
                 "config_version": 2,
                 "provider": "test-api",
                 "model": "vendor/qwen-test",
                 "framework": "test-client",
                 "start_timeout_seconds": 8,
+                "repository_selection": {
+                    "enabled": True,
+                    "projects_file": str(projects_file),
+                    "remember_last": True,
+                },
                 "providers": {
                     "test-api": {
                         "type": "openai-compatible",
@@ -299,13 +349,24 @@ class LocalDevLauncherTests(unittest.TestCase):
             state_file = directory / "state" / "test-api.pid"
 
             try:
-                result = self.run_launcher(config)
+                result = self.run_launcher(
+                    config,
+                    extra_environment={
+                        "LOCAL_DEV_OSASCRIPT_BIN": str(fake_osascript),
+                        "FAKE_REPOSITORY_NAME": "Selected Repository",
+                    },
+                )
 
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn("LOCAL_AI_MODEL=vendor/qwen-test", result.stdout)
                 self.assertIn(
                     f"OPENAI_BASE_URL=http://127.0.0.1:{port}/v1",
                     result.stdout,
+                )
+                self.assertIn(f"PWD={selected_repository_real}", result.stdout)
+                self.assertEqual(
+                    (directory / "state" / "last-repository.txt").read_text().strip(),
+                    str(selected_repository_real),
                 )
 
                 stopped = self.run_launcher(config)
