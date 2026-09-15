@@ -1,198 +1,110 @@
-# Local Dev - OpenCode + Ollama + MLX
+# Local Dev – konfigurationsbasierter KI-Launcher
 
-**Ein All-in-One Skript** für macOS, das Setup, Start/Stop und Reset für Ollama, MLX und OpenCode in einem Menü vereint.
+Ein Doppelklick auf `Local Dev.command` liest genau drei aktive Werte aus der Konfiguration und führt sie der Reihe nach aus:
 
----
-
-## 🚀 Schnellstart
-
-**Einfach auf den Desktop legen:**
-1. Erstelle einen **Alias** des Skripts:
-   - Rechtsklick auf `Local Dev.command` → **Alias erzeugen** → Auf Desktop ziehen
-   
-   **Vorteile:** Updates werden automatisch übernommen!
-
-**Oder kopieren:**
-   ```bash
-   cp "/Users/tobiaspitschi/Documents/GitHub/vibecode-workspace/Local Dev.command" ~/Desktop/
-   ```
-
-2. **Per Doppelklick auf `Local Dev.command` starten**
-   - Beim ersten Start wird automatisch ein Setup-Dialog angezeigt
-
-3. **Option 5 wählen** → Installiert automatisch:
-   - Spark-MLX-LLM für Spark-X2.5-4B
-   - Ollama mit deepseek-coder:6.7b (oder dein gewähltes Modell)
-   - OpenCode mit beiden Providern konfiguriert
-
----
-
-## 🔄 Funktionsweise
-
-### Architektur
-```
-OpenCode
-   │
-   ├─► Ollama (Port 11434) → deepseek-coder:6.7b u.a.
-   │
-   └─► MLX Server (Port 8000) → Spark-X2.5-4B
-          │
-          └─► Spark-MLX-LLM (Apple Silicon optimiert)
+```text
+provider → model → framework
 ```
 
-### Menü-Optionen (nach Doppelklick):
+Im mitgelieferten Standardprofil bedeutet das:
 
-| Option | Aktion | Beschreibung |
-|--------|--------|-------------|
-| **1) Ollama starten** | 🚀 | Startet Ollama + lädt Modell + konfiguriert OpenCode |
-| **2) Ollama stoppen** | 🛑 | Stoppt Ollama + entfernt Modell aus RAM |
-| **3) MLX starten** | ⚡ | Startet MLX-Server mit Spark-X2.5-4B + konfiguriert OpenCode |
-| **4) MLX stoppen** | ⏹️ | Stoppt MLX-Server |
-| **5) Alles starten** | 🚀🚀 | Startet Ollama + MLX + OpenCode gleichzeitig |
-| **6) Alles stoppen** | 🛑🛑 | Stoppt alle Systeme |
-| **7) Ollama Setup** | ⚙️ | Ollama-Modell auswählen (deepseek, codellama, etc.) |
-| **8) MLX Setup** | ⚡⚙️ | Spark-X2.5-4B konfigurieren (Port, Repository) |
-| **9) Reset** | 💥 | **ALLES zurücksetzen** – Deinstalliert ALLE Ollama-Modelle |
-| **0) Beenden** | 🚪 | Skript schließen |
+```text
+MLX → XHToken/Spark-X2.5-4B → OpenCode
+```
 
-### Automatisches Setup:
-- Beim ersten Start (keine Config) → **Setup-Dialog** wird automatisch angezeigt
-- Beim nächsten Start → **Menü** mit allen Optionen
-- MLX (Spark-MLX-LLM) wird automatisch bei erster Nutzung installiert
+Der Provider wird gestartet, das konfigurierte Modell wird bereitgestellt und danach öffnet sich das konfigurierte Terminal-Framework im selben Fenster. Provider-Details, Endpoint, Startbefehl und Arbeitsordner liegen ebenfalls in der lokalen JSON-Konfiguration. Die Terminalansicht baut sich dynamisch aus diesen Werten und der verfügbaren Fensterbreite auf.
 
-**💡 Tipp:** Nutze das **`Local Dev.command`** im Root-Verzeichnis für beste Desktop-Integration!
+## Schnellstart
 
----
+1. Im Finder auf `Local Dev.command` rechtsklicken, **Alias erzeugen** wählen und den Alias auf den Schreibtisch ziehen.
+2. Den Alias doppelklicken.
+3. Der Launcher erkennt einen bereits laufenden Provider oder startet ihn, prüft den Health-Endpunkt und öffnet das konfigurierte Framework mit dem passenden Modell.
 
-## 📝 Konfiguration
+Beim ersten Start wird automatisch `local-dev/local-ai.json` aus der Vorlage erzeugt. Diese persönliche Datei wird nicht in Git gespeichert.
 
-### `ollama-config.json` (für Ollama)
+## Konfigurieren
+
+Provider, Modell und Framework interaktiv auswählen:
+
+```zsh
+./Local\ Dev.command --setup
+```
+
+Alle Details können in `local-dev/local-ai.json` angepasst werden. Oben stehen die drei aktiven Werte gut sichtbar:
 
 ```json
 {
-  "model": "deepseek-coder:6.7b",  // Standardmodell für Code
-  "ollama": {
-    "host": "localhost",
-    "port": 11434
-  }
+  "provider": "mlx",
+  "model": "XHToken/Spark-X2.5-4B",
+  "framework": "opencode"
 }
 ```
 
-### `mlx-config.json` (für Spark-X2.5-4B)
+Die vollständige Vorlage liegt in `local-ai.example.json`; `local-ai.schema.json` beschreibt die gültigen Felder.
+
+Ein Providerprofil enthält die technischen Details:
 
 ```json
 {
-  "mlx": {
-    "model": "Spark-X2.5-4B",
-    "repository": "XHToken/Spark-X2.5-4B",
-    "device": "gpu",
-    "dtype": "bfloat16",
-    "port": 8000,
-    "max_tokens": 4096
-  }
+  "type": "mlx",
+  "protocol": "openai-chat",
+  "provider_id": "mlx",
+  "name": "MLX (lokal)",
+  "default_model": "XHToken/Spark-X2.5-4B",
+  "host": "127.0.0.1",
+  "port": 8000,
+  "server_command": "~/Spark-MLX-LLM/.venv/bin/spark-mlx-server",
+  "server_args": [],
+  "health_path": "/health"
 }
 ```
 
----
+Die aktive `model`-ID ist frei wählbar: Spark, Gemma, Qwen oder jedes andere vom gewählten Provider unterstützte Modell. `default_model` merkt sich beim Wechsel lediglich die letzte Auswahl des jeweiligen Providers. Der vorkonfigurierte `spark-mlx-server` registriert zusätzlich die Spark-Architektur und reicht anschließend an den normalen MLX-LM-Server weiter; er kann daher auch reguläre MLX-LM-Modelle laden. Beim Wechsel prüft der Launcher `/v1/models`, damit das Framework niemals versehentlich auf das zuvor geladene Modell zeigt.
 
-## 📁 Dateistruktur
+Weitere MLX-, Ollama- oder kompatible API-Provider werden als zusätzliche Objekte unter `providers` eingetragen. Eigene Server können über ein `start_command`-Array ohne Shell-`eval` gestartet werden. In Argumenten sind `{provider}`, `{model}`, `{model_ref}` und `{base_url}` als Platzhalter verfügbar.
 
+Frameworks liegen unabhängig davon unter `frameworks`. Dadurch kann derselbe Provider mit verschiedenen Clients kombiniert werden:
+
+- `opencode`: bekommt eine temporäre `OPENCODE_CONFIG_CONTENT`-Konfiguration und `provider/model` übergeben.
+- `codex`: nutzt Ollama über die eingebauten `--oss --local-provider ollama`-Parameter. Andere Provider müssen die Responses API anbieten.
+- `claude`: nutzt `ANTHROPIC_BASE_URL` und benötigt deshalb einen Anthropic-kompatiblen Provider oder einen entsprechenden Gateway.
+- `generic`: bekommt standardisierte `OPENAI_*`- und `LOCAL_AI_*`-Umgebungsvariablen; Argumente können die Platzhalter verwenden.
+
+## Abos und bestehende Konfigurationen
+
+Der Launcher verändert weder `~/.config/opencode`, `~/.codex/config.toml` noch Claude-Code-Einstellungen oder gespeicherte Logins. Alle Provider-Overrides gelten ausschließlich für den gestarteten Unterprozess.
+
+Das bedeutet: Normal gestartetes Codex oder Claude Code verwendet weiterhin das jeweilige Abo und die normale Anmeldung. Nur ein über diesen Alias gestarteter Client wird auf den ausgewählten lokalen Provider geroutet.
+
+Claude Code kann einen normalen OpenAI-kompatiblen MLX-/Ollama-Endpunkt nicht direkt verwenden. Dafür ist eine Anthropic-kompatible API beziehungsweise ein Gateway nötig. Codex benötigt bei benutzerdefinierten APIs die Responses API; Ollama wird nativ unterstützt. Der Launcher ändert deine Auswahl niemals heimlich, sondern meldet eine technisch inkompatible Kombination vor dem Start verständlich.
+
+Konfigurationen aus der ersten Version mit `active_source`, `active_framework` und `sources` werden beim nächsten Aufruf automatisch migriert. Dabei bleibt eine wiederherstellbare Sicherung als `local-ai.json.pre-v2.bak` erhalten; auch die bisherigen Modellwerte aller Provider werden als `default_model` übernommen.
+
+## Befehle
+
+| Befehl | Funktion |
+|---|---|
+| `./Local\ Dev.command` | Provider starten, Modell laden und Framework öffnen |
+| `./Local\ Dev.command --setup` | Profile und Modell auswählen |
+| `./Local\ Dev.command --status` | Auswahl und API-Status anzeigen |
+| `./Local\ Dev.command --check` | Konfiguration, Programme und Kompatibilität prüfen |
+| `./Local\ Dev.command --start-only` | Nur den aktiven Provider starten |
+| `./Local\ Dev.command --stop` | Nur einen vom Launcher gestarteten Server stoppen |
+| `./Local\ Dev.command --config-path` | Pfad der lokalen Konfiguration anzeigen |
+
+Ein Server, der außerhalb des Launchers gestartet wurde, wird von `--stop` absichtlich nicht beendet.
+
+## Anforderungen
+
+- macOS mit Zsh, `curl` und `jq`
+- Für das MLX-Spark-Beispiel: `~/Spark-MLX-LLM/.venv/bin/spark-mlx-server`
+- Für Ollama: `ollama`
+- Je nach Framework: `opencode`, `codex` oder `claude`
+
+Prüfen:
+
+```zsh
+./Local\ Dev.command --check
 ```
-.
-├── Local Dev.command           # Hauptskript (All-in-One)
-└── local-dev/
-    ├── Local Dev.command       # Kopie des Hauptskripts
-    ├── ollama-config.json     # Ollama Modell-Konfiguration
-    ├── mlx-config.json        # MLX/Spark Konfiguration
-    ├── local-dev.log          # Log für Ollama-Aktionen
-    └── mlx-spark.log          # Log für MLX-Aktionen
-```
 
-**Hinweis:** Die alten Skripte `ollama-opencode.command` und `reset-ollama.command` sind noch vorhanden für Kompatibilität, werden aber nicht mehr benötigt.
-
----
-
-## ⚙️ Anforderungen
-
-### Für Ollama:
-- **Ollama** muss installiert sein (`which ollama` im Terminal testen)
-  → [Installationsanleitung](https://ollama.com)
-- Das konfigurierte Modell muss in Ollama existieren. Prüfe es mit `ollama list` und passe bei Bedarf `local-dev/ollama-config.json` an.
-
-### Für OpenCode:
-- Beim ersten Start fragt das Programm, ob die OpenCode CLI automatisch installiert werden soll.
-- Dafür wird **Node.js/npm** benötigt (`brew install node`), Adminrechte sind nicht erforderlich.
-- Die CLI wird benutzerbezogen nach `~/.npm-global` installiert und in `~/.zprofile` zum PATH hinzugefügt.
-- OpenCode wird mit dem jeweils gestarteten Provider als `provider/modell` gestartet: Ollama mit `ollama/<modell>`, Spark mit `mlx/<modell>`.
-
-### Für MLX (Spark-X2.5-4B):
-- **Python 3.9+** muss installiert sein
-  → `brew install python`
-- **Git** muss installiert sein
-  → `xcode-select --install`
-- **MLX** wird automatisch installiert (verwendet Apple Metal GPU)
-
-### Für OpenCode:
-- **OpenCode** muss in `/Applications/` oder `~/Applications/` installiert sein
-
----
-
-## 📊 Logging
-
-Alle Aktionen werden protokolliert:
-- **`local-dev/local-dev.log`** – Ollama-Aktionen
-- **`local-dev/mlx-spark.log`** – MLX/Spark-Aktionen
-
----
-
-## 🔧 Problembehebung
-
-### Ollama startet nicht
-- Prüfe, ob Ollama installiert ist: `ollama --version`
-- Starte Ollama manuell: `ollama serve`
-- Prüfe Port-Konflikte: `lsof -i :11434`
-
-### Modell kann nicht geladen werden
-- Prüfe, ob das Modell existiert: `ollama list`
-- Lade das Modell manuell: `ollama pull deepseek-coder:6.7b`
-- Prüfe Speicherplatz: Spark-X2.5-4B benötigt ~8GB RAM
-
-### MLX startet nicht
-- Prüfe, ob Python installiert ist: `python3 --version`
-- Prüfe Spark-MLX-LLM Installation: `ls ~/Spark-MLX-LLM`
-- Prüfe MLX-Log: `cat local-dev/mlx-spark.log`
-- Für M1/M2 Macs: Stelle sicher, dass Metal GPU verfügbar ist
-
-### OpenCode startet nicht
-- Prüfe, ob die App in `/Applications/OpenCode.app` existiert
-- Starte OpenCode manuell und prüfe die Konfiguration
-- Prüfe die OpenCode Settings: `cat ~/Library/Application\ Support/OpenCode/User/settings.json`
-
-### Port-Konflikte
-- Ollama: Port 11434
-- MLX: Port 8000 (standardmäßig, anpassbar in mlx-config.json)
-- Prüfe mit: `lsof -i :PORTNR`
-
----
-
-## 💡 Warum MLX für Spark auf Apple Silicon?
-
-Dein M2 Max hat **32GB Unified Memory** (geteilter Speicher für CPU + GPU). 
-MLX ist Apples Framework, das speziell für diese Architektur optimiert ist:
-
-- **Kein Kopieren** von Tensoren zwischen RAM und GPU
-- **Direkter Zugriff** auf die Metal-GPU
-- **Bessere Performance** für Spark-Modelle
-- **Unterstützung** für spark2_5-Architektur (die Standard-Ollama noch nicht kann)
-
-**Vergleich:**
-| Kriterium | Ollama | MLX |
-|----------|--------|-----|
-| Einfachheit | ⭐⭐⭐⭐⭐ | ⭐⭐⭐ |
-| Apple Silicon Optimierung | ⭐⭐ | ⭐⭐⭐⭐⭐ |
-| Spark-X2.5-4B Unterstützung | ❌ | ✅ |
-| Speichereffizienz | ⭐⭐⭐ | ⭐⭐⭐⭐⭐ |
-
-**Empfehlung:** Nutze **beides** parallel!
-- **Ollama** für unterstützte Modelle (llama3, mistral, codellama, etc.)
-- **MLX** für Spark-X2.5-4B und spezielle Apple-Silicon-Modelle
+Logs des Launchers und der von ihm gestarteten Server stehen in `local-dev/local-ai.log`.

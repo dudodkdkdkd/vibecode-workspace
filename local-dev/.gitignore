@@ -3,10 +3,13 @@
 # Config-Dateien (lokale Einstellungen)
 ollama-config.json
 mlx-config.json
+local-ai.json
+local-ai.json.pre-v2.bak
 
 # Lock-Dateien
 .ollama-opencode.lock
 .mlx-spark.lock
+.local-ai-state/
 *.lock
 
 # Log-Dateien

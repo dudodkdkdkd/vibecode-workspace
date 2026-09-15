@@ -1,0 +1,59 @@
+{
+  "$schema": "./local-ai.schema.json",
+  "config_version": 2,
+  "provider": "mlx",
+  "model": "XHToken/Spark-X2.5-4B",
+  "framework": "opencode",
+  "start_timeout_seconds": 180,
+  "providers": {
+    "mlx": {
+      "type": "mlx",
+      "protocol": "openai-chat",
+      "provider_id": "mlx",
+      "name": "MLX (lokal)",
+      "default_model": "XHToken/Spark-X2.5-4B",
+      "host": "127.0.0.1",
+      "port": 8000,
+      "server_command": "~/Spark-MLX-LLM/.venv/bin/spark-mlx-server",
+      "server_args": [],
+      "health_path": "/health",
+      "readiness_path": "/chat/completions",
+      "readiness_timeout_seconds": 30,
+      "readiness_max_tokens": 1
+    },
+    "ollama": {
+      "type": "ollama",
+      "protocol": "openai-chat",
+      "provider_id": "ollama",
+      "name": "Ollama (lokal)",
+      "default_model": "deepseek-coder:6.7b",
+      "host": "127.0.0.1",
+      "port": 11434,
+      "server_command": "ollama",
+      "health_path": "/api/tags"
+    }
+  },
+  "frameworks": {
+    "opencode": {
+      "adapter": "opencode",
+      "name": "OpenCode",
+      "command": "opencode",
+      "args": [],
+      "working_directory": "."
+    },
+    "codex": {
+      "adapter": "codex",
+      "name": "Codex CLI",
+      "command": "codex",
+      "args": [],
+      "working_directory": "."
+    },
+    "claude": {
+      "adapter": "claude",
+      "name": "Claude Code",
+      "command": "claude",
+      "args": [],
+      "working_directory": "."
+    }
+  }
+}

@@ -8,15 +8,15 @@ Jedes Modul ist **unabhängig nutzbar** – du kannst genau die Features behalte
 
 ## 🚀 Quick-Launch-Buttons (für den Schreibtisch)
 
-Kopiere diese Dateien einfach auf deinen **Schreibtisch** und starte sie per Doppelklick:
+Erzeuge für diese Dateien einen **Finder-Alias** auf dem Schreibtisch und starte sie per Doppelklick:
 
 | Datei | Modul | Zweck |
 |-------|-------|-------|
 | `Setup Workspace.command` | Workspaces | Repository-Ordner einrichten |
 | `Launch Workspace.command` | Workspaces | Workspace mit Terminals starten |
-| `Local Dev.command` | Local Dev | **All-in-One**: Setup, Start/Stop, Reset für Ollama + OpenCode |
+| `Local Dev.command` | Local Dev | Profil starten: MLX/Ollama → OpenCode/Codex/Claude Code |
 
-**Tipp:** Erstelle **Aliase** (Rechtsklick → Alias erzeugen) statt Kopien, damit Updates automatisch übernommen werden!
+**Wichtig:** Nutze **Aliase** (Rechtsklick → Alias erzeugen), damit die Starter ihre Module finden und Updates automatisch übernehmen.
 
 ---
 
@@ -61,19 +61,19 @@ Kopiere diese Dateien einfach auf deinen **Schreibtisch** und starte sie per Dop
 ---
 
 ### 3️⃣ **Local Dev** (`local-dev/`)
-**Zweck:** Lokale KI-Entwicklung mit Ollama + OpenCode
+**Zweck:** Austauschbare lokale KI-Provider mit einem Terminal-Framework verbinden
 
 | Feature | Beschreibung |
 |---------|-------------|
-| **Ollama-Integration** | Automatisches Starten/Stoppen von Ollama |
-| **Modell-Management** | Lädt/entfernt Modelle aus dem Arbeitsspeicher |
-| **OpenCode-Konfig** | Automatische Konfiguration für lokale Modelle |
-| **Toggle-Funktion** | Einfach per Doppelklick alles starten/beenden |
+| **Providerprofile** | MLX, Ollama und eigene kompatible APIs |
+| **Freie Modellwahl** | Spark, Gemma, Qwen oder andere Backend-Modelle |
+| **Frameworkprofile** | OpenCode, Codex, Claude Code und eigene Clients |
+| **Sitzungsisolation** | Keine Änderung globaler Logins oder Abo-Konfigurationen |
 
 **Hauptdateien:**
-- `ollama-opencode.command` – Doppelklick-Skript (Toggle)
-- `reset-ollama.command` – **ALLES zurücksetzen** (Modelle deinstallieren)
-- `ollama-config.json` – Modell-Konfiguration
+- `Local Dev.command` – Doppelklick-Starter
+- `local-dev/launcher.zsh` – profilbasierter Startablauf
+- `local-dev/local-ai.example.json` – vollständige Konfigurationsvorlage
 
 ---
 
@@ -217,21 +217,12 @@ python3 remote/remote.py --ssh "Mein Server"
 ### Local Dev (`local-dev/`)
 | Datei | Zweck |
 |-------|-------|
-| `ollama-config.json` | Modell und Ollama-Einstellungen (wird automatisch erstellt) |
-
-**Beispiel-Konfiguration:**
-```json
-{
-  "model": "llama3",
-  "ollama": {
-    "host": "localhost",
-    "port": 11434
-  }
-}
-```
+| `local-ai.json` | Persönliche Auswahl von Provider, Modell und Framework |
+| `local-ai.example.json` | Versionierte Vorlage mit MLX-, Ollama- und Frameworkprofilen |
 
 **Usage:**
-- **Doppelklick auf `Local Dev.command`** → **Menü mit Optionen**: Starten, Stoppen, Reset, Setup
+- **Doppelklick auf `Local Dev.command`** → Provider starten, Modell laden und Framework öffnen
+- `./Local\ Dev.command --setup` → Provider, freies Modell und Framework auswählen
 
 ---
 
@@ -239,19 +230,14 @@ python3 remote/remote.py --ssh "Mein Server"
 
 ### 1️⃣ Alles behalten (Vollständige Installation)
 ```bash
-# Quick-Launch-Buttons auf den Schreibtisch kopieren:
-cp Setup\ Workspace.command ~/Desktop/
-cp Launch\ Workspace.command ~/Desktop/
-cp Local\ Dev.command ~/Desktop/
-
-# Oder Aliase erstellen (besser für Updates):
-# Rechtsklick auf die Dateien → Alias erzeugen → Auf Desktop ziehen
+# Im Finder für die drei .command-Dateien jeweils:
+# Rechtsklick → Alias erzeugen → Alias auf den Schreibtisch ziehen
 
 # Setup ausführen (per Doppelklick oder CLI)
 ./Setup\ Workspace.command
 
-# Ollama + OpenCode einrichten (optional)
-# Doppelklick auf Toggle\ Ollama.command
+# Lokale KI einrichten (optional)
+./Local\ Dev.command --setup
 
 # Remote-Server einrichten (optional)
 # Kopiere remote/remote.example.json nach remote/remote.json und passe an
@@ -270,15 +256,14 @@ rm -rf remote/ local-dev/
 ./Setup\ Workspace.command
 ```
 
-### 3️⃣ Nur Local Dev (Ollama) nutzen
+### 3️⃣ Nur Local Dev nutzen
 ```bash
-# Quick-Launch-Button auf den Schreibtisch:
-cp Toggle\ Ollama.command ~/Desktop/
+# Im Finder einen Alias von Local Dev.command auf den Schreibtisch ziehen
 
 # Module entfernen, die du nicht brauchst
 rm -rf workspaces/ remote/
 
-# Doppelklick auf Toggle\ Ollama.command
+# Doppelklick auf Local\ Dev.command
 ```
 
 ### 4️⃣ Nur Remote Management nutzen
@@ -303,7 +288,7 @@ vibecode-workspace/
 │
 ├── Setup Workspace.command     # ⭐ Quick-Launch: Setup-Assistent
 ├── Launch Workspace.command    # ⭐ Quick-Launch: Workspace starten
-├── Local Dev.command           # ⭐ Quick-Launch: All-in-One für Ollama + OpenCode
+├── Local Dev.command           # ⭐ Quick-Launch: Provider + Modell + Framework
 │
 ├── workspaces/                 # Modul 1: Workspace-Management
 │   ├── workspace               # Einstiegspunkt
@@ -317,9 +302,9 @@ vibecode-workspace/
 │   └── remote.example.json
 │
 └── local-dev/                  # Modul 3: Lokale KI-Entwicklung
-    ├── ollama-opencode.command
-    ├── reset-ollama.command
-    ├── ollama-config.json
+    ├── launcher.zsh
+    ├── local-ai.example.json
+    ├── local-ai.schema.json
     └── README.md
 ```
 
@@ -338,8 +323,9 @@ vibecode-workspace/
 - Network-Tools (`ping`, `arp`, `nc`)
 
 ### Local Dev
-- [Ollama](https://ollama.com) installiert
-- OpenCode in `/Applications/` oder `~/Applications/`
+- Zsh, `curl` und `jq`
+- Das Programm des gewählten Providerprofils, z. B. MLX-LM oder Ollama
+- Der gewählte Terminal-Client, z. B. `opencode`, `codex` oder `claude`
 
 ---
 
@@ -349,7 +335,7 @@ vibecode-workspace/
 |-------|-----|-------|
 | `config.local.zsh` | `workspaces/` | Lokale Workspace-Einstellungen |
 | `remote.json` | `remote/` | Server-Konfiguration |
-| `ollama-config.json` | `local-dev/` | Ollama-Modell-Einstellungen |
+| `local-ai.json` | `local-dev/` | Lokaler Provider, Modell, Endpoint und Framework |
 
 **⚠️ Wichtig:**
 - Alle `*.example.*`-Dateien sind **Beispiele** – kopiere sie und passe sie an
