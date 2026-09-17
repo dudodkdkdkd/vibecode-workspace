@@ -79,6 +79,68 @@ class LocalDevLauncherTests(unittest.TestCase):
             )
             self.assertEqual(rendered["permission"], "allow")
 
+    def test_capability_tree_and_memory_plan_use_local_model_architecture(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            config = self.write_config(directory)
+            cache = directory / "huggingface" / "hub" / "models--XHToken--Spark-X2.5-4B" / "snapshots" / "revision"
+            cache.mkdir(parents=True)
+            (cache / "config.json").write_text(json.dumps({
+                "num_hidden_layers": 36,
+                "num_key_value_heads": 4,
+                "head_dim": 256,
+            }))
+            manifest = directory / "ollama" / "manifests" / "registry.ollama.ai" / "library" / "deepseek-coder" / "6.7b"
+            manifest.parent.mkdir(parents=True)
+            manifest.write_text("{}")
+            data = json.loads(config.read_text())
+            data["providers"]["mlx"]["server_command"] = "/usr/bin/true"
+            data["providers"]["ollama"]["server_command"] = "/usr/bin/true"
+            data["frameworks"]["opencode"]["command"] = "/usr/bin/true"
+            data["frameworks"]["codex"]["command"] = "/usr/bin/true"
+            data["frameworks"]["claude"]["command"] = "definitely-missing-local-ai-client"
+            config.write_text(json.dumps(data))
+            environment = {
+                "HF_HOME": str(directory / "huggingface"),
+                "OLLAMA_MODELS": str(directory / "ollama"),
+            }
+
+            tree = self.run_launcher(config, "--capabilities", extra_environment=environment)
+            self.assertEqual(tree.returncode, 0, tree.stderr)
+            self.assertIn("Spark-X2.5-4B · lokal", tree.stdout)
+            self.assertIn("deepseek-coder:6.7b · lokal", tree.stdout)
+            self.assertIn("Codex CLI · installiert, inkompatibel", tree.stdout)
+            self.assertIn("Codex CLI · installiert, kompatibel", tree.stdout)
+            self.assertIn("Claude Code · nicht installiert", tree.stdout)
+
+            plan = self.run_launcher(config, "--memory-plan", extra_environment=environment)
+            self.assertEqual(plan.returncode, 0, plan.stderr)
+            self.assertIn("147456 Byte/Token", plan.stdout)
+            self.assertIn("32768 → 49152 Tokens", plan.stdout)
+
+            tuned = self.run_launcher(
+                config, "--tune-memory", "4", "1", "gruen",
+                extra_environment=environment,
+            )
+            self.assertEqual(tuned.returncode, 0, tuned.stderr)
+            self.assertEqual(
+                json.loads(config.read_text())["hardware_profiles"]["m2-max-32gb"]["providers"]["mlx"]["memory_budget"]["additional_unified_memory_gb"],
+                3,
+            )
+            before = config.read_text()
+            unsafe = self.run_launcher(
+                config, "--tune-memory", "5", "0", "gelb",
+                extra_environment=environment,
+            )
+            self.assertNotEqual(unsafe.returncode, 0)
+            self.assertEqual(config.read_text(), before)
+            oversized = self.run_launcher(
+                config, "--tune-memory", "99", "0", "gruen",
+                extra_environment=environment,
+            )
+            self.assertNotEqual(oversized.returncode, 0)
+            self.assertEqual(config.read_text(), before)
+
     @unittest.skipUnless(shutil.which("lsof"), "lsof required")
     def test_mlx_readiness_rejects_wrong_server_runtime(self):
         class ModelHandler(BaseHTTPRequestHandler):
@@ -300,8 +362,16 @@ class LocalDevLauncherTests(unittest.TestCase):
             )
             fake_osascript = directory / "fake-osascript"
             fake_osascript.write_text(
-                "#!/bin/sh\n/bin/cat >/dev/null\nprintf '%s\\n' "
-                "\"$FAKE_REPOSITORY_NAME\"\n"
+                """#!/bin/sh
+script_body=$(/bin/cat)
+if printf '%s' "$*" | /usr/bin/grep -q 'Welches AI-Hosting'; then
+    printf 'test-api-alt\n'
+elif printf '%s' "$*" | /usr/bin/grep -q 'Welche CLI'; then
+    printf 'alternate-client\n'
+else
+    printf '%s\n' "$FAKE_REPOSITORY_NAME"
+fi
+"""
             )
             fake_osascript.chmod(0o755)
             config_data = {
@@ -332,7 +402,19 @@ class LocalDevLauncherTests(unittest.TestCase):
                             "--bind",
                             "127.0.0.1",
                         ],
-                    }
+                    },
+                    "test-api-alt": {
+                        "type": "openai-compatible",
+                        "protocol": "openai-chat",
+                        "provider_id": "test_alt",
+                        "name": "Alternate Test API",
+                        "default_model": "vendor/qwen-test",
+                        "base_url": f"http://127.0.0.1:{port}/v1",
+                        "health_url": f"http://127.0.0.1:{port}/",
+                        "start_command": [
+                            sys.executable, "-m", "http.server", str(port), "--bind", "127.0.0.1",
+                        ],
+                    },
                 },
                 "frameworks": {
                     "test-client": {
@@ -341,12 +423,31 @@ class LocalDevLauncherTests(unittest.TestCase):
                         "command": "/usr/bin/env",
                         "args": [],
                         "working_directory": ".",
-                    }
+                    },
+                    "alternate-client": {
+                        "adapter": "generic",
+                        "name": "Alternate Probe",
+                        "command": "/usr/bin/env",
+                        "args": ["SELECTED_CLIENT=alternate"],
+                        "working_directory": ".",
+                    },
+                    "incompatible-client": {
+                        "adapter": "codex",
+                        "name": "Incompatible Probe",
+                        "command": "/usr/bin/env",
+                        "args": [],
+                    },
+                    "missing-client": {
+                        "adapter": "generic",
+                        "name": "Missing Probe",
+                        "command": "definitely-missing-local-ai-client",
+                        "args": [],
+                    },
                 },
             }
             config = directory / "local-ai.json"
             config.write_text(json.dumps(config_data))
-            state_file = directory / "state" / "test-api.pid"
+            state_file = directory / "state" / "test-api-alt.pid"
 
             try:
                 result = self.run_launcher(
@@ -363,16 +464,25 @@ class LocalDevLauncherTests(unittest.TestCase):
                     f"OPENAI_BASE_URL=http://127.0.0.1:{port}/v1",
                     result.stdout,
                 )
+                self.assertIn("SELECTED_CLIENT=alternate", result.stdout)
+                self.assertIn("LOCAL_AI_PROVIDER=test_alt", result.stdout)
                 self.assertIn(f"PWD={selected_repository_real}", result.stdout)
+                self.assertEqual(json.loads(config.read_text())["framework"], "test-client")
+                self.assertEqual(json.loads(config.read_text())["provider"], "test-api")
                 self.assertEqual(
                     (directory / "state" / "last-repository.txt").read_text().strip(),
                     str(selected_repository_real),
+                )
+                self.assertEqual(
+                    json.loads((directory / "state" / "active-session.json").read_text()),
+                    {"provider": "test-api-alt", "model": "vendor/qwen-test", "framework": "alternate-client"},
                 )
 
                 stopped = self.run_launcher(config)
                 self.assertEqual(stopped.returncode, 0, stopped.stderr)
                 self.assertIn("Toggle: Beende Server", stopped.stdout)
                 self.assertIn("wurde gestoppt", stopped.stdout)
+                self.assertFalse((directory / "state" / "active-session.json").exists())
             finally:
                 if state_file.exists():
                     try:
