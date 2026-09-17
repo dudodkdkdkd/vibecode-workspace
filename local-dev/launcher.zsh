@@ -242,6 +242,114 @@ hardware_provider_value() {
         "$CONFIG_FILE" 2>/dev/null
 }
 
+model_architecture_file() {
+    local model="$1"
+    local cache_root="${HF_HOME:-$HOME/.cache/huggingface}/hub/models--${model//\//--}/snapshots"
+    [[ -d "$cache_root" ]] || return 1
+    local candidate
+    for candidate in "$cache_root"/*/config.json(N); do
+        [[ -f "$candidate" ]] && { printf '%s\n' "$candidate"; return 0; }
+    done
+    return 1
+}
+
+kv_cache_bytes_per_token() {
+    local model="$1"
+    local architecture="$(model_architecture_file "$model" 2>/dev/null || true)"
+    [[ -n "$architecture" ]] || return 1
+    local bytes="$(hardware_provider_value memory_budget.kv_bytes_per_element 2>/dev/null || printf '2')"
+    "$JQ_BIN" -er --argjson bytes "$bytes" '
+        (.text_config // .) |
+        (.num_hidden_layers // .n_layer) as $layers |
+        (.num_key_value_heads // .num_attention_heads) as $heads |
+        (.head_dim // (.hidden_size / .num_attention_heads)) as $headDim |
+        if ($layers | type) == "number" and ($heads | type) == "number" and ($headDim | type) == "number"
+        then ($layers * $heads * $headDim * 2 * $bytes | floor)
+        else empty end
+    ' "$architecture" 2>/dev/null
+}
+
+additional_context_tokens() {
+    local extra_gb="$(hardware_provider_value memory_budget.additional_unified_memory_gb 2>/dev/null || true)"
+    local fraction="$(hardware_provider_value memory_budget.usable_fraction 2>/dev/null || printf '0.75')"
+    local bytes_per_token="$(kv_cache_bytes_per_token "$MODEL" 2>/dev/null || true)"
+    [[ -n "$extra_gb" && -n "$bytes_per_token" ]] || return 1
+    "$JQ_BIN" -nr --argjson gb "$extra_gb" --argjson fraction "$fraction" --argjson bytes "$bytes_per_token" \
+        '((($gb * 1073741824 * $fraction / $bytes) / 1024 | floor) * 1024)'
+}
+
+effective_model_limit() {
+    local field="$1"
+    local base="$(hardware_provider_value "model_limits.$field" 2>/dev/null || source_value "model_limits.$field" 2>/dev/null || true)"
+    [[ -n "$base" ]] || return 1
+    if [[ "$field" == context || "$field" == input ]]; then
+        local extra="$(additional_context_tokens 2>/dev/null || true)"
+        if [[ "$extra" == <-> ]]; then
+            local result=$(( base + extra ))
+            local architecture="$(model_architecture_file "$MODEL" 2>/dev/null || true)"
+            local maximum=""
+            [[ -n "$architecture" ]] && maximum="$("$JQ_BIN" -r '(.text_config.max_position_embeddings // .max_position_embeddings // empty)' "$architecture" 2>/dev/null)"
+            [[ "$maximum" == <-> && result -gt maximum ]] && result=$maximum
+            printf '%s\n' "$result"
+            return 0
+        fi
+    fi
+    printf '%s\n' "$base"
+}
+
+show_capacity_plan() {
+    local base="$(hardware_provider_value model_limits.context 2>/dev/null || source_value model_limits.context 2>/dev/null || true)"
+    local extra_gb="$(hardware_provider_value memory_budget.additional_unified_memory_gb 2>/dev/null || true)"
+    local bytes="$(kv_cache_bytes_per_token "$MODEL" 2>/dev/null || true)"
+    local extra_tokens="$(additional_context_tokens 2>/dev/null || true)"
+    local effective="$(effective_model_limit context 2>/dev/null || true)"
+    if [[ -n "$base" && -n "$extra_gb" && -n "$bytes" && -n "$extra_tokens" ]]; then
+        printf 'KV-Cache: %s Byte/Token · Zusatzbudget: %s GiB · Kontext: %s → %s Tokens\n' \
+            "$bytes" "$extra_gb" "$base" "$effective"
+    else
+        ui_warn "Keine KV-Schaetzung fuer $MODEL moeglich; verwende konfigurierte Limits"
+    fi
+}
+
+tune_memory_budget() {
+    local observed="${1:-}" reserve="${2:-}" pressure="${3:-}"
+    [[ -n "$HARDWARE_PROFILE" ]] || fail 'Fuer die Kalibrierung muss ein Hardwareprofil konfiguriert sein.'
+    if [[ -z "$observed" ]]; then
+        printf 'Beobachteter zusaetzlicher Spielraum unter Last (GiB): '
+        read -r observed
+    fi
+    if [[ -z "$reserve" ]]; then
+        printf 'Davon als Reserve unangetastet lassen (GiB, auch 0 moeglich): '
+        read -r reserve
+    fi
+    if [[ -z "$pressure" ]]; then
+        printf 'Speicherdruck waehrend der Beobachtung [gruen/gelb/rot]: '
+        read -r pressure
+    fi
+    [[ "$pressure" == gruen ]] || fail 'Nur bei gruennem Speicherdruck wird das Kontextbudget erhoeht.'
+    local additional
+    local total_gb="$(hardware_profile_value unified_memory_gb 2>/dev/null || true)"
+    additional="$("$JQ_BIN" -nr --arg observed "$observed" --arg reserve "$reserve" --arg total "$total_gb" '
+        ($observed | tonumber?) as $o | ($reserve | tonumber?) as $r |
+        ($total | tonumber?) as $totalGb |
+        if $o == null or $r == null or $totalGb == null or $o < 0 or $r < 0 or $r > $o or $o > $totalGb then empty
+        else ($o - $r) end
+    ')"
+    [[ -n "$additional" ]] || fail 'Ungueltige Werte: Spielraum und Reserve muessen Zahlen in GiB sein; Reserve darf den Spielraum nicht uebersteigen.'
+    local architecture="$(model_architecture_file "$MODEL" 2>/dev/null || true)"
+    [[ -n "$architecture" ]] || fail "Kein lokales config.json fuer $MODEL; KV-Cache kann nicht sicher berechnet werden."
+    local temporary="$(mktemp "${CONFIG_FILE}.XXXXXX")" || fail 'Konfiguration konnte nicht vorbereitet werden.'
+    "$JQ_BIN" --arg profile "$HARDWARE_PROFILE" --arg provider "$ACTIVE_SOURCE" --argjson additional "$additional" '
+        .hardware_profiles[$profile].providers[$provider].memory_budget.additional_unified_memory_gb = $additional |
+        .hardware_profiles[$profile].providers[$provider].memory_budget.usable_fraction //= 0.75 |
+        .hardware_profiles[$profile].providers[$provider].memory_budget.kv_bytes_per_element //= 2
+    ' "$CONFIG_FILE" > "$temporary" || { rm -f "$temporary"; fail 'Memory-Budget konnte nicht gespeichert werden.'; }
+    mv "$temporary" "$CONFIG_FILE"
+    ui_ok "Beobachtetes Zusatzbudget: $additional GiB; davon 75 % fuer KV-Cache eingeplant"
+    show_capacity_plan
+    ui_warn 'Schaetzung, kein Garant: Nach Neustart Speicherdrueck und Stabilitaet erneut beobachten.'
+}
+
 expand_home() {
     local value="$1"
     case "$value" in
@@ -311,6 +419,12 @@ load_config() {
                     ($settings | type == "object") and
                     (($settings.server_args // []) | type == "array") and
                     all(($settings.server_args // [])[]; type == "string") and
+                    (($settings.memory_budget // {}) as $budget |
+                        ($budget | type == "object") and
+                        (($budget.additional_unified_memory_gb // 0) | type == "number" and . >= 0) and
+                        (($budget.usable_fraction // 0.75) | type == "number" and . > 0 and . <= 1) and
+                        (($budget.kv_bytes_per_element // 2) | type == "number" and . >= 1 and . <= 8 and floor == .)
+                    ) and
                     (($settings.model_limits // {}) | type == "object") and
                     (($settings.model_limits.context // 1) | type == "number" and . > 0 and floor == .) and
                     (($settings.model_limits.input // 1) | type == "number" and . > 0 and floor == .) and
@@ -365,6 +479,37 @@ load_config() {
 
 pid_file() {
     printf '%s/%s.pid\n' "$STATE_DIR" "$ACTIVE_SOURCE"
+}
+
+active_session_file() {
+    printf '%s/active-session.json\n' "$STATE_DIR"
+}
+
+record_active_session() {
+    mkdir -p "$STATE_DIR"
+    local state_file="$(active_session_file)"
+    local temporary="$(mktemp "${state_file}.XXXXXX")" || fail "Sitzungsstatus konnte nicht angelegt werden"
+    "$JQ_BIN" -n --arg provider "$ACTIVE_SOURCE" --arg model "$MODEL" --arg framework "$ACTIVE_FRAMEWORK" \
+        '{provider:$provider,model:$model,framework:$framework}' > "$temporary" || fail "Sitzungsstatus konnte nicht geschrieben werden"
+    chmod 600 "$temporary"
+    mv "$temporary" "$state_file"
+}
+
+restore_active_session() {
+    local state_file="$(active_session_file)"
+    [[ -s "$state_file" ]] || return 1
+    local provider="$($JQ_BIN -r '.provider // empty' "$state_file" 2>/dev/null)"
+    local model="$($JQ_BIN -r '.model // empty' "$state_file" 2>/dev/null)"
+    local framework="$($JQ_BIN -r '.framework // empty' "$state_file" 2>/dev/null)"
+    [[ -n "$provider" && -n "$model" && -n "$framework" ]] || return 1
+    "$JQ_BIN" -e --arg provider "$provider" --arg framework "$framework" \
+        '.providers[$provider] and .frameworks[$framework]' "$CONFIG_FILE" >/dev/null 2>&1 || return 1
+    activate_provider_profile "$provider" "$model"
+    ACTIVE_FRAMEWORK="$framework"
+    FRAMEWORK_ADAPTER="$(framework_value adapter)"
+    FRAMEWORK_NAME="$(framework_value name)"
+    FRAMEWORK_COMMAND="$(framework_value command)"
+    WORKING_DIRECTORY="$(framework_value working_directory 2>/dev/null || printf '.')"
 }
 
 suspended_apps_file() {
@@ -796,9 +941,9 @@ render_opencode_config() {
     [[ "$PROTOCOL" == "openai-responses" ]] && package="@ai-sdk/openai"
     [[ "$PROTOCOL" == "anthropic" ]] && package="@ai-sdk/anthropic"
 
-    local context_limit="$(hardware_provider_value model_limits.context 2>/dev/null || source_value model_limits.context 2>/dev/null || true)"
-    local input_limit="$(hardware_provider_value model_limits.input 2>/dev/null || source_value model_limits.input 2>/dev/null || true)"
-    local output_limit="$(hardware_provider_value model_limits.output 2>/dev/null || source_value model_limits.output 2>/dev/null || true)"
+    local context_limit="$(effective_model_limit context 2>/dev/null || true)"
+    local input_limit="$(effective_model_limit input 2>/dev/null || true)"
+    local output_limit="$(effective_model_limit output 2>/dev/null || true)"
     local compaction_auto="$("$JQ_BIN" -r --arg profile "$ACTIVE_FRAMEWORK" 'if .frameworks[$profile].compaction.auto == null then true else .frameworks[$profile].compaction.auto end' "$CONFIG_FILE")"
     local compaction_prune="$("$JQ_BIN" -r --arg profile "$ACTIVE_FRAMEWORK" 'if .frameworks[$profile].compaction.prune == null then true else .frameworks[$profile].compaction.prune end' "$CONFIG_FILE")"
     local compaction_reserved="$("$JQ_BIN" -r --arg profile "$ACTIVE_FRAMEWORK" '.frameworks[$profile].compaction.reserved // 4096' "$CONFIG_FILE")"
@@ -1000,6 +1145,237 @@ profiles_are_compatible() {
     esac
 }
 
+provider_is_available() {
+    local profile="$1"
+    local type="$($JQ_BIN -r --arg id "$profile" '.providers[$id].type' "$CONFIG_FILE")"
+    local command="$($JQ_BIN -r --arg id "$profile" '.providers[$id].server_command // empty' "$CONFIG_FILE")"
+    local health="$($JQ_BIN -r --arg id "$profile" '.providers[$id].health_url // empty' "$CONFIG_FILE")"
+    [[ -n "$command" && -n "$(resolve_executable "$command" 2>/dev/null || true)" ]] && return 0
+    if [[ "$type" == openai-compatible ]]; then
+        local start="$($JQ_BIN -r --arg id "$profile" '.providers[$id].start_command[0] // empty' "$CONFIG_FILE")"
+        [[ -n "$start" && -n "$(resolve_executable "$start" 2>/dev/null || true)" ]] && return 0
+        [[ -n "$health" ]] && curl --silent --fail --max-time 1 "$health" >/dev/null 2>&1 && return 0
+    fi
+    return 1
+}
+
+model_ids_for_provider() {
+    local profile="$1"
+    local type="$($JQ_BIN -r --arg id "$profile" '.providers[$id].type' "$CONFIG_FILE")"
+    local default="$($JQ_BIN -r --arg id "$profile" '.providers[$id].default_model // empty' "$CONFIG_FILE")"
+    local -A seen
+    [[ -n "$default" ]] && { printf '%s\n' "$default"; seen[$default]=1; }
+    local model_root model_id manifest_root model_file cache_name
+    if [[ "$type" == mlx ]]; then
+        for model_root in "${HF_HOME:-$HOME/.cache/huggingface}/hub"/models--*(N/); do
+            cache_name="${model_root:t}"
+            model_id="${cache_name#models--}"
+            model_id="$(printf '%s' "$model_id" | sed 's#--#/#g')"
+            [[ -n "${seen[$model_id]-}" ]] && continue
+            seen[$model_id]=1
+            printf '%s\n' "$model_id"
+        done
+    elif [[ "$type" == ollama ]]; then
+        manifest_root="${OLLAMA_MODELS:-$HOME/.ollama/models}/manifests"
+        if [[ -d "$manifest_root" ]]; then
+            while IFS= read -r model_file; do
+                model_id="${model_file#$manifest_root/}"
+                model_id="${model_id#registry.ollama.ai/library/}"
+                model_id="${model_id:h}:${model_id:t}"
+                [[ -n "${seen[$model_id]-}" ]] && continue
+                seen[$model_id]=1
+                printf '%s\n' "$model_id"
+            done < <(find "$manifest_root" -type f -print 2>/dev/null)
+        fi
+    else
+        local base="$($JQ_BIN -r --arg id "$profile" '.providers[$id].base_url // empty' "$CONFIG_FILE")"
+        if [[ -n "$base" ]]; then
+            local remote_id
+            while IFS= read -r remote_id; do
+                [[ -n "$remote_id" && -z "${seen[$remote_id]-}" ]] || continue
+                seen[$remote_id]=1
+                printf '%s\n' "$remote_id"
+            done < <(curl --silent --fail --max-time 2 "${base%/}/models" 2>/dev/null | "$JQ_BIN" -r '.data[]?.id' 2>/dev/null)
+        fi
+    fi
+}
+
+model_is_local() {
+    local profile="$1" model="$2"
+    local type="$($JQ_BIN -r --arg id "$profile" '.providers[$id].type' "$CONFIG_FILE")"
+    if [[ "$type" == mlx ]]; then
+        [[ -n "$(model_architecture_file "$model" 2>/dev/null || true)" ]]
+    elif [[ "$type" == ollama ]]; then
+        local root="${OLLAMA_MODELS:-$HOME/.ollama/models}/manifests/registry.ollama.ai"
+        local model_path="$(printf '%s' "$model" | sed 's#:#/#')"
+        [[ -f "$root/library/$model_path" || -f "$root/$model_path" ]]
+    else
+        return 0
+    fi
+}
+
+framework_profile_is_available() {
+    local profile="$1" source_type="$2" protocol="$3"
+    local adapter="$($JQ_BIN -r --arg id "$profile" '.frameworks[$id].adapter // empty' "$CONFIG_FILE")"
+    local command="$($JQ_BIN -r --arg id "$profile" '.frameworks[$id].command // empty' "$CONFIG_FILE")"
+    [[ -n "$adapter" && -n "$command" ]] || return 1
+    profiles_are_compatible "$adapter" "$source_type" "$protocol" || return 1
+    [[ -n "$(resolve_executable "$command" 2>/dev/null || true)" ]]
+}
+
+show_capability_tree() {
+    printf 'LOCAL AI · VERFUEGBARE KOMBINATIONEN\n'
+    local -a providers frameworks models
+    providers=("${(@f)$($JQ_BIN -r '.providers | keys[]' "$CONFIG_FILE")}")
+    frameworks=("${(@f)$($JQ_BIN -r '.frameworks | keys[]' "$CONFIG_FILE")}")
+    local provider_id provider_name type protocol model_id framework_id framework_name command availability
+    local provider_index child_index child_count provider_branch child_prefix child_branch
+    for provider_index in {1..${#providers}}; do
+        provider_id="$providers[$provider_index]"
+        if (( provider_index == ${#providers} )); then provider_branch='└'; child_prefix='   '
+        else provider_branch='├'; child_prefix='│  '; fi
+        provider_name="$($JQ_BIN -r --arg id "$provider_id" '.providers[$id].name' "$CONFIG_FILE")"
+        type="$($JQ_BIN -r --arg id "$provider_id" '.providers[$id].type' "$CONFIG_FILE")"
+        protocol="$($JQ_BIN -r --arg id "$provider_id" '.providers[$id].protocol' "$CONFIG_FILE")"
+        if provider_is_available "$provider_id"; then availability='bereit'; else availability='nicht installiert/erreichbar'; fi
+        printf '%s─ %s [%s] · %s\n' "$provider_branch" "$provider_name" "$provider_id" "$availability"
+        models=("${(@f)$(model_ids_for_provider "$provider_id")}")
+        child_count=$(( ${#models} + ${#frameworks} ))
+        child_index=0
+        for model_id in "${models[@]}"; do
+            (( child_index += 1 ))
+            if (( child_index == child_count )); then child_branch='└'; else child_branch='├'; fi
+            if model_is_local "$provider_id" "$model_id"; then availability='lokal'; else availability='konfiguriert, nicht lokal'; fi
+            printf '%s%s─ Modell: %s · %s\n' "$child_prefix" "$child_branch" "$model_id" "$availability"
+        done
+        for framework_id in "${frameworks[@]}"; do
+            (( child_index += 1 ))
+            if (( child_index == child_count )); then child_branch='└'; else child_branch='├'; fi
+            framework_name="$($JQ_BIN -r --arg id "$framework_id" '.frameworks[$id].name' "$CONFIG_FILE")"
+            command="$($JQ_BIN -r --arg id "$framework_id" '.frameworks[$id].command' "$CONFIG_FILE")"
+            if [[ -z "$(resolve_executable "$command" 2>/dev/null || true)" ]]; then
+                availability='nicht installiert'
+            elif ! profiles_are_compatible "$($JQ_BIN -r --arg id "$framework_id" '.frameworks[$id].adapter' "$CONFIG_FILE")" "$type" "$protocol"; then
+                availability='installiert, inkompatibel'
+            else
+                availability='installiert, kompatibel'
+            fi
+            printf '%s%s─ CLI: %s · %s\n' "$child_prefix" "$child_branch" "$framework_name" "$availability"
+        done
+    done
+    printf '\n'
+}
+
+choose_start_item() {
+    local label="$1" default="$2"
+    shift 2
+    local -a choices
+    choices=("$@")
+    (( ${#choices} > 0 )) || return 1
+    if (( ${#choices} == 1 )); then CHOSEN_PROFILE="$choices[1]"; return 0; fi
+    resolve_app_commands
+    if [[ -n "$OSASCRIPT_BIN" && -x "$OSASCRIPT_BIN" ]]; then
+        CHOSEN_PROFILE="$("$OSASCRIPT_BIN" - "$label" "$default" "${choices[@]}" <<'CHOICE_APPLESCRIPT'
+on run argv
+    set promptText to item 1 of argv
+    set defaultName to item 2 of argv
+    set optionsList to {}
+    repeat with itemIndex from 3 to count argv
+        set end of optionsList to item itemIndex of argv
+    end repeat
+    set answer to choose from list optionsList with title "VibeCode Local AI" with prompt promptText default items {defaultName}
+    if answer is false then return ""
+    return item 1 of answer
+end run
+CHOICE_APPLESCRIPT
+)" || return 1
+        [[ -n "$CHOSEN_PROFILE" ]] || return 1
+    elif [[ -t 0 ]]; then
+        printf '\n%s\n' "$label"
+        local index selection
+        for index in {1..${#choices}}; do printf '  %d) %s\n' "$index" "$choices[$index]"; done
+        printf 'Auswahl [%s]: ' "$default"
+        read -r selection
+        if [[ -z "$selection" ]]; then CHOSEN_PROFILE="$default"; else
+            [[ "$selection" == <-> ]] || return 1
+            (( selection >= 1 && selection <= ${#choices} )) || return 1
+            CHOSEN_PROFILE="$choices[$selection]"
+        fi
+    else
+        CHOSEN_PROFILE="$default"
+    fi
+    [[ "${choices[(Ie)$CHOSEN_PROFILE]}" -gt 0 ]]
+}
+
+activate_provider_profile() {
+    ACTIVE_SOURCE="$1"
+    MODEL="$2"
+    SOURCE_TYPE="$(source_value type)"
+    PROTOCOL="$(source_value protocol)"
+    PROVIDER="$(source_value provider_id)"
+    SOURCE_NAME="$(source_value name)"
+    HOST="$(source_value host 2>/dev/null || printf '127.0.0.1')"
+    PORT="$(source_value port 2>/dev/null || true)"
+    local configured_base="$(source_value base_url 2>/dev/null || true)"
+    BASE_URL="${configured_base:-http://${HOST}:${PORT}/v1}"
+    local configured_health="$(source_value health_url 2>/dev/null || true)"
+    local health_path="$(source_value health_path 2>/dev/null || true)"
+    if [[ -n "$configured_health" ]]; then HEALTH_URL="$configured_health"
+    elif [[ -n "$health_path" && -n "$PORT" ]]; then HEALTH_URL="http://${HOST}:${PORT}${health_path}"
+    else HEALTH_URL="${BASE_URL%/}/models"; fi
+}
+
+select_start_profiles() {
+    local -a providers frameworks models
+    local requested_provider="${LOCAL_DEV_PROVIDER:-}"
+    if [[ -n "$requested_provider" ]]; then
+        provider_is_available "$requested_provider" || fail "Provider '$requested_provider' ist nicht installiert/erreichbar"
+    else
+        local id
+        providers=()
+        for id in "${(@f)$($JQ_BIN -r '.providers | keys[]' "$CONFIG_FILE")}"; do
+            provider_is_available "$id" && providers+=("$id")
+        done
+        (( ${#providers} > 0 )) || fail "Kein konfigurierter Provider ist installiert oder erreichbar"
+        local default="$ACTIVE_SOURCE"
+        [[ "${providers[(Ie)$default]}" -gt 0 ]] || default="$providers[1]"
+        choose_start_item 'Welches AI-Hosting soll gestartet werden?' "$default" "${providers[@]}" || return 1
+        requested_provider="$CHOSEN_PROFILE"
+    fi
+
+    models=("${(@f)$(model_ids_for_provider "$requested_provider")}")
+    (( ${#models} > 0 )) || fail "Keine Modelle fuer Provider '$requested_provider' gefunden"
+    local selected_model="${LOCAL_DEV_MODEL:-}"
+    if [[ -z "$selected_model" ]]; then
+        local default_model="$($JQ_BIN -r --arg id "$requested_provider" '.providers[$id].default_model // empty' "$CONFIG_FILE")"
+        [[ "${models[(Ie)$default_model]}" -gt 0 ]] || default_model="$models[1]"
+        choose_start_item 'Welches Modell soll geladen werden?' "$default_model" "${models[@]}" || return 1
+        selected_model="$CHOSEN_PROFILE"
+    fi
+    activate_provider_profile "$requested_provider" "$selected_model"
+
+    frameworks=()
+    local framework_id
+    for framework_id in "${(@f)$($JQ_BIN -r '.frameworks | keys[]' "$CONFIG_FILE")}"; do
+        framework_profile_is_available "$framework_id" "$SOURCE_TYPE" "$PROTOCOL" && frameworks+=("$framework_id")
+    done
+    (( ${#frameworks} > 0 )) || fail "Keine installierte CLI ist mit $SOURCE_NAME ($PROTOCOL) kompatibel"
+    local selected_framework="${LOCAL_DEV_FRAMEWORK:-}"
+    if [[ -z "$selected_framework" ]]; then
+        local default_framework="$ACTIVE_FRAMEWORK"
+        [[ "${frameworks[(Ie)$default_framework]}" -gt 0 ]] || default_framework="$frameworks[1]"
+        choose_start_item 'Welche CLI soll im Repository gestartet werden?' "$default_framework" "${frameworks[@]}" || return 1
+        selected_framework="$CHOSEN_PROFILE"
+    fi
+    [[ "${frameworks[(Ie)$selected_framework]}" -gt 0 ]] || fail "CLI '$selected_framework' ist nicht installiert oder mit $SOURCE_NAME inkompatibel"
+    ACTIVE_FRAMEWORK="$selected_framework"
+    FRAMEWORK_ADAPTER="$(framework_value adapter)"
+    FRAMEWORK_NAME="$(framework_value name)"
+    FRAMEWORK_COMMAND="$(framework_value command)"
+    WORKING_DIRECTORY="$(framework_value working_directory 2>/dev/null || printf '.')"
+    ui_ok "Fuer diesen Start: $SOURCE_NAME → $MODEL → $FRAMEWORK_NAME"
+}
+
 check_framework_compatibility() {
     profiles_are_compatible "$FRAMEWORK_ADAPTER" "$SOURCE_TYPE" "$PROTOCOL" && return 0
     if [[ "$FRAMEWORK_ADAPTER" == "codex" ]]; then
@@ -1130,11 +1506,13 @@ stop_source() {
     if [[ "$stopped_any" == "true" ]]; then
         log "$SOURCE_NAME wurde gestoppt."
         ui_ok "$SOURCE_NAME wurde gestoppt"
+        rm -f "$(active_session_file)"
     else
         if health_ok; then
             ui_warn "$SOURCE_NAME laeuft extern und wird deshalb nicht beendet"
         else
             ui_ok "$SOURCE_NAME ist bereits gestoppt"
+            rm -f "$(active_session_file)"
         fi
     fi
 }
@@ -1379,10 +1757,14 @@ Verwendung: Local Dev.command [Aktion]
 
 Ohne Argument       Toggle: Wenn aus -> starten; wenn an -> stoppen & Speicher freigeben
 --toggle             Explizit als Ein/Aus-Schalter ausfuehren
---start              Repository waehlen, Provider starten und Framework oeffnen
+--start              Baum anzeigen, Repository, Hosting, Modell und CLI waehlen
 --start-only         Aktiven Provider ohne Framework starten
 --stop               Vom Starter gestarteten Provider stoppen
 --status             Auswahl und Erreichbarkeit anzeigen
+--capabilities       Baum: Provider, lokale Modelle und installierte/kompatible CLIs
+--memory-plan        KV-Cache-Schaetzung und effektives Kontextlimit anzeigen
+--tune-memory [Spielraum-GiB] [Reserve-GiB] [gruen]
+                     Beobachteten RAM-Spielraum in das Hardwareprofil uebernehmen
 --check              Installation und Kompatibilitaet pruefen
 --setup              Provider, Modell, Framework und Apps konfigurieren
 --config-path        Pfad der lokalen Konfiguration ausgeben
@@ -1396,6 +1778,20 @@ main() {
     init_ui
     local action="${1:-}"
     load_config
+
+    if [[ -z "$action" || "$action" == "--toggle" || "$action" == "--stop" || "$action" == "--status" ]]; then
+        local configured_provider="$ACTIVE_SOURCE" configured_model="$MODEL" configured_framework="$ACTIVE_FRAMEWORK"
+        if restore_active_session; then
+            if ! provider_is_active; then
+                rm -f "$(active_session_file)"
+                activate_provider_profile "$configured_provider" "$configured_model"
+                ACTIVE_FRAMEWORK="$configured_framework"
+                FRAMEWORK_ADAPTER="$(framework_value adapter)"
+                FRAMEWORK_NAME="$(framework_value name)"
+                FRAMEWORK_COMMAND="$(framework_value command)"
+            fi
+        fi
+    fi
 
     if [[ -z "$action" || "$action" == "--toggle" ]]; then
         if provider_is_active; then
@@ -1435,16 +1831,23 @@ main() {
             fi
             ;;
         start|--start)
+            show_capability_tree
             if ! select_repository; then
+                ui_warn "Start abgebrochen; es wurde nichts gestartet"
+                return 0
+            fi
+            if ! select_start_profiles; then
                 ui_warn "Start abgebrochen; es wurde nichts gestartet"
                 return 0
             fi
             show_dashboard
             check_framework_compatibility
+            show_capacity_plan
             START_IN_PROGRESS=true
             suspend_configured_apps
             start_source
             START_IN_PROGRESS=false
+            record_active_session
             launch_framework
             ;;
         --start-only)
@@ -1453,6 +1856,7 @@ main() {
             suspend_configured_apps
             start_source
             START_IN_PROGRESS=false
+            record_active_session
             ;;
         --stop)
             show_dashboard
@@ -1461,6 +1865,15 @@ main() {
             ;;
         --status)
             show_status
+            ;;
+        --capabilities)
+            show_capability_tree
+            ;;
+        --memory-plan)
+            show_capacity_plan
+            ;;
+        --tune-memory)
+            tune_memory_budget "${2:-}" "${3:-}" "${4:-}"
             ;;
         --check)
             check_configuration

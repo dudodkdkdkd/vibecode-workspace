@@ -24,7 +24,13 @@
       "unified_memory_gb": 32,
       "providers": {
         "mlx": {
+          "memory_budget": {
+            "additional_unified_memory_gb": 3,
+            "usable_fraction": 0.75,
+            "kv_bytes_per_element": 2
+          },
           "server_args": [
+            "--chat-template-args", "{\"enable_thinking\":false}",
             "--prompt-cache-size", "1",
             "--prompt-cache-bytes", "5GB",
             "--prompt-concurrency", "1",

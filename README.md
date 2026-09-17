@@ -222,7 +222,7 @@ python3 remote/remote.py --ssh "Mein Server"
 | `local-ai.example.json` | Versionierte Vorlage mit MLX-, Ollama- und Frameworkprofilen |
 
 **Usage:**
-- **Doppelklick auf `Local Dev.command`** → Provider starten, Modell laden und Framework öffnen
+- **Doppelklick auf `Local Dev.command`** → Verfuegbarkeitsbaum ansehen, Repository, Hosting, Modell und kompatible CLI waehlen
 - `./Local\ Dev.command --setup` → Provider, freies Modell und Framework auswählen
 
 ---

@@ -51,6 +51,14 @@
               "type": "object",
               "properties": {
                 "server_args": { "type": "array", "items": { "type": "string" } },
+                "memory_budget": {
+                  "type": "object",
+                  "properties": {
+                    "additional_unified_memory_gb": { "type": "number", "minimum": 0 },
+                    "usable_fraction": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 },
+                    "kv_bytes_per_element": { "type": "integer", "minimum": 1, "maximum": 8 }
+                  }
+                },
                 "model_limits": {
                   "type": "object",
                   "properties": {
