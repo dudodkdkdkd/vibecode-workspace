@@ -96,6 +96,26 @@ function run() { return JSON.stringify(defaultTerminals()); }
     assert.match(defaults[5].command, /exec agy --dangerously-skip-permissions/);
 });
 
+test('terminal setup opens with no repositories preselected', (t) => {
+    const files = fixture(t);
+    const source = `
+let defaultItems;
+const testApp = {
+    chooseFromList: function (_items, options) {
+        defaultItems = options.defaultItems;
+        return false;
+    },
+};
+` + setupSource.replace('Application.currentApplication()', 'testApp')
+        .replace('function run(argv) {', 'function configureRun(argv) {') + `
+function run(argv) {
+    configureRun(argv);
+    return JSON.stringify(defaultItems);
+}
+`;
+    assert.deepEqual(JSON.parse(jxa(source, [files.projects, files.saved, files.output])), []);
+});
+
 test('setup stores counts, repeated agents, literal prompts and custom commands per repo', (t) => {
     const files = fixture(t);
     const prompt = "Check 'quotes', $HOME, $(touch nope), `id`, | and\nnew lines";
@@ -262,16 +282,31 @@ osascript() {
     if [[ "\${1:-}" == "-l" ]]; then
         /usr/bin/osascript "$@"
     elif [[ "\${1:-}" != "-e" ]]; then
-        cat "$TMP_DEFAULTS"
+        cat "$TMP_DEFAULTS" > "$DEFAULTS_CAPTURE"
+        cat "$TMP_NAMES"
     fi
 }
 source "$1"
 `;
+    const defaultsCapture = path.join(files.dir, 'defaults-capture.txt');
     const launch = () => {
-        execFileSync('/bin/zsh', ['-c', wrapper, 'test', script]);
+        execFileSync('/bin/zsh', ['-c', wrapper, 'test', script], {
+            env: { ...process.env, DEFAULTS_CAPTURE: defaultsCapture },
+        });
         return JSON.parse(fs.readFileSync(path.join(files.dir, 'Vibe-Session.code-workspace')));
     };
     const defaults = launch().tasks.tasks;
+    assert.equal(fs.readFileSync(defaultsCapture, 'utf8'), '');
+    assert.deepEqual(fs.readFileSync(path.join(files.dir, 'last-selection.txt'), 'utf8').trim().split('\n'),
+        [files.a, files.b]);
+    launch();
+    assert.equal(fs.readFileSync(defaultsCapture, 'utf8'), 'A\nB\n');
+    fs.writeFileSync(path.join(files.dir, 'last-selection.txt'), 'A\n');
+    launch();
+    assert.equal(fs.readFileSync(defaultsCapture, 'utf8'), 'A\n');
+    fs.writeFileSync(path.join(files.dir, 'last-selection.txt'), 'old name\n');
+    launch();
+    assert.equal(fs.readFileSync(defaultsCapture, 'utf8'), '');
     const defaultProjectTasks = defaults.filter((task) => task.label !== 'VibeCode · Wachhalten + Apps');
     const controlTask = defaults.find((task) => task.label === 'VibeCode · Wachhalten + Apps');
     assert.equal(defaults.length, 13);
@@ -316,6 +351,9 @@ source "$1"
         assert.equal(group.length, 6);
         assert.ok(group.every((task) => task.icon.id === 'terminal' && task.icon.color === color));
     }
+    fs.writeFileSync(files.projects, `A renamed\t${files.a}\nB\t${files.b}\nC\t${c}\n`);
+    launch();
+    assert.equal(fs.readFileSync(defaultsCapture, 'utf8'), 'A renamed\nB\nC\n');
 });
 
 test('cancelling terminal setup also discards newly selected repository folders', (t) => {

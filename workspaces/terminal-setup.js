@@ -138,7 +138,7 @@ function run(argv) {
         const selected = app.chooseFromList(projects.map((project) => project.name), {
             withTitle: "VibeCode Workspace Setup",
             withPrompt: "Für welche Repositories möchtest du Anzahl und Inhalt der Terminals festlegen? Mehrfachauswahl mit ⌘. Nicht ausgewählte Ordner behalten ihre bisherigen Terminals oder die sechs Standard-Terminals.",
-            defaultItems: projects.map((project) => project.name),
+            defaultItems: [],
             multipleSelectionsAllowed: true,
         });
         if (selected === false) return "cancelled";

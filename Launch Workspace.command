@@ -230,6 +230,8 @@ trap finish_launcher EXIT
 # Doppelte und nicht mehr vorhandene Projektpfade ausfiltern.
 typeset -A SEEN_PROJECT_PATHS
 typeset -A SEEN_PROJECT_NAMES
+typeset -A PROJECT_NAME_BY_PATH
+typeset -A PROJECT_PATH_BY_NAME
 
 add_project() {
   local name="$1"
@@ -250,6 +252,8 @@ add_project() {
 
   SEEN_PROJECT_PATHS[$real_path]=1
   SEEN_PROJECT_NAMES[$name]=1
+  PROJECT_NAME_BY_PATH[$real_path]="$name"
+  PROJECT_PATH_BY_NAME[$name]="$real_path"
   printf '%s\n' "$name" >> "$TMP_NAMES"
   printf '%s\t%s\n' "$name" "$real_path" >> "$TMP_CONFIG"
 }
@@ -299,29 +303,35 @@ fi
 
 [[ -s "$TMP_NAMES" ]] || exit 0
 
-# Die zuletzt verwendete Auswahl erneut vorselektieren. Beim allerersten Start
-# sind alle vorhandenen Projekte markiert.
+# Die zuletzt verwendete Auswahl erneut vorselektieren. Neue Einträge enthalten
+# stabile Projektpfade; ältere Dateien mit Projektnamen bleiben lesbar.
 if [[ -f "$LAST_SELECTION" ]]; then
-  while IFS= read -r selected_name; do
-    [[ -n "${SEEN_PROJECT_NAMES[$selected_name]-}" ]] || continue
-    printf '%s\n' "$selected_name" >> "$TMP_DEFAULTS"
+  while IFS= read -r selected_value; do
+    [[ -n "$selected_value" ]] || continue
+    if [[ -n "${PROJECT_NAME_BY_PATH[$selected_value]-}" ]]; then
+      printf '%s\n' "${PROJECT_NAME_BY_PATH[$selected_value]}" >> "$TMP_DEFAULTS"
+    elif [[ -n "${SEEN_PROJECT_NAMES[$selected_value]-}" ]]; then
+      printf '%s\n' "$selected_value" >> "$TMP_DEFAULTS"
+    fi
   done < "$LAST_SELECTION"
-fi
-
-if [[ ! -s "$TMP_DEFAULTS" ]]; then
-  cp "$TMP_NAMES" "$TMP_DEFAULTS"
 fi
 
 # Standardmäßiger macOS-Mehrfachauswahldialog. Zum Ändern mehrerer Einträge
 # verlangt macOS die Cmd-Taste; die gespeicherte Auswahl kann direkt bestätigt werden.
 if [[ "${1:-}" == "--remote-workspace" ]]; then
+  [[ -s "$TMP_DEFAULTS" ]] || cp "$TMP_NAMES" "$TMP_DEFAULTS"
   cp "$TMP_DEFAULTS" "$TMP_SELECTED"
 else
 osascript <<APPLESCRIPT > "$TMP_SELECTED"
 set namesFile to POSIX file "$TMP_NAMES"
 set defaultsFile to POSIX file "$TMP_DEFAULTS"
 set projectNames to paragraphs of (read namesFile as «class utf8»)
-set defaultNames to paragraphs of (read defaultsFile as «class utf8»)
+set defaultNames to {}
+try
+    set defaultNames to paragraphs of (read defaultsFile as «class utf8»)
+on error number -39
+    -- Eine leere Datei bedeutet: kein Projekt vorselektieren.
+end try
 set chosen to choose from list projectNames with title "Vibe Workspace" with prompt "Welche Repositories sollen geöffnet werden? Zum Ändern der Ordnerliste ‚Setup VibeCode Workspace.command‘ erneut ausführen. Für die Mehrfachauswahl ⌘ gedrückt halten." default items defaultNames with multiple selections allowed
 if chosen is false then
     return ""
@@ -340,7 +350,11 @@ if [[ ! -s "$TMP_SELECTED" ]]; then
 fi
 
 mkdir -p "$CONFIG_DIR"
-cp "$TMP_SELECTED" "$LAST_SELECTION"
+: > "$LAST_SELECTION"
+while IFS= read -r selected_name; do
+  [[ -n "${PROJECT_PATH_BY_NAME[$selected_name]-}" ]] || continue
+  printf '%s\n' "${PROJECT_PATH_BY_NAME[$selected_name]}" >> "$LAST_SELECTION"
+done < "$TMP_SELECTED"
 
 WORKSPACE_PATH="$WORKSPACE_DIR/$WORKSPACE_NAME"
 
