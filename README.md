@@ -33,7 +33,7 @@ Erzeuge für diese Dateien einen **Finder-Alias** auf dem Schreibtisch und start
 | **Agenten-Integration** | Claude Code, Codex, Antigravity |
 | **Wachhalten** | Verhindert macOS-Ruhezustand |
 | **🆕 Split-Screen-Tabs** | VS Code mit vordefiniertem Tab-Layout |
-| **🆕 Auto-Open URLs** | Browser-Tabs für localhost-Adressen |
+| **🆕 Auto-Open URLs** | Browser-Tabs pro Workspace, im Setup-Assistenten festgelegt |
 
 **Hauptdateien:**
 - `workspace` – Einstiegspunkt (leitet an Remote oder Workspace weiter)
@@ -107,6 +107,7 @@ Führe **`workspaces/Setup VibeCode Workspace.command`** aus, um:
 2. **Terminals pro Projekt** zu konfigurieren
 3. **Agenten (Claude, Codex, etc.)** einzurichten
 4. **Standard-Terminals** festzulegen
+5. **Browser-Tabs pro Projekt** festzulegen (z. B. `http://localhost:5173`, `http://localhost:6006` für Storybook)
 
 **Verfügbare Optionen:**
 ```bash
@@ -150,12 +151,10 @@ AUTO_TERMINALS=(
 )
 
 # ========== AUTO-OPEN URLs (Browser-Tabs) ==========
-# URLs, die automatisch beim Workspace-Start geöffnet werden
-AUTO_OPEN_URLS=(
-  "http://localhost:3000"    # Dev-Server
-  "http://localhost:6006"    # Storybook
-  "http://localhost:5173"    # Vite
-)
+# Browser-Tabs werden NICHT hier, sondern pro Projekt im Setup-Assistenten
+# festgelegt: `Setup VibeCode Workspace.command` → Projekt auswählen →
+# nach den Terminals nach den gewünschten URLs fragen (Komma-getrennt).
+# Gespeichert in ~/.config/vibecode-workspace/terminals.json.
 
 # ========== SPLIT-SCREEN LAYOUT ==========
 # Wie VS Code die Terminals anordnen soll
@@ -176,7 +175,7 @@ CLOSE_LAUNCHER_TERMINAL=true
 | Zwischen Gruppen wechseln | `⌘ + [1-9]` |
 | Terminal Split | `⌘ + \` (im Terminal-Fokus) |
 
-**📌 Tipp:** Die `AUTO_TERMINALS` und `AUTO_OPEN_URLS` Konfigurationen sind **unabhängig voreinander** – du kannst beides kombinieren!
+**📌 Tipp:** `AUTO_TERMINALS` und die Browser-Tabs sind **unabhängig voneinander** – du kannst beides kombinieren!
 
 ---
 
@@ -247,8 +246,8 @@ python3 remote/remote.py --ssh "Mein Server"
 ### 2️⃣ Nur Workspaces nutzen
 ```bash
 # Quick-Launch-Buttons auf den Schreibtisch:
-cp Setup\ Workspace.command ~/Desktop/
-cp Launch\ Workspace.command ~/Desktop/
+# Rechtsklick auf die Datei → "Alias erzeugen" → Alias auf den Schreibtisch ziehen.
+# Keine Kopie anlegen: die Starter finden ihr Modul über ihren eigenen Ort.
 
 # Module entfernen, die du nicht brauchst
 rm -rf remote/ local-dev/
@@ -360,7 +359,6 @@ vibecode-workspace/
 - **Einfache Updates:** Git-Pulls aktualisieren nur die Module, die du behältst
 - **Wiederherstellen:** Einfach das Repository neu klonen, wenn du ein Modul zurückholen willst
 - **🔧 Split-Screen:** Nutze `VSCODE_TERMINAL_LAYOUT` in `config.local.zsh` für automatische Terminal-Anordnung
-- **🌐 Auto-URLs:** Definiere `AUTO_OPEN_URLS` in `config.local.zsh`, um Browser-Tabs automatisch zu öffnen
 
 ---
 

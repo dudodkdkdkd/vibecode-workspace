@@ -75,25 +75,27 @@ function workspace(files, { selected = ['A', 'B'], autoStart = 'true' } = {}) {
     return JSON.parse(fs.readFileSync(files.output, 'utf8'));
 }
 
-test('setup offers the same ordered six terminals as the launcher defaults', () => {
+function openedUrls(files, result) {
+    return (result ?? workspace(files)).settings['vibecodeWorkspace.autoOpenUrls'] ?? [];
+}
+
+test('setup offers the same ordered five terminals as the launcher defaults', () => {
     const source = setupSource.replace('function run(argv) {', 'function configureRun(argv) {') + `
 function run() { return JSON.stringify(defaultTerminals()); }
 `;
     const defaults = JSON.parse(jxa(source, []));
     assert.deepEqual(defaults.map(({ name, type, cwd }) => ({ name, type, cwd })), [
+        { name: 'Claude', type: 'Claude Code', cwd: '' },
+        { name: 'Codex', type: 'Codex', cwd: '' },
+        { name: 'agy', type: 'Antigravity', cwd: '' },
         { name: 'Frontend', type: 'Eigener Befehl', cwd: 'frontend' },
         { name: 'Storybook', type: 'Eigener Befehl', cwd: 'frontend' },
-        { name: 'Codex 2', type: 'Codex 2', cwd: '' },
-        { name: 'Codex', type: 'Codex', cwd: '' },
-        { name: 'Claude', type: 'Claude Code', cwd: '' },
-        { name: 'agy', type: 'Antigravity', cwd: '' },
     ]);
-    assert.equal(defaults[0].command, 'npm run dev');
-    assert.equal(defaults[1].command, 'npm run storybook');
-    assert.match(defaults[2].command, /CODEX_HOME="\$HOME\/\.codex-account2" exec codex --sandbox workspace-write --ask-for-approval never/);
-    assert.match(defaults[3].command, /exec codex --sandbox workspace-write --ask-for-approval never/);
-    assert.match(defaults[4].command, /exec claude --dangerously-skip-permissions/);
-    assert.match(defaults[5].command, /exec agy --dangerously-skip-permissions/);
+    assert.match(defaults[0].command, /exec claude --dangerously-skip-permissions/);
+    assert.match(defaults[1].command, /exec codex --sandbox workspace-write --ask-for-approval never/);
+    assert.match(defaults[2].command, /exec agy --dangerously-skip-permissions/);
+    assert.equal(defaults[3].command, 'npm run dev');
+    assert.equal(defaults[4].command, 'npm run storybook -- --no-open');
 });
 
 test('terminal setup opens with no repositories preselected', (t) => {
@@ -128,12 +130,15 @@ test('setup stores counts, repeated agents, literal prompts and custom commands 
         ['Codex 2'], 'second account', 'Codex 2', '',
         ['Antigravity'], 'turbo task', 'agy', '',
         ['Eigener Befehl'], custom, 'Server', '',
+        'http://localhost:3000, http://localhost:6006',
         '0',
+        '',
     ]), 'saved');
     const saved = JSON.parse(fs.readFileSync(files.output, 'utf8'));
-    assert.equal(saved.projects[files.a].length, 6);
-    assert.deepEqual(saved.projects[files.b], []);
-    const terminals = saved.projects[files.a];
+    assert.equal(saved.projects[files.a].terminals.length, 6);
+    assert.deepEqual(saved.projects[files.a].urls, ['http://localhost:3000', 'http://localhost:6006']);
+    assert.deepEqual(saved.projects[files.b], { terminals: [], urls: [] });
+    const terminals = saved.projects[files.a].terminals;
     assert.match(terminals[0].command, /claude --dangerously-skip-permissions/);
     assert.match(terminals[2].command, /codex --sandbox workspace-write --ask-for-approval never -- /);
     assert.match(terminals[3].command, /CODEX_HOME="\$HOME\/\.codex-account2" exec codex --sandbox workspace-write --ask-for-approval never -- /);
@@ -172,15 +177,31 @@ test('setup stores counts, repeated agents, literal prompts and custom commands 
     assert.equal(result.tasks.tasks[0].command, terminals[0].command);
     assert.ok(result.tasks.tasks.every((task) => task.runOptions.runOn === 'folderOpen'));
     assert.ok(result.tasks.tasks.every((task) => task.icon.color === 'terminal.ansiBlue'));
+    assert.deepEqual(openedUrls(files, result), ['http://localhost:3000', 'http://localhost:6006']);
 });
 
 test('editing one repo preserves other settings, including zero terminals', (t) => {
     const files = fixture(t);
     const b = [{ name: 'B task', type: 'Shell', prompt: '', command: 'exec zsh -l', cwd: '' }];
     fs.writeFileSync(files.saved, JSON.stringify({ version: 1, projects: { [files.a]: [], [files.b]: b } }));
-    assert.equal(setup(files, [['A'], '0']), 'saved');
+    assert.equal(setup(files, [['A'], '0', '']), 'saved');
     assert.deepEqual(JSON.parse(fs.readFileSync(files.output)).projects,
-        { [files.a]: [], [files.b]: b });
+        { [files.a]: { terminals: [], urls: [] }, [files.b]: { terminals: b, urls: [] } });
+});
+
+test('browser tabs are configured per repo and deduplicated across selected repos on launch', (t) => {
+    const files = fixture(t);
+    assert.equal(setup(files, [
+        ['A', 'B'], '0', 'http://localhost:5173, http://localhost:6006',
+        '0', 'http://localhost:6006, http://localhost:9009',
+    ]), 'saved');
+    const saved = JSON.parse(fs.readFileSync(files.output, 'utf8'));
+    assert.deepEqual(saved.projects[files.a].urls, ['http://localhost:5173', 'http://localhost:6006']);
+    assert.deepEqual(saved.projects[files.b].urls, ['http://localhost:6006', 'http://localhost:9009']);
+
+    fs.copyFileSync(files.output, files.saved);
+    assert.deepEqual(openedUrls(files),
+        ['http://localhost:5173', 'http://localhost:6006', 'http://localhost:9009']);
 });
 
 test('legacy Codex presets use the sandbox while custom commands and prompt text stay unchanged', (t) => {
@@ -207,7 +228,7 @@ test('legacy Codex presets use the sandbox while custom commands and prompt text
     assert.equal(fs.readFileSync(files.saved, 'utf8'), original);
 });
 
-test('cancelling selection or a later dialog writes nothing', (t) => {
+test('cancelling the selection, a terminal dialog or the browser-tab dialog writes nothing', (t) => {
     const files = fixture(t);
     const original = JSON.stringify({ version: 1, projects: { [files.b]: [] } });
     fs.writeFileSync(files.saved, original);
@@ -221,8 +242,8 @@ test('cancelling selection or a later dialog writes nothing', (t) => {
 test('invalid counts and nonrelative working directories are requested again', (t) => {
     const files = fixture(t);
     assert.equal(setup(files, [['A'], '-1', '1.5', 'invalid', '1', ['Shell'], 'Shell',
-        '/tmp', '../outside', '~/outside', 'src']), 'saved');
-    assert.equal(JSON.parse(fs.readFileSync(files.output)).projects[files.a][0].cwd, 'src');
+        '/tmp', '../outside', '~/outside', 'src', '']), 'saved');
+    assert.equal(JSON.parse(fs.readFileSync(files.output)).projects[files.a].terminals[0].cwd, 'src');
 });
 
 test('workspace keeps legacy defaults, respects selection and can disable autostart', (t) => {
@@ -237,8 +258,9 @@ test('workspace keeps legacy defaults, respects selection and can disable autost
 test('malformed saved configuration fails without replacing existing output', (t) => {
     const files = fixture(t);
     fs.writeFileSync(files.output, 'unchanged');
-    for (const contents of ['{broken', '{"version":2,"projects":{}}',
-        JSON.stringify({ version: 1, projects: { [files.a]: 'invalid' } })]) {
+    for (const contents of ['{broken', '{"version":3,"projects":{}}',
+        JSON.stringify({ version: 1, projects: { [files.a]: 'invalid' } }),
+        JSON.stringify({ version: 2, projects: { [files.a]: { terminals: [], urls: 'invalid' } } })]) {
         fs.writeFileSync(files.saved, contents);
         assert.throws(() => setup(files, [['A'], '0']));
         assert.equal(fs.readFileSync(files.output, 'utf8'), 'unchanged');
@@ -263,7 +285,7 @@ test('noninteractive setup preserves saved terminal settings and deduplicates fo
     assert.equal(fs.readFileSync(savedFile, 'utf8'), '{"version":1,"projects":{}}');
 });
 
-test('full launcher creates the ordered six-terminal stack and applies per-repo overrides', (t) => {
+test('full launcher creates the ordered five-terminal stack and applies per-repo overrides', (t) => {
     const files = fixture(t);
     const script = path.join(files.dir, 'VibeCode Workspace.command');
     fs.writeFileSync(script, launcherSource);
@@ -309,18 +331,18 @@ source "$1"
     assert.equal(fs.readFileSync(defaultsCapture, 'utf8'), '');
     const defaultProjectTasks = defaults.filter((task) => task.label !== 'VibeCode · Wachhalten + Apps');
     const controlTask = defaults.find((task) => task.label === 'VibeCode · Wachhalten + Apps');
-    assert.equal(defaults.length, 13);
-    assert.deepEqual(defaultProjectTasks.slice(0, 6).map((task) => task.label), [
-        'A · Frontend', 'A · Storybook', 'A · Codex 2',
-        'A · Codex', 'A · Claude', 'A · agy',
+    assert.equal(defaults.length, 11);
+    assert.deepEqual(defaultProjectTasks.slice(0, 5).map((task) => task.label), [
+        'A · Claude', 'A · Codex', 'A · agy',
+        'A · Frontend', 'A · Storybook',
     ]);
-    assert.equal(defaultProjectTasks[0].command, 'npm run dev');
-    assert.equal(defaultProjectTasks[0].options.cwd, `${files.a}/frontend`);
-    assert.equal(defaultProjectTasks[1].command, 'npm run storybook');
-    assert.equal(defaultProjectTasks[1].options.cwd, `${files.a}/frontend`);
+    assert.equal(defaultProjectTasks[3].command, 'npm run dev');
+    assert.equal(defaultProjectTasks[3].options.cwd, `${files.a}/frontend`);
+    assert.equal(defaultProjectTasks[4].command, 'npm run storybook -- --no-open');
+    assert.equal(defaultProjectTasks[4].options.cwd, `${files.a}/frontend`);
     assert.equal(defaultProjectTasks.filter((task) => task.command.includes('exec claude --dangerously-skip-permissions')).length, 2);
-    assert.equal(defaultProjectTasks.filter((task) => task.command.includes('exec codex --sandbox workspace-write --ask-for-approval never')).length, 4);
-    assert.equal(defaultProjectTasks.filter((task) => task.command.includes('CODEX_HOME="$HOME/.codex-account2"')).length, 2);
+    assert.equal(defaultProjectTasks.filter((task) => task.command.includes('exec codex --sandbox workspace-write --ask-for-approval never')).length, 2);
+    assert.equal(defaultProjectTasks.filter((task) => task.command.includes('CODEX_HOME="$HOME/.codex-account2"')).length, 0);
     assert.equal(defaultProjectTasks.filter((task) => task.command.includes('exec agy --dangerously-skip-permissions')).length, 2);
     assert.equal(controlTask.type, 'process');
     assert.equal(controlTask.command, '/usr/bin/env');
@@ -332,8 +354,8 @@ source "$1"
     fs.writeFileSync(files.saved, JSON.stringify({ version: 1, projects: { [files.a]: [] } }));
     const tasks = launch().tasks.tasks;
     const projectTasks = tasks.filter((task) => task.label !== 'VibeCode · Wachhalten + Apps');
-    assert.equal(tasks.length, 7);
-    assert.equal(projectTasks.length, 6);
+    assert.equal(tasks.length, 6);
+    assert.equal(projectTasks.length, 5);
     assert.ok(projectTasks.every((task) => task.label.startsWith('B · ')));
 
     // Three selected folders, each with several tasks, must have three colors.
@@ -343,12 +365,12 @@ source "$1"
     fs.unlinkSync(files.saved);
     fs.unlinkSync(path.join(files.dir, 'last-selection.txt'));
     const coloredTasks = launch().tasks.tasks;
-    assert.equal(coloredTasks.length, 19);
+    assert.equal(coloredTasks.length, 16);
     for (const [project, color] of [
         ['A', 'terminal.ansiBlue'], ['B', 'terminal.ansiGreen'], ['C', 'terminal.ansiMagenta'],
     ]) {
         const group = coloredTasks.filter((task) => task.presentation.group === project);
-        assert.equal(group.length, 6);
+        assert.equal(group.length, 5);
         assert.ok(group.every((task) => task.icon.id === 'terminal' && task.icon.color === color));
     }
     fs.writeFileSync(files.projects, `A renamed\t${files.a}\nB\t${files.b}\nC\t${c}\n`);
