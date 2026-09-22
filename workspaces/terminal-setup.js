@@ -31,12 +31,12 @@ function terminalCommand(type, prompt) {
 
 function defaultTerminals() {
     return [
-        { name: "Frontend", type: "Eigener Befehl", prompt: "npm run dev", cwd: "frontend" },
-        { name: "Storybook", type: "Eigener Befehl", prompt: "npm run storybook", cwd: "frontend" },
-        { name: "Codex 2", type: "Codex 2", prompt: "", cwd: "" },
-        { name: "Codex", type: "Codex", prompt: "", cwd: "" },
         { name: "Claude", type: "Claude Code", prompt: "", cwd: "" },
+        { name: "Codex", type: "Codex", prompt: "", cwd: "" },
         { name: "agy", type: "Antigravity", prompt: "", cwd: "" },
+        { name: "Frontend", type: "Eigener Befehl", prompt: "npm run dev", cwd: "frontend" },
+        // --no-open verhindert, dass Storybook zusätzlich den Systembrowser öffnet.
+        { name: "Storybook", type: "Eigener Befehl", prompt: "npm run storybook -- --no-open", cwd: "frontend" },
     ].map((terminal) => ({
         ...terminal, command: terminalCommand(terminal.type, terminal.prompt),
     }));
@@ -50,6 +50,41 @@ function ask(app, text, defaultAnswer, title) {
         defaultButton: "Weiter",
         cancelButton: "Abbrechen",
     }).textReturned;
+}
+
+function configureUrls(app, project, existing) {
+    const title = `Browser-Tabs · ${project.name}`;
+    const answer = ask(app,
+        `Welche Browser-Tabs sollen beim Start von „${project.name}“ automatisch geöffnet werden?\n\nURLs mit Komma trennen (z. B. http://localhost:5173, http://localhost:6006). Leer lassen = keine Browser-Tabs.`,
+        existing.join(", "), title);
+    if (answer === undefined) return null;
+    return answer.split(",")
+        .map((url) => url.trim())
+        .filter(Boolean);
+}
+
+// Version 1 speicherte pro Projekt direkt eine Terminal-Liste ohne Browser-Tabs.
+// Ungültige Rohdaten werden unverändert durchgereicht, damit die anschließende
+// Validierung sie erkennt, statt sie stillschweigend als leer zu behandeln.
+function normalizeEntry(raw) {
+    if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+        return { terminals: raw.terminals, urls: raw.urls === undefined ? [] : raw.urls };
+    }
+    return { terminals: raw, urls: [] };
+}
+
+function validateTerminals(terminals, projectName) {
+    if (!Array.isArray(terminals) || terminals.some((entry) => !entry ||
+        !["Shell", "Claude Code", "Codex", "Codex 2", "Antigravity", "Eigener Befehl"].includes(entry.type) ||
+        [entry.name, entry.prompt, entry.command, entry.cwd].some((value) => typeof value !== "string"))) {
+        throw new Error(`Ungültige Terminals für ${projectName}.`);
+    }
+}
+
+function validateUrls(urls, projectName) {
+    if (!Array.isArray(urls) || urls.some((url) => typeof url !== "string" || !url.trim())) {
+        throw new Error(`Ungültige Browser-Tabs für ${projectName}.`);
+    }
 }
 
 function configureProject(app, project, existing) {
@@ -114,40 +149,39 @@ function run(argv) {
         const separator = line.indexOf("\t");
         return { name: line.slice(0, separator), path: line.slice(separator + 1) };
     });
-    let saved = { version: 1, projects: {} };
+    let saved = { version: 2, projects: {} };
     if ($.NSFileManager.defaultManager.fileExistsAtPath($(savedFile))) {
         saved = JSON.parse(readText(savedFile));
-        if (!saved || saved.version !== 1 || !saved.projects || typeof saved.projects !== "object" || Array.isArray(saved.projects)) {
+        if (!saved || ![1, 2].includes(saved.version) || !saved.projects || typeof saved.projects !== "object" || Array.isArray(saved.projects)) {
             throw new Error("Ungültige Terminal-Konfiguration. Die vorhandene Datei wurde nicht verändert.");
         }
     }
-    const result = { version: 1, projects: {} };
+    const result = { version: 2, projects: {} };
     for (const project of projects) {
         if (Object.prototype.hasOwnProperty.call(saved.projects, project.path)) {
-            const entries = saved.projects[project.path];
-            if (!Array.isArray(entries) || entries.some((entry) => !entry ||
-                !["Shell", "Claude Code", "Codex", "Codex 2", "Antigravity", "Eigener Befehl"].includes(entry.type) ||
-                [entry.name, entry.prompt, entry.command, entry.cwd].some((value) => typeof value !== "string"))) {
-                throw new Error(`Ungültige Terminals für ${project.name}.`);
-            }
-            result.projects[project.path] = entries;
+            const { terminals, urls } = normalizeEntry(saved.projects[project.path]);
+            validateTerminals(terminals, project.name);
+            validateUrls(urls, project.name);
+            result.projects[project.path] = { terminals, urls };
         }
     }
 
     try {
         const selected = app.chooseFromList(projects.map((project) => project.name), {
             withTitle: "VibeCode Workspace Setup",
-            withPrompt: "Für welche Repositories möchtest du Anzahl und Inhalt der Terminals festlegen? Mehrfachauswahl mit ⌘. Nicht ausgewählte Ordner behalten ihre bisherigen Terminals oder die sechs Standard-Terminals.",
+            withPrompt: "Für welche Repositories möchtest du Anzahl und Inhalt der Terminals sowie die automatisch geöffneten Browser-Tabs festlegen? Mehrfachauswahl mit ⌘. Nicht ausgewählte Ordner behalten ihre bisherige Konfiguration oder die sechs Standard-Terminals.",
             defaultItems: [],
             multipleSelectionsAllowed: true,
         });
         if (selected === false) return "cancelled";
         for (const project of projects) {
             if (!selected.includes(project.name)) continue;
-            const terminals = configureProject(app, project,
-                result.projects[project.path] || defaultTerminals());
+            const existing = result.projects[project.path] || { terminals: defaultTerminals(), urls: [] };
+            const terminals = configureProject(app, project, existing.terminals);
             if (terminals === null) return "cancelled";
-            result.projects[project.path] = terminals;
+            const urls = configureUrls(app, project, existing.urls);
+            if (urls === null) return "cancelled";
+            result.projects[project.path] = { terminals, urls };
         }
     } catch (error) {
         if (error.errorNumber === -128) return "cancelled";

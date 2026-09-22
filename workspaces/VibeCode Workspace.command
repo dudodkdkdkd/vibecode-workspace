@@ -114,12 +114,11 @@ TERMINALS=()
 # Installationshinweis geöffnet, statt dass der Task sofort verschwindet.
 # Claude Code und Antigravity ohne Sicherheitsabfragen; Codex mit Workspace-Sandbox.
 AUTO_TERMINALS=(
-  "Frontend|npm run dev|frontend"
-  "Storybook|npm run storybook|frontend"
-  "Codex 2|if command -v codex >/dev/null 2>&1; then CODEX_HOME=\"\$HOME/.codex-account2\" exec codex --sandbox workspace-write --ask-for-approval never; else echo 'Codex 2 ist nicht installiert.'; exec zsh -l; fi|"
-  "Codex|if command -v codex >/dev/null 2>&1; then exec codex --sandbox workspace-write --ask-for-approval never; else echo 'Codex ist nicht installiert.'; exec zsh -l; fi|"
   "Claude|if command -v claude >/dev/null 2>&1; then exec claude --dangerously-skip-permissions; else echo 'Claude Code ist nicht installiert.'; exec zsh -l; fi|"
+  "Codex|if command -v codex >/dev/null 2>&1; then exec codex --sandbox workspace-write --ask-for-approval never; else echo 'Codex ist nicht installiert.'; exec zsh -l; fi|"
   "agy|if command -v agy >/dev/null 2>&1; then exec agy --dangerously-skip-permissions; else echo 'Antigravity (agy) ist nicht installiert.'; exec zsh -l; fi|"
+  "Frontend|npm run dev|frontend"
+  "Storybook|npm run storybook -- --no-open|frontend"
 )
 
 # Bevorzugter VS-Code-Befehl. Wenn er nicht im PATH liegt, wird die
@@ -177,6 +176,13 @@ if ! command -v "$EDITOR_CMD" >/dev/null 2>&1; then
     exit 1
   fi
 fi
+
+# Das App-Bundle zum gefundenen CLI-Befehl ermitteln. Ein Start über "open -a"
+# geht durch LaunchServices; ein direkter Aufruf des CLI startet das Bundle-
+# Binary daran vorbei und legt dabei jedes Mal ein weiteres Dock-Symbol an.
+EDITOR_BINARY="${${$(command -v "$EDITOR_CMD" 2>/dev/null):-$EDITOR_CMD}:A}"
+EDITOR_APP="${EDITOR_BINARY%%.app/*}.app"
+[[ -d "$EDITOR_APP" ]] || EDITOR_APP=""
 
 # Temporäre Dateien vorbereiten.
 TMP_NAMES="$(mktemp)"
@@ -457,10 +463,18 @@ function run(argv) {
     let savedTerminals = {};
     if ($.NSFileManager.defaultManager.fileExistsAtPath($(savedTerminalsFile))) {
         const saved = JSON.parse(readText(savedTerminalsFile));
-        if (!saved || saved.version !== 1 || !saved.projects || typeof saved.projects !== "object" || Array.isArray(saved.projects)) {
+        if (!saved || ![1, 2].includes(saved.version) || !saved.projects || typeof saved.projects !== "object" || Array.isArray(saved.projects)) {
             throw new Error("Ungültige Terminal-Konfiguration aus dem Setup.");
         }
         savedTerminals = saved.projects;
+    }
+
+    // Version 1 speicherte pro Projekt direkt eine Terminal-Liste ohne Browser-Tabs.
+    function normalizeSavedEntry(raw) {
+        if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+            return { terminals: raw.terminals, urls: raw.urls === undefined ? [] : raw.urls };
+        }
+        return { terminals: raw, urls: [] };
     }
 
     // Eine Setup-Auswahl ersetzt sämtliche Standard- und lokalen Zusatz-Terminals
@@ -474,14 +488,24 @@ function run(argv) {
         if (Object.prototype.hasOwnProperty.call(savedTerminals, projects[project])) continue;
         terminalDefinitions.push({ project, terminalName, command, relativeCwd });
     }
+    const openUrls = [];
+    const seenUrls = new Set();
     for (const project of selected) {
         if (!Object.prototype.hasOwnProperty.call(savedTerminals, projects[project])) continue;
-        const entries = savedTerminals[projects[project]];
+        const { terminals: entries, urls } = normalizeSavedEntry(savedTerminals[projects[project]]);
         if (!Array.isArray(entries) || entries.some((entry) => !entry ||
             typeof entry.name !== "string" || !entry.name.trim() ||
             typeof entry.command !== "string" || !entry.command.trim() ||
             typeof entry.cwd !== "string")) {
             throw new Error(`Ungültige Terminals für ${project}. Bitte das Setup erneut ausführen.`);
+        }
+        if (!Array.isArray(urls) || urls.some((url) => typeof url !== "string" || !url.trim())) {
+            throw new Error(`Ungültige Browser-Tabs für ${project}. Bitte das Setup erneut ausführen.`);
+        }
+        for (const url of urls) {
+            if (seenUrls.has(url)) continue;
+            seenUrls.add(url);
+            openUrls.push(url);
         }
         for (const entry of entries) {
             // Auch früher gespeicherte Codex-Vorlagen verwenden den neuen Standard.
@@ -562,14 +586,18 @@ function run(argv) {
         });
     }
 
+    const settings = {
+        "git.autofetch": true,
+        "git.openRepositoryInParentFolders": "always",
+        "terminal.integrated.tabs.enabled": true,
+        "terminal.integrated.enableMultiLinePasteWarning": "auto",
+    };
+    // Von der VibeCode-Auto-Open-Tabs-Erweiterung gelesen; öffnet pro URL einen eigenen Tab.
+    if (openUrls.length) settings["vibecodeWorkspace.autoOpenUrls"] = openUrls;
+
     const workspace = {
         folders,
-        settings: {
-            "git.autofetch": true,
-            "git.openRepositoryInParentFolders": "always",
-            "terminal.integrated.tabs.enabled": true,
-            "terminal.integrated.enableMultiLinePasteWarning": "auto",
-        },
+        settings,
         tasks: {
             version: "2.0.0",
             tasks,
@@ -586,12 +614,28 @@ function run(argv) {
     if (!written) {
         throw new Error(`Workspace konnte nicht geschrieben werden: ${outputFile}`);
     }
+
     return outputFile;
 }
 JXA
 
+# Die Erweiterung vor dem Start in beide bekannten Erweiterungsordner
+# synchronisieren, damit VS Code und Cursor sie erkennen.
+EXTENSION_SOURCE="$SCRIPT_DIR/vscode-extension/auto-open-tabs"
+if [[ -f "$EXTENSION_SOURCE/package.json" && -f "$EXTENSION_SOURCE/extension.js" ]]; then
+  for extensions_dir in "$HOME/.vscode/extensions" "$HOME/.cursor/extensions"; do
+    mkdir -p "$extensions_dir/vibecode-workspace-auto-open-tabs"
+    /bin/cp "$EXTENSION_SOURCE/package.json" "$EXTENSION_SOURCE/extension.js" \
+      "$extensions_dir/vibecode-workspace-auto-open-tabs/"
+  done
+fi
+
 # Workspace öffnen.
-"$EDITOR_CMD" "$WORKSPACE_PATH"
+if [[ -n "$EDITOR_APP" ]]; then
+  open -a "$EDITOR_APP" "$WORKSPACE_PATH"
+else
+  "$EDITOR_CMD" "$WORKSPACE_PATH"
+fi
 
 # Kurzer Hinweis beim ersten Start automatischer Tasks.
 if [[ "$AUTO_START_TERMINALS" == "true" || "$CONTROL_TERMINAL_ENABLED" == "true" ]]; then

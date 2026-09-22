@@ -15,19 +15,12 @@
 #    → Setze: VSCODE_TERMINAL_LAYOUT="split"
 #    → Und: AUTO_TERMINALS=("Frontend|npm run dev|frontend" "Backend|npm run server|backend")
 #
-# 2) "Ich will dass localhost:3000 und localhost:6006 automatisch geöffnet werden"
-#    → Setze: AUTO_OPEN_URLS=("http://localhost:3000" "http://localhost:6006")
+# 2) "Ich will dass localhost:5173 und localhost:6006 automatisch geöffnet werden"
+#    → Siehe Abschnitt AUTO-OPEN BROWSER URLS weiter unten.
 #
-# 3) "Ich will nur die Terminals ohne Browser"
-#    → Setze: AUTO_OPEN_URLS=()
-#
-# 4) "Ich will 4 Terminals in Grid-Layout"
+# 3) "Ich will 4 Terminals in Grid-Layout"
 #    → Setze: VSCODE_TERMINAL_LAYOUT="grid"
 #    → Und: AUTO_TERMINALS mit 4 Einträgen füllen
-#
-# 5) "Ich will nur Frontend Terminal und Storybook URL"
-#    → Setze: AUTO_TERMINALS=("Frontend|npm run dev|frontend")
-#    → Und: AUTO_OPEN_URLS=("http://localhost:3000" "http://localhost:6006")
 #
 # =============================================================================
 
@@ -49,12 +42,11 @@ PROJECTS=(
 #
 # Claude Code und Antigravity ohne Sicherheitsabfragen; Codex mit Workspace-Sandbox.
 AUTO_TERMINALS=(
-  "Frontend|npm run dev|frontend"
-  "Storybook|npm run storybook|frontend"
-  "Codex 2|if command -v codex >/dev/null 2>&1; then CODEX_HOME="\$HOME/.codex-account2" exec codex --sandbox workspace-write --ask-for-approval never; else echo 'Codex 2 ist nicht installiert.'; exec zsh -l; fi|"
-  "Codex|if command -v codex >/dev/null 2>&1; then exec codex --sandbox workspace-write --ask-for-approval never; else echo 'Codex ist nicht installiert.'; exec zsh -l; fi|"
   "Claude|if command -v claude >/dev/null 2>&1; then exec claude --dangerously-skip-permissions; else echo 'Claude Code ist nicht installiert.'; exec zsh -l; fi|"
+  "Codex|if command -v codex >/dev/null 2>&1; then exec codex --sandbox workspace-write --ask-for-approval never; else echo 'Codex ist nicht installiert.'; exec zsh -l; fi|"
   "agy|if command -v agy >/dev/null 2>&1; then exec agy --dangerously-skip-permissions; else echo 'Antigravity (agy) ist nicht installiert.'; exec zsh -l; fi|"
+  "Frontend|npm run dev|frontend"
+  "Storybook|npm run storybook -- --no-open|frontend"
 )
 
 # Zusätzliche Tasks nur für ein bestimmtes Projekt OHNE Setup-Terminal-Auswahl.
@@ -66,14 +58,12 @@ TERMINALS=(
 # =============================================================================
 # AUTO-OPEN BROWSER URLS
 # =============================================================================
-# URLs, die automatisch beim Workspace-Start im Browser geöffnet werden.
-# Perfekt für Dev-Server, Storybook, APIs etc.
-#
-# Beispiele:
-#   AUTO_OPEN_URLS=("http://localhost:3000" "http://localhost:6006" "http://localhost:5173")
-#
-# Leer lassen, wenn keine URLs automatisch geöffnet werden sollen.
-AUTO_OPEN_URLS=()
+# Browser-Tabs, die beim Workspace-Start automatisch geöffnet werden, sind
+# projektspezifisch und werden NICHT hier konfiguriert. Führe stattdessen
+# `Setup VibeCode Workspace.command` aus, wähle das Projekt aus und trage
+# nach den Terminals die gewünschten URLs kommagetrennt ein
+# (z. B. http://localhost:5173, http://localhost:6006 für Storybook).
+# Gespeichert in ~/.config/vibecode-workspace/terminals.json.
 
 # =============================================================================
 # VS CODE SPLIT-SCREEN LAYOUT

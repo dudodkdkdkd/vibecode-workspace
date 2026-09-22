@@ -1,0 +1,24 @@
+{
+  "name": "vibecode-workspace-auto-open-tabs",
+  "displayName": "VibeCode Workspace Auto-Open Tabs",
+  "description": "Öffnet die im VibeCode-Workspace-Setup hinterlegten URLs als eigene Tabs, sobald der Workspace geladen wird.",
+  "version": "0.0.1",
+  "publisher": "vibecode-workspace",
+  "private": true,
+  "engines": { "vscode": "^1.74.0" },
+  "main": "./extension.js",
+  "activationEvents": ["onStartupFinished"],
+  "contributes": {
+    "configuration": {
+      "title": "VibeCode Workspace",
+      "properties": {
+        "vibecodeWorkspace.autoOpenUrls": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "URLs, die als eigene Tabs geöffnet werden, wenn dieser Workspace geladen wird. Wird vom VibeCode-Workspace-Setup pro Projekt geschrieben, nicht manuell pflegen."
+        }
+      }
+    }
+  }
+}
