@@ -33,7 +33,6 @@ function defaultTerminals() {
     return [
         { name: "Claude", type: "Claude Code", prompt: "", cwd: "" },
         { name: "Codex", type: "Codex", prompt: "", cwd: "" },
-        { name: "agy", type: "Antigravity", prompt: "", cwd: "" },
         { name: "Frontend", type: "Eigener Befehl", prompt: "npm run dev", cwd: "frontend" },
         // --no-open verhindert, dass Storybook zusätzlich den Systembrowser öffnet.
         { name: "Storybook", type: "Eigener Befehl", prompt: "npm run storybook -- --no-open", cwd: "frontend" },
@@ -169,7 +168,7 @@ function run(argv) {
     try {
         const selected = app.chooseFromList(projects.map((project) => project.name), {
             withTitle: "VibeCode Workspace Setup",
-            withPrompt: "Für welche Repositories möchtest du Anzahl und Inhalt der Terminals sowie die automatisch geöffneten Browser-Tabs festlegen? Mehrfachauswahl mit ⌘. Nicht ausgewählte Ordner behalten ihre bisherige Konfiguration oder die sechs Standard-Terminals.",
+            withPrompt: "Für welche Repositories möchtest du Anzahl und Inhalt der Terminals sowie die automatisch geöffneten Browser-Tabs festlegen? Mehrfachauswahl mit ⌘. Nicht ausgewählte Ordner behalten ihre bisherige Konfiguration oder die vier Standard-Terminals.",
             defaultItems: [],
             multipleSelectionsAllowed: true,
         });

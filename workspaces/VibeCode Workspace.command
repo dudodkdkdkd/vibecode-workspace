@@ -110,13 +110,12 @@ TERMINALS=()
 # )
 
 # Diese Standard-Terminals gelten für Projekte ohne eigene Setup-Auswahl.
-# Falls Claude Code, Codex oder Antigravity fehlen, bleibt eine Shell mit
+# Falls Claude Code oder Codex fehlen, bleibt eine Shell mit
 # Installationshinweis geöffnet, statt dass der Task sofort verschwindet.
-# Claude Code und Antigravity ohne Sicherheitsabfragen; Codex mit Workspace-Sandbox.
+# Claude Code ohne Sicherheitsabfragen; Codex mit Workspace-Sandbox.
 AUTO_TERMINALS=(
   "Claude|if command -v claude >/dev/null 2>&1; then exec claude --dangerously-skip-permissions; else echo 'Claude Code ist nicht installiert.'; exec zsh -l; fi|"
   "Codex|if command -v codex >/dev/null 2>&1; then exec codex --sandbox workspace-write --ask-for-approval never; else echo 'Codex ist nicht installiert.'; exec zsh -l; fi|"
-  "agy|if command -v agy >/dev/null 2>&1; then exec agy --dangerously-skip-permissions; else echo 'Antigravity (agy) ist nicht installiert.'; exec zsh -l; fi|"
   "Frontend|npm run dev|frontend"
   "Storybook|npm run storybook -- --no-open|frontend"
 )
@@ -238,13 +237,22 @@ typeset -A SEEN_PROJECT_PATHS
 typeset -A SEEN_PROJECT_NAMES
 typeset -A PROJECT_NAME_BY_PATH
 typeset -A PROJECT_PATH_BY_NAME
+typeset -A SEEN_PROJECT_ROOTS
+PROJECT_ROOTS=()
 
 add_project() {
   local name="$1"
   local input_path="$2"
-  local real_path base_name suffix
+  local real_path base_name suffix project_root
 
   input_path="${input_path/#\~/$HOME}"
+  # Auch den Elternordner veralteter Pfade merken: ein umbenanntes Repository
+  # soll beim nächsten Start unter seinem aktuellen Namen wieder auftauchen.
+  project_root="${input_path:A:h}"
+  if [[ -d "$project_root" && -z "${SEEN_PROJECT_ROOTS[$project_root]-}" ]]; then
+    SEEN_PROJECT_ROOTS[$project_root]=1
+    PROJECT_ROOTS+=("$project_root")
+  fi
   [[ -d "$input_path" ]] || return 0
   real_path="$(cd "$input_path" 2>/dev/null && pwd -P)" || return 0
   [[ -n "${SEEN_PROJECT_PATHS[$real_path]-}" ]] && return 0
@@ -278,6 +286,16 @@ if [[ -f "$SAVED_PROJECTS" ]]; then
     add_project "$saved_name" "$saved_path"
   done < "$SAVED_PROJECTS"
 fi
+
+# Bei jedem Start neue Git-Repositories direkt in den bekannten Elternordnern
+# ergänzen. .git darf auch eine Datei sein (Git-Worktree); normale Ordner und
+# tiefer verschachtelte Repositories werden nicht automatisch aufgenommen.
+for project_root in "${PROJECT_ROOTS[@]}"; do
+  for repo_path in "$project_root"/*(N/); do
+    [[ -d "$repo_path/.git" || -f "$repo_path/.git" ]] || continue
+    add_project "${repo_path:t}" "$repo_path"
+  done
+done
 
 # Diagnosemodus für Installation und Konfiguration, ohne Fenster zu öffnen.
 if [[ "${1:-}" == "--check" ]]; then
@@ -322,36 +340,16 @@ if [[ -f "$LAST_SELECTION" ]]; then
   done < "$LAST_SELECTION"
 fi
 
-# Standardmäßiger macOS-Mehrfachauswahldialog. Zum Ändern mehrerer Einträge
-# verlangt macOS die Cmd-Taste; die gespeicherte Auswahl kann direkt bestätigt werden.
+# Projekte per Checkbox auswählen; dafür ist keine Zusatztaste nötig.
 if [[ "${1:-}" == "--remote-workspace" ]]; then
   [[ -s "$TMP_DEFAULTS" ]] || cp "$TMP_NAMES" "$TMP_DEFAULTS"
   cp "$TMP_DEFAULTS" "$TMP_SELECTED"
 else
-osascript <<APPLESCRIPT > "$TMP_SELECTED"
-set namesFile to POSIX file "$TMP_NAMES"
-set defaultsFile to POSIX file "$TMP_DEFAULTS"
-set projectNames to paragraphs of (read namesFile as «class utf8»)
-set defaultNames to {}
-try
-    set defaultNames to paragraphs of (read defaultsFile as «class utf8»)
-on error number -39
-    -- Eine leere Datei bedeutet: kein Projekt vorselektieren.
-end try
-set chosen to choose from list projectNames with title "Vibe Workspace" with prompt "Welche Repositories sollen geöffnet werden? Zum Ändern der Ordnerliste ‚Setup VibeCode Workspace.command‘ erneut ausführen. Für die Mehrfachauswahl ⌘ gedrückt halten." default items defaultNames with multiple selections allowed
-if chosen is false then
-    return ""
-end if
-set oldDelims to AppleScript's text item delimiters
-set AppleScript's text item delimiters to linefeed
-set outputText to chosen as text
-set AppleScript's text item delimiters to oldDelims
-return outputText
-APPLESCRIPT
+  osascript -l JavaScript "$SCRIPT_DIR/project-selection.js" "$TMP_NAMES" "$TMP_DEFAULTS" > "$TMP_SELECTED"
 fi
 
 # Abgebrochen / nichts gewählt.
-if [[ ! -s "$TMP_SELECTED" ]]; then
+if [[ -z "$(<"$TMP_SELECTED")" ]]; then
   exit 0
 fi
 

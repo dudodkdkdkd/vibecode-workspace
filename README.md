@@ -38,6 +38,7 @@ Erzeuge für diese Dateien einen **Finder-Alias** auf dem Schreibtisch und start
 **Hauptdateien:**
 - `workspace` – Einstiegspunkt (leitet an Remote oder Workspace weiter)
 - `VibeCode Workspace.command` – Hauptskript für Workspace-Launch
+- `project-selection.js` – Projektauswahl mit einzeln anklickbaren Checkboxen
 - `Setup VibeCode Workspace.command` – Setup-Assistent
 - `terminal-setup.js` – Terminal-Konfiguration
 - `config.example.zsh` – Konfigurationsvorlage
@@ -108,6 +109,13 @@ Führe **`workspaces/Setup VibeCode Workspace.command`** aus, um:
 3. **Agenten (Claude, Codex, etc.)** einzurichten
 4. **Standard-Terminals** festzulegen
 5. **Browser-Tabs pro Projekt** festzulegen (z. B. `http://localhost:5173`, `http://localhost:6006` für Storybook)
+
+Beim Start über **`Launch Workspace.command`** die gewünschten Projekte anhaken und
+**Öffnen** klicken. Für mehrere Projekte ist keine ⌘-Taste erforderlich.
+Die Liste wird bei jedem Start um Git-Repositories direkt in den Elternordnern der
+eingerichteten Projekte ergänzt. Neue oder umbenannte Repositories erscheinen so
+automatisch; nicht mehr vorhandene Pfade werden ausgeblendet. Weitere Elternordner
+werden über ein Projekt im Setup bekannt gemacht.
 
 **Verfügbare Optionen:**
 ```bash

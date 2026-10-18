@@ -14,6 +14,7 @@ changing behaviour — several of these look like obvious one-liners and are not
 | Thing | Path |
 |-------|------|
 | Launcher (source of truth) | `workspaces/VibeCode Workspace.command` |
+| Project checkbox dialog (JXA/AppKit) | `workspaces/project-selection.js` |
 | Root starters (forwarders) | `Launch Workspace.command`, `Setup Workspace.command` |
 | Setup wizard (JXA dialogs) | `workspaces/terminal-setup.js` |
 | Auto-open-tabs extension | `workspaces/vscode-extension/auto-open-tabs/` |
@@ -39,6 +40,10 @@ changing behaviour — several of these look like obvious one-liners and are not
   ```
 - `~/.config/vibecode-workspace/terminals.json` is **user data**, not repo state.
   Changing the default template does not change already-configured projects.
+- The launcher uses independent project checkboxes; do not restore the Cmd-dependent
+  `choose from list` dialog. An empty JXA result still gives `osascript` a trailing
+  newline, so cancellation must check command output rather than file size.
+  Otherwise cancelling overwrites the saved selection and workspace with empty lists.
 
 ## Pitfall 1 — `code <url>` does not open a browser tab
 
