@@ -12,6 +12,12 @@
     "configuration": {
       "title": "VibeCode Workspace",
       "properties": {
+        "vibecodeWorkspace.autoStartTerminals": {
+          "type": "array",
+          "items": { "type": "object" },
+          "default": [],
+          "description": "Terminals mit Startbefehlen und Projektgruppen in ihrer Split-Reihenfolge. Wird vom Workspace-Starter geschrieben."
+        },
         "vibecodeWorkspace.autoStartTasks": {
           "type": "array",
           "items": { "type": "string" },

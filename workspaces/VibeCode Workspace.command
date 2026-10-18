@@ -113,13 +113,13 @@ TERMINALS=()
 # bei USE_PROJECT_TERMINALS=false gelten sie für jedes Projekt.
 # Falls Claude Code oder Codex fehlen, bleibt eine Shell mit
 # Installationshinweis geöffnet, statt dass der Task sofort verschwindet.
-# Claude Code ohne Sicherheitsabfragen; Codex mit Workspace-Sandbox.
+# Claude Code startet ohne Bestätigungsabfragen; beide Codex-Profile mit vollem Zugriff.
 AUTO_TERMINALS=(
   "Frontend|npm run dev|frontend"
   "Storybook|npm run storybook -- --no-open|frontend"
   "Claude|if command -v claude >/dev/null 2>&1; then exec claude --dangerously-skip-permissions; else echo 'Claude Code ist nicht installiert.'; exec zsh -l; fi|"
-  'Codex 1|if command -v codex >/dev/null 2>&1; then CODEX_HOME="$HOME/.codex" exec codex --sandbox workspace-write --ask-for-approval never; else echo "Codex ist nicht installiert."; exec zsh -l; fi|'
-  'Codex 2|if command -v codex >/dev/null 2>&1; then CODEX_HOME="$HOME/.codex-account2" exec codex --sandbox workspace-write --ask-for-approval never; else echo "Codex 2 ist nicht installiert."; exec zsh -l; fi|'
+  'Codex 1|if command -v codex >/dev/null 2>&1; then CODEX_HOME="$HOME/.codex" exec codex --dangerously-bypass-approvals-and-sandbox; else echo "Codex ist nicht installiert."; exec zsh -l; fi|'
+  'Codex 2|if command -v codex >/dev/null 2>&1; then CODEX_HOME="$HOME/.codex-account2" exec codex --dangerously-bypass-approvals-and-sandbox; else echo "Codex 2 ist nicht installiert."; exec zsh -l; fi|'
 )
 
 # Bevorzugter VS-Code-Befehl. Wenn er nicht im PATH liegt, wird die
@@ -526,8 +526,8 @@ function run(argv) {
             // Nur den erzeugten Start ersetzen; eigene Befehle und Prompts bleiben erhalten.
             const command = ["Codex", "Codex 2"].includes(entry.type)
                 ? entry.command.replace(
-                    /^(if command -v codex >\/dev\/null 2>&1; then (?:CODEX_HOME="?\$HOME\/\.codex-account2"? )?exec codex )--yolo(?=;| -- )/,
-                    "$1--sandbox workspace-write --ask-for-approval never")
+                    /^(if command -v codex >\/dev\/null 2>&1; then (?:CODEX_HOME="?\$HOME\/\.codex(?:-account2)?"? )?exec codex )(?:--yolo|--sandbox workspace-write --ask-for-approval never)(?=;| -- )/,
+                    "$1--dangerously-bypass-approvals-and-sandbox")
                 : entry.command;
             terminalDefinitions.push({ project, terminalName: entry.name, command, relativeCwd: entry.cwd });
         }
@@ -601,12 +601,30 @@ function run(argv) {
         "git.openRepositoryInParentFolders": "always",
         "terminal.integrated.tabs.enabled": true,
         "terminal.integrated.enableMultiLinePasteWarning": "auto",
+        // Automatische Aktivierungsbefehle würden in Codex-/Claude-Prompts landen.
+        "python.terminal.activateEnvironment": false,
+        "python.terminal.activateEnvInCurrentTerminal": false,
     };
     // Die Erweiterung startet die Tasks einzeln bis zum Prozessstart. folderOpen
     // würde die Terminals parallel und damit in wechselnder Reihenfolge anlegen.
     const autoStartTasks = autoStart ? tasks.map((task) => task.label)
         : controlEnabled ? ["VibeCode · Wachhalten + Apps"] : [];
     if (autoStartTasks.length) settings["vibecodeWorkspace.autoStartTasks"] = autoStartTasks;
+    // Direkte Terminal-Splits hängen am jeweils letzten Terminal. Der Task-Runner
+    // würde neue Splits immer hinter dem ersten Terminal derselben Gruppe einfügen.
+    if (autoStartTasks.length) settings["vibecodeWorkspace.autoStartTerminals"] = tasks
+        .filter((task) => autoStartTasks.includes(task.label))
+        .map((task) => ({
+            name: task.label,
+            group: task.presentation.group,
+            type: task.type,
+            command: task.command,
+            args: task.args,
+            cwd: task.options.cwd,
+            env: task.options.env,
+            color: task.icon.color,
+            close: task.presentation.close === true,
+        }));
     // Von der VibeCode-Auto-Open-Tabs-Erweiterung gelesen; öffnet pro URL einen eigenen Tab.
     if (openUrls.length) settings["vibecodeWorkspace.autoOpenUrls"] = openUrls;
 
@@ -634,15 +652,11 @@ function run(argv) {
 }
 JXA
 
-# Die Erweiterung vor dem Start in beide bekannten Erweiterungsordner
-# synchronisieren, damit VS Code und Cursor sie erkennen.
+# Regulär installieren, damit der Editor die Erweiterung registriert. Kopierte
+# Ordner reichen nach einer Deinstallation (.obsolete) nicht zur Reaktivierung.
 EXTENSION_SOURCE="$SCRIPT_DIR/vscode-extension/auto-open-tabs"
-if [[ -f "$EXTENSION_SOURCE/package.json" && -f "$EXTENSION_SOURCE/extension.js" ]]; then
-  for extensions_dir in "$HOME/.vscode/extensions" "$HOME/.cursor/extensions"; do
-    mkdir -p "$extensions_dir/vibecode-workspace-auto-open-tabs"
-    /bin/cp "$EXTENSION_SOURCE/package.json" "$EXTENSION_SOURCE/extension.js" \
-      "$extensions_dir/vibecode-workspace-auto-open-tabs/"
-  done
+if [[ -f "$EXTENSION_SOURCE/install.zsh" ]]; then
+  /bin/zsh "$EXTENSION_SOURCE/install.zsh" "$EDITOR_CMD"
 fi
 
 # Workspace öffnen.
