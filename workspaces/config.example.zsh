@@ -40,11 +40,10 @@ PROJECTS=(
 #
 # 💡 Split-Screen: Kombiniere mit VSCODE_TERMINAL_LAYOUT weiter unten!
 #
-# Claude Code und Antigravity ohne Sicherheitsabfragen; Codex mit Workspace-Sandbox.
+# Claude Code ohne Sicherheitsabfragen; Codex mit Workspace-Sandbox.
 AUTO_TERMINALS=(
   "Claude|if command -v claude >/dev/null 2>&1; then exec claude --dangerously-skip-permissions; else echo 'Claude Code ist nicht installiert.'; exec zsh -l; fi|"
   "Codex|if command -v codex >/dev/null 2>&1; then exec codex --sandbox workspace-write --ask-for-approval never; else echo 'Codex ist nicht installiert.'; exec zsh -l; fi|"
-  "agy|if command -v agy >/dev/null 2>&1; then exec agy --dangerously-skip-permissions; else echo 'Antigravity (agy) ist nicht installiert.'; exec zsh -l; fi|"
   "Frontend|npm run dev|frontend"
   "Storybook|npm run storybook -- --no-open|frontend"
 )

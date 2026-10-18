@@ -10,6 +10,7 @@ const root = path.resolve(__dirname, '..');
 const workspacesRoot = path.join(root, 'workspaces');
 const remoteRoot = path.join(root, 'remote');
 const setupSource = fs.readFileSync(path.join(workspacesRoot, 'terminal-setup.js'), 'utf8');
+const selectionSource = fs.readFileSync(path.join(workspacesRoot, 'project-selection.js'), 'utf8');
 const launcherSource = fs.readFileSync(path.join(workspacesRoot, 'VibeCode Workspace.command'), 'utf8');
 const workspaceSource = launcherSource.split("<<'JXA'\n")[1].split('\nJXA\n')[0];
 const quote = (value) => "'" + value.replace(/'/g, "'\\''") + "'";
@@ -79,7 +80,58 @@ function openedUrls(files, result) {
     return (result ?? workspace(files)).settings['vibecodeWorkspace.autoOpenUrls'] ?? [];
 }
 
-test('setup offers the same ordered five terminals as the launcher defaults', () => {
+function projectSelection(files, { defaults = [], answers }) {
+    const namesFile = path.join(files.dir, 'names.txt');
+    const defaultsFile = path.join(files.dir, 'defaults.txt');
+    fs.writeFileSync(namesFile, 'A\nB\n');
+    fs.writeFileSync(defaultsFile, defaults.join('\n'));
+    const source = `
+const answers = ${JSON.stringify(answers)};
+const shown = [];
+function showProjectDialog(alert, checkboxes) {
+    if (!answers.length) throw new Error('Missing scripted dialog answer');
+    shown.push({
+        names: checkboxes.map(button => ObjC.unwrap(button.title)),
+        selected: checkboxes.map(button => button.state === $.NSControlStateValueOn),
+        prompt: ObjC.unwrap(alert.informativeText),
+    });
+    const answer = answers.shift();
+    for (const index of answer.clicks || []) checkboxes[index].performClick(null);
+    return answer.cancel ? $.NSAlertSecondButtonReturn : $.NSAlertFirstButtonReturn;
+}
+` + selectionSource
+        .replace('function run(argv) {', 'function selectRun(argv) {')
+        .replace('alert.runModal', 'showProjectDialog(alert, checkboxes)')
+        .replace('app.activateIgnoringOtherApps(true);', '') + `
+function run(argv) {
+    const selected = selectRun(argv);
+    return JSON.stringify({ selected, shown });
+}
+`;
+    return JSON.parse(jxa(source, [namesFile, defaultsFile]));
+}
+
+test('project checkboxes allow independent clicks and preserve the previous selection', (t) => {
+    const files = fixture(t);
+    const selected = projectSelection(files, { defaults: ['B'], answers: [{ clicks: [0] }] });
+    assert.equal(selected.selected, 'A\nB');
+    assert.deepEqual(selected.shown[0].names, ['A', 'B']);
+    assert.deepEqual(selected.shown[0].selected, [false, true]);
+
+    const toggled = projectSelection(files, { defaults: ['A', 'B'], answers: [{ clicks: [0] }] });
+    assert.equal(toggled.selected, 'B');
+});
+
+test('project selection requires a checked project and supports cancellation', (t) => {
+    const files = fixture(t);
+    const retried = projectSelection(files, { answers: [{}, { clicks: [1] }] });
+    assert.equal(retried.selected, 'B');
+    assert.equal(retried.shown.length, 2);
+    assert.match(retried.shown[1].prompt, /mindestens ein Projekt/);
+    assert.equal(projectSelection(files, { answers: [{ clicks: [0], cancel: true }] }).selected, '');
+});
+
+test('setup offers the same ordered four terminals as the launcher defaults', () => {
     const source = setupSource.replace('function run(argv) {', 'function configureRun(argv) {') + `
 function run() { return JSON.stringify(defaultTerminals()); }
 `;
@@ -87,15 +139,13 @@ function run() { return JSON.stringify(defaultTerminals()); }
     assert.deepEqual(defaults.map(({ name, type, cwd }) => ({ name, type, cwd })), [
         { name: 'Claude', type: 'Claude Code', cwd: '' },
         { name: 'Codex', type: 'Codex', cwd: '' },
-        { name: 'agy', type: 'Antigravity', cwd: '' },
         { name: 'Frontend', type: 'Eigener Befehl', cwd: 'frontend' },
         { name: 'Storybook', type: 'Eigener Befehl', cwd: 'frontend' },
     ]);
     assert.match(defaults[0].command, /exec claude --dangerously-skip-permissions/);
     assert.match(defaults[1].command, /exec codex --sandbox workspace-write --ask-for-approval never/);
-    assert.match(defaults[2].command, /exec agy --dangerously-skip-permissions/);
-    assert.equal(defaults[3].command, 'npm run dev');
-    assert.equal(defaults[4].command, 'npm run storybook -- --no-open');
+    assert.equal(defaults[2].command, 'npm run dev');
+    assert.equal(defaults[3].command, 'npm run storybook -- --no-open');
 });
 
 test('terminal setup opens with no repositories preselected', (t) => {
@@ -285,7 +335,45 @@ test('noninteractive setup preserves saved terminal settings and deduplicates fo
     assert.equal(fs.readFileSync(savedFile, 'utf8'), '{"version":1,"projects":{}}');
 });
 
-test('full launcher creates the ordered five-terminal stack and applies per-repo overrides', (t) => {
+test('launcher refreshes sibling repositories on every run, including renamed folders and worktrees', (t) => {
+    const files = fixture(t);
+    const script = path.join(files.dir, 'Inventory.command');
+    fs.writeFileSync(script, launcherSource.split('\n# Diagnosemodus')[0] + '\ncat "$TMP_CONFIG"\n');
+    const lastSelection = path.join(files.dir, 'last-selection.txt');
+    fs.writeFileSync(lastSelection, `${files.b}\n`);
+    fs.writeFileSync(path.join(files.dir, 'config.local.zsh'), `
+CONFIG_DIR=${quote(files.dir)}
+SAVED_PROJECTS=${quote(files.projects)}
+LAST_SELECTION=${quote(lastSelection)}
+WORKSPACE_DIR=${quote(files.dir)}
+EDITOR_CMD=/usr/bin/true
+`);
+    fs.mkdirSync(path.join(files.a, '.git'));
+    fs.mkdirSync(path.join(files.b, '.git'));
+    const inventory = () => execFileSync('/bin/zsh', [script], { encoding: 'utf8' })
+        .trim().split('\n').map(line => line.split('\t'));
+    assert.deepEqual(inventory(), [['A', files.a], ['B', files.b]]);
+
+    const renamed = path.join(files.dir, 'Repo renamed');
+    fs.renameSync(files.a, renamed);
+    const worktree = path.join(files.dir, 'New worktree');
+    fs.mkdirSync(worktree);
+    fs.writeFileSync(path.join(worktree, '.git'), `gitdir: ${files.b}/.git/worktrees/new\n`);
+    fs.symlinkSync(files.b, path.join(files.dir, 'Alias B'));
+    const nested = path.join(files.dir, 'Not a repository', 'Nested repo', '.git');
+    fs.mkdirSync(nested, { recursive: true });
+    assert.deepEqual(inventory(), [
+        ['B', files.b], ['New worktree', worktree], ['Repo renamed', renamed],
+    ]);
+
+    fs.rmSync(worktree, { recursive: true });
+    fs.rmSync(files.b, { recursive: true });
+    assert.deepEqual(inventory(), [['Repo renamed', renamed]]);
+    assert.equal(fs.readFileSync(files.projects, 'utf8'), `A\t${files.a}\nB\t${files.b}\n`);
+    assert.equal(fs.readFileSync(lastSelection, 'utf8'), `${files.b}\n`);
+});
+
+test('full launcher creates the ordered four-terminal stack and applies per-repo overrides', (t) => {
     const files = fixture(t);
     const script = path.join(files.dir, 'VibeCode Workspace.command');
     fs.writeFileSync(script, launcherSource);
@@ -301,19 +389,24 @@ CLOSE_LAUNCHER_TERMINAL=false
 `);
     const wrapper = `
 osascript() {
-    if [[ "\${1:-}" == "-l" ]]; then
-        /usr/bin/osascript "$@"
-    elif [[ "\${1:-}" != "-e" ]]; then
+    if [[ "\${3:-}" == */project-selection.js ]]; then
         cat "$TMP_DEFAULTS" > "$DEFAULTS_CAPTURE"
-        cat "$TMP_NAMES"
+        if [[ "\${SELECTION_CANCELLED_VALUE:-false}" == "true" ]]; then
+            print -r -- ""
+        else
+            cat "$TMP_NAMES"
+        fi
+    elif [[ "\${1:-}" == "-l" ]]; then
+        /usr/bin/osascript "$@"
     fi
 }
 source "$1"
 `;
     const defaultsCapture = path.join(files.dir, 'defaults-capture.txt');
-    const launch = () => {
+    const launch = (cancelled = false) => {
         execFileSync('/bin/zsh', ['-c', wrapper, 'test', script], {
-            env: { ...process.env, DEFAULTS_CAPTURE: defaultsCapture },
+            env: { ...process.env, DEFAULTS_CAPTURE: defaultsCapture,
+                SELECTION_CANCELLED_VALUE: String(cancelled) },
         });
         return JSON.parse(fs.readFileSync(path.join(files.dir, 'Vibe-Session.code-workspace')));
     };
@@ -323,6 +416,11 @@ source "$1"
         [files.a, files.b]);
     launch();
     assert.equal(fs.readFileSync(defaultsCapture, 'utf8'), 'A\nB\n');
+    const previousWorkspace = fs.readFileSync(path.join(files.dir, 'Vibe-Session.code-workspace'), 'utf8');
+    const previousSelection = fs.readFileSync(path.join(files.dir, 'last-selection.txt'), 'utf8');
+    launch(true);
+    assert.equal(fs.readFileSync(path.join(files.dir, 'Vibe-Session.code-workspace'), 'utf8'), previousWorkspace);
+    assert.equal(fs.readFileSync(path.join(files.dir, 'last-selection.txt'), 'utf8'), previousSelection);
     fs.writeFileSync(path.join(files.dir, 'last-selection.txt'), 'A\n');
     launch();
     assert.equal(fs.readFileSync(defaultsCapture, 'utf8'), 'A\n');
@@ -331,19 +429,19 @@ source "$1"
     assert.equal(fs.readFileSync(defaultsCapture, 'utf8'), '');
     const defaultProjectTasks = defaults.filter((task) => task.label !== 'VibeCode · Wachhalten + Apps');
     const controlTask = defaults.find((task) => task.label === 'VibeCode · Wachhalten + Apps');
-    assert.equal(defaults.length, 11);
-    assert.deepEqual(defaultProjectTasks.slice(0, 5).map((task) => task.label), [
-        'A · Claude', 'A · Codex', 'A · agy',
+    assert.equal(defaults.length, 9);
+    assert.deepEqual(defaultProjectTasks.slice(0, 4).map((task) => task.label), [
+        'A · Claude', 'A · Codex',
         'A · Frontend', 'A · Storybook',
     ]);
-    assert.equal(defaultProjectTasks[3].command, 'npm run dev');
+    assert.equal(defaultProjectTasks[2].command, 'npm run dev');
+    assert.equal(defaultProjectTasks[2].options.cwd, `${files.a}/frontend`);
+    assert.equal(defaultProjectTasks[3].command, 'npm run storybook -- --no-open');
     assert.equal(defaultProjectTasks[3].options.cwd, `${files.a}/frontend`);
-    assert.equal(defaultProjectTasks[4].command, 'npm run storybook -- --no-open');
-    assert.equal(defaultProjectTasks[4].options.cwd, `${files.a}/frontend`);
     assert.equal(defaultProjectTasks.filter((task) => task.command.includes('exec claude --dangerously-skip-permissions')).length, 2);
     assert.equal(defaultProjectTasks.filter((task) => task.command.includes('exec codex --sandbox workspace-write --ask-for-approval never')).length, 2);
     assert.equal(defaultProjectTasks.filter((task) => task.command.includes('CODEX_HOME="$HOME/.codex-account2"')).length, 0);
-    assert.equal(defaultProjectTasks.filter((task) => task.command.includes('exec agy --dangerously-skip-permissions')).length, 2);
+    assert.equal(defaultProjectTasks.filter((task) => task.command.includes('exec agy --dangerously-skip-permissions')).length, 0);
     assert.equal(controlTask.type, 'process');
     assert.equal(controlTask.command, '/usr/bin/env');
     assert.deepEqual(controlTask.args, ['python3', path.join(files.dir, 'remote.py'), 'control']);
@@ -354,8 +452,8 @@ source "$1"
     fs.writeFileSync(files.saved, JSON.stringify({ version: 1, projects: { [files.a]: [] } }));
     const tasks = launch().tasks.tasks;
     const projectTasks = tasks.filter((task) => task.label !== 'VibeCode · Wachhalten + Apps');
-    assert.equal(tasks.length, 6);
-    assert.equal(projectTasks.length, 5);
+    assert.equal(tasks.length, 5);
+    assert.equal(projectTasks.length, 4);
     assert.ok(projectTasks.every((task) => task.label.startsWith('B · ')));
 
     // Three selected folders, each with several tasks, must have three colors.
@@ -365,12 +463,12 @@ source "$1"
     fs.unlinkSync(files.saved);
     fs.unlinkSync(path.join(files.dir, 'last-selection.txt'));
     const coloredTasks = launch().tasks.tasks;
-    assert.equal(coloredTasks.length, 16);
+    assert.equal(coloredTasks.length, 13);
     for (const [project, color] of [
         ['A', 'terminal.ansiBlue'], ['B', 'terminal.ansiGreen'], ['C', 'terminal.ansiMagenta'],
     ]) {
         const group = coloredTasks.filter((task) => task.presentation.group === project);
-        assert.equal(group.length, 5);
+        assert.equal(group.length, 4);
         assert.ok(group.every((task) => task.icon.id === 'terminal' && task.icon.color === color));
     }
     fs.writeFileSync(files.projects, `A renamed\t${files.a}\nB\t${files.b}\nC\t${c}\n`);
