@@ -171,15 +171,90 @@ async function startOrderedTasks() {
     }
 }
 
+function shellQuote(value) {
+    return "'" + value.replace(/'/g, "'\\''") + "'";
+}
+
+async function startSplitTerminals(definitions) {
+    const parents = new Map();
+    const seen = new Set();
+    const created = [];
+    // Die ganze Gruppe ohne await anlegen. In VS Code 1.138 wird parentTerminal
+    // nach dem Open-Ereignis numerisch serialisiert, aber nur die anfängliche
+    // Extension-ID im Hauptprozess aufgelöst. Sonst entstehen einzelne Tabs.
+    for (const definition of definitions) {
+        if (!definition || typeof definition.name !== "string" || !definition.name.trim() ||
+            typeof definition.command !== "string" || !definition.command.trim() || seen.has(definition.name)) continue;
+        seen.add(definition.name);
+        // Beim Neuladen keine laufenden Agenten/Server ein zweites Mal starten.
+        const existing = vscode.window.terminals.find((terminal) =>
+            terminal.name === definition.name || terminal.name.startsWith(definition.name + " ("));
+        if (existing) {
+            if (definition.group) parents.set(definition.group, existing);
+            continue;
+        }
+        let terminal;
+        try {
+            const parent = parents.get(definition.group);
+            const command = definition.type === "process"
+                ? [definition.command, ...(definition.args || [])].map(shellQuote).join(" ")
+                : definition.command;
+            terminal = vscode.window.createTerminal({
+                name: definition.name,
+                cwd: definition.cwd,
+                env: definition.env,
+                shellPath: "/bin/zsh",
+                // Ein direkter Start wie bei Shell-Tasks verhindert, dass andere
+                // Erweiterungen Aktivierungsbefehle in laufende Agenten schicken.
+                // Ctrl+C beendet nur den gestarteten Befehl. Auch ein exec im
+                // Befehl darf die Shell, die danach den Prompt öffnet, nicht ersetzen.
+                shellArgs: ["-l", "-c", definition.close ? command
+                    : `trap ':' INT\n(\ntrap - INT\n${command}\n)\nexec /bin/zsh -l`],
+                iconPath: new vscode.ThemeIcon("terminal",
+                    definition.color ? new vscode.ThemeColor(definition.color) : undefined),
+                color: definition.color ? new vscode.ThemeColor(definition.color) : undefined,
+                location: parent ? { parentTerminal: parent } : vscode.TerminalLocation.Panel,
+            });
+            if (definition.group) parents.set(definition.group, terminal);
+            created.push({ definition, terminal });
+        } catch (error) {
+            vscode.window.showWarningMessage(`VibeCode: ${definition.name} konnte nicht gestartet werden: ${error.message}`);
+        }
+    }
+    for (const { definition, terminal } of created) {
+        let timeout;
+        try {
+            await Promise.race([
+                terminal.processId,
+                new Promise((_, reject) => {
+                    timeout = setTimeout(() => reject(new Error("Terminal-Start dauert zu lange.")), 30000);
+                }),
+            ]);
+            terminal.show(true);
+        } catch (error) {
+            terminal.dispose();
+            vscode.window.showWarningMessage(`VibeCode: ${definition.name} konnte nicht gestartet werden: ${error.message}`);
+        } finally {
+            clearTimeout(timeout);
+        }
+    }
+}
+
 async function activate(context) {
     const urls = vscode.workspace.getConfiguration("vibecodeWorkspace").get("autoOpenUrls", []);
     for (const url of Array.isArray(urls) ? urls : []) {
         if (typeof url !== "string" || !url.trim()) continue;
         openTab(url.trim());
     }
-    const start = () => startOrderedTasks().catch((error) => {
-        vscode.window.showErrorMessage(`VibeCode: Terminals konnten nicht gestartet werden: ${error.message}`);
-    });
+    const start = async () => {
+        try {
+            const terminals = vscode.workspace.getConfiguration("vibecodeWorkspace").get("autoStartTerminals", []);
+            if (Array.isArray(terminals) && terminals.length) await startSplitTerminals(terminals);
+            else await startOrderedTasks();
+        } catch (error) {
+            vscode.window.showErrorMessage(`VibeCode: Terminals konnten nicht gestartet werden: ${error.message}`);
+        }
+    };
     if (vscode.workspace.isTrusted) await start();
     else context.subscriptions.push(vscode.workspace.onDidGrantWorkspaceTrust(start));
 }

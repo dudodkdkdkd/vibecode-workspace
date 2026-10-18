@@ -23,7 +23,7 @@ function terminalCommand(type, prompt) {
     const executable = type === "Claude Code" ? "claude" : "codex";
     const flag = type === "Claude Code"
         ? "--dangerously-skip-permissions"
-        : "--sandbox workspace-write --ask-for-approval never";
+        : "--dangerously-bypass-approvals-and-sandbox";
     const account = type === "Codex 2" ? 'CODEX_HOME="$HOME/.codex-account2" '
         : type === "Codex" ? 'CODEX_HOME="$HOME/.codex" ' : "";
     const argument = prompt ? ` -- ${shellQuote(prompt)}` : "";
@@ -93,7 +93,7 @@ function configureProject(app, project, existing) {
     let count;
     while (true) {
         const answer = ask(app,
-            `Wie viele Terminals sollen für „${project.name}“ geöffnet werden?\n\n0 = keine Terminals. Claude Code und Antigravity starten ohne Sicherheitsabfragen. Codex startet mit Workspace-Sandbox ohne Sicherheitsabfragen; durch die Sandbox verbotene Aktionen werden blockiert.`,
+            `Wie viele Terminals sollen für „${project.name}“ geöffnet werden?\n\n0 = keine Terminals. Claude Code und Antigravity starten ohne Sicherheitsabfragen. Beide Codex-Profile starten mit vollem Zugriff ohne Sandbox und ohne Bestätigungsabfragen.`,
             String(existing.length), title).trim();
         if (/^\d+$/.test(answer) && Number.isSafeInteger(Number(answer))) {
             count = Number(answer);

@@ -44,10 +44,26 @@ changing behaviour — several of these look like obvious one-liners and are not
   `choose from list` dialog. An empty JXA result still gives `osascript` a trailing
   newline, so cancellation must check command output rather than file size.
   Otherwise cancelling overwrites the saved selection and workspace with empty lists.
-- Terminal startup order comes from `vibecodeWorkspace.autoStartTasks`. The extension
-  waits for `onDidStartTaskProcess` before launching the next task: `executeTask()`
-  resolves before the process starts. Do not restore parallel `runOn: folderOpen`
-  or wait for task exit, because dev servers and agents keep running.
+- Terminal startup and split layout come from `vibecodeWorkspace.autoStartTerminals`.
+  The extension uses `createTerminal({ location: { parentTerminal: previous } })`
+  for a whole group **synchronously, before awaiting any process IDs**. In VS Code
+  1.138, parents already opened are serialized as numeric IDs but looked up only by
+  their initial extension IDs; awaiting between creations silently produces standalone
+  tabs. Commands start directly via `/bin/zsh -l -c`, not `sendText` into an interactive
+  shell, which lets Python's environment activation interfere with running agents.
+  Each project has its own split group; the control terminal stays separate.
+  Disable `python.terminal.activateEnvironment` and
+  `python.terminal.activateEnvInCurrentTerminal` in this generated workspace;
+  Python activation otherwise types `source .../activate` into agent prompts even
+  with a direct shell command. `python-envs.terminal.autoActivationType` is machine-scoped
+  and cannot be overridden in a workspace; with no explicit global override, the
+  Python Environments extension respects `python.terminal.activateEnvironment`.
+  Never replace these splits with standalone tabs or reverse the requested start order.
+- VS Code's task runner always splits after the **first** terminal of a task group,
+  producing `Frontend, Codex 2, Codex 1, Claude, Storybook` despite correct process start
+  order. `presentation.group` is retained for manual tasks, not automatic layout.
+  `autoStartTasks` remains a fallback for older workspace files; it waits for
+  `onDidStartTaskProcess` because `executeTask()` resolves before actual startup.
 
 ## Pitfall 1 — `code <url>` does not open a browser tab
 
@@ -89,9 +105,10 @@ Never add `allow-popups` or `allow-modals`.
   and relaunch**. "Developer: Reload Window" does *not* pick it up.
 - **Code change** in an already-known extension: "Developer: Reload Window" is enough.
 
-The launcher re-copies the extension into `~/.vscode/extensions` and
-`~/.cursor/extensions` on every run, so edits in the repo reach the installed copy on the
-next launch. Check it is registered with:
+The launcher builds a local VSIX and installs it into the selected editor with
+`--install-extension ... --force` on every run. A copied extension directory can remain
+marked uninstalled in `.obsolete` and never activate, even after restarting the editor.
+Do not replace the regular installation with raw file copies. Check registration with:
 
 ```bash
 # "code" is often not on PATH; fall back to the binary inside the app bundle
@@ -162,7 +179,8 @@ and was a real bug. Tests cover this; keep them meaningful.
    and writes them into the generated workspace as the setting
    `vibecodeWorkspace.autoOpenUrls`.
 3. The launcher syncs the extension into the editor's extensions folder, then opens the
-   workspace via `open -a`.
+   workspace via `open -a`. The sync is a regular VSIX installation so the extension is
+   registered even after a previous uninstall.
 4. The extension activates `onStartupFinished`, reads that setting, and opens one polling
    webview tab per URL.
 

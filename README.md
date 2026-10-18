@@ -157,8 +157,8 @@ AUTO_TERMINALS=(
   "Frontend|npm run dev|frontend"
   "Storybook|npm run storybook -- --no-open|frontend"
   "Claude|claude --dangerously-skip-permissions|"
-  'Codex 1|CODEX_HOME="$HOME/.codex" codex --sandbox workspace-write --ask-for-approval never|'
-  'Codex 2|CODEX_HOME="$HOME/.codex-account2" codex --sandbox workspace-write --ask-for-approval never|'
+  'Codex 1|CODEX_HOME="$HOME/.codex" codex --dangerously-bypass-approvals-and-sandbox|'
+  'Codex 2|CODEX_HOME="$HOME/.codex-account2" codex --dangerously-bypass-approvals-and-sandbox|'
 )
 AUTO_START_TERMINALS=true
 # Globale Terminals für jedes Projekt; Browser-Tabs bleiben projektspezifisch.
@@ -183,10 +183,19 @@ CLOSE_LAUNCHER_TERMINAL=true
 ```
 
 Die feste Startreihenfolge ist Frontend (`npm run dev`), Storybook, Claude,
-Codex 1 und Codex 2. Die Erweiterung wartet jeweils auf den Prozessstart eines
-Terminals und öffnet dann das nächste; laufende Server bleiben aktiv.
+Codex 1 und Codex 2. Die Erweiterung legt die Terminals nacheinander an und startet
+ihre Befehle direkt beim Öffnen; laufende Server bleiben aktiv.
+Pro Projekt erscheinen die fünf Terminals in einer gemeinsamen Split-Ansicht,
+von links nach rechts in dieser Reihenfolge. Die Erweiterung fügt jedes Terminal
+rechts neben seinem Vorgänger ein; jedes Projekt behält seine eigene Farbe.
+Nach dem Beenden eines Befehls oder einem Abbruch mit `Ctrl+C` bleibt im selben
+Terminal eine Shell geöffnet. Der Befehl kann dort erneut gestartet werden.
+Der Starter installiert die gebündelte Erweiterung bei jedem Start regulär im
+gewählten Editor, damit auch eine zuvor deinstallierte Version wieder aktiviert wird.
 Die Codex-Profile liegen getrennt in `~/.codex` und
-`~/.codex-account2`. Ohne `frontend`-Unterordner starten die Standard-Terminals im
+`~/.codex-account2` und starten mit vollem Zugriff ohne Sandbox und ohne
+Bestätigungsabfragen (`--dangerously-bypass-approvals-and-sandbox`).
+Ohne `frontend`-Unterordner starten die Standard-Terminals im
 Repository-Ordner. Dev- und Storybook-Server benötigen dort passende npm-Skripte.
 
 **💡 Split-Screen in VS Code (manuell):**

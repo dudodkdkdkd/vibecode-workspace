@@ -145,7 +145,7 @@ function run() { return JSON.stringify(defaultTerminals()); }
     ]);
     assert.match(defaults[2].command, /exec claude --dangerously-skip-permissions/);
     for (const index of [3, 4]) {
-        assert.match(defaults[index].command, /exec codex --sandbox workspace-write --ask-for-approval never/);
+        assert.match(defaults[index].command, /exec codex --dangerously-bypass-approvals-and-sandbox/);
     }
     assert.equal(defaults[1].command, 'npm run storybook -- --no-open');
     assert.equal(defaults[0].command, 'npm run dev');
@@ -202,8 +202,8 @@ test('setup stores counts, repeated agents, literal prompts and custom commands 
     assert.deepEqual(saved.projects[files.b], { terminals: [], urls: [] });
     const terminals = saved.projects[files.a].terminals;
     assert.match(terminals[0].command, /claude --dangerously-skip-permissions/);
-    assert.match(terminals[2].command, /codex --sandbox workspace-write --ask-for-approval never -- /);
-    assert.match(terminals[3].command, /CODEX_HOME="\$HOME\/\.codex-account2" exec codex --sandbox workspace-write --ask-for-approval never -- /);
+    assert.match(terminals[2].command, /codex --dangerously-bypass-approvals-and-sandbox -- /);
+    assert.match(terminals[3].command, /CODEX_HOME="\$HOME\/\.codex-account2" exec codex --dangerously-bypass-approvals-and-sandbox -- /);
     assert.match(terminals[4].command, /agy --dangerously-skip-permissions --prompt-interactive /);
     assert.equal(terminals[5].command, custom);
 
@@ -215,8 +215,8 @@ test('setup stores counts, repeated agents, literal prompts and custom commands 
     }
     for (const [index, expectedArgs] of [
         [0, ['--dangerously-skip-permissions', '--', prompt]],
-        [2, ['--sandbox', 'workspace-write', '--ask-for-approval', 'never', '--', '--looks-like-an-option']],
-        [3, ['--sandbox', 'workspace-write', '--ask-for-approval', 'never', '--', 'second account']],
+        [2, ['--dangerously-bypass-approvals-and-sandbox', '--', '--looks-like-an-option']],
+        [3, ['--dangerously-bypass-approvals-and-sandbox', '--', 'second account']],
         [4, ['--dangerously-skip-permissions', '--prompt-interactive', 'turbo task']],
     ]) {
         const args = execFileSync('/bin/zsh', ['-c', terminals[index].command], {
@@ -267,27 +267,35 @@ test('browser tabs are configured per repo and deduplicated across selected repo
         ['http://localhost:5173', 'http://localhost:6006', 'http://localhost:9009']);
 });
 
-test('legacy Codex presets use the sandbox while custom commands and prompt text stay unchanged', (t) => {
+test('saved Codex presets use full access while custom commands and prompt text stay unchanged', (t) => {
     const files = fixture(t);
     const prompt = "Explain if command -v codex >/dev/null 2>&1; then exec codex --yolo; and 'quotes'";
     const suffix = ` -- ${quote(prompt)}; else echo 'Codex ist nicht installiert.'; exec zsh -l; fi`;
-    const oldCommand = 'if command -v codex >/dev/null 2>&1; then exec codex --yolo' + suffix;
-    const newCommand = 'if command -v codex >/dev/null 2>&1; then exec codex --sandbox workspace-write --ask-for-approval never' + suffix;
+    const oldCommand = 'if command -v codex >/dev/null 2>&1; then exec codex --sandbox workspace-write --ask-for-approval never' + suffix;
+    const newCommand = 'if command -v codex >/dev/null 2>&1; then exec codex --dangerously-bypass-approvals-and-sandbox' + suffix;
     const entries = [
         { name: 'Legacy', type: 'Codex', prompt, command: oldCommand, cwd: 'src' },
         { name: 'Custom', type: 'Eigener Befehl', prompt: oldCommand, command: oldCommand, cwd: '' },
         { name: 'Current', type: 'Codex', prompt, command: newCommand, cwd: '' },
         { name: 'No prompt', type: 'Codex', prompt: '', command: "if command -v codex >/dev/null 2>&1; then exec codex --yolo; else echo 'Codex ist nicht installiert.'; exec zsh -l; fi", cwd: '' },
+        ...['.codex', '.codex-account2'].map((profile, index) => ({
+            name: `Profile ${index + 1}`, type: index ? 'Codex 2' : 'Codex', prompt,
+            command: oldCommand.replace('then exec', `then CODEX_HOME="$HOME/${profile}" exec`), cwd: '',
+        })),
     ];
     const original = JSON.stringify({ version: 1, projects: { [files.a]: entries, [files.b]: [] } });
     fs.writeFileSync(files.saved, original);
     const tasks = workspace(files).tasks.tasks;
-    assert.equal(tasks.length, 4);
+    assert.equal(tasks.length, 6);
     assert.equal(tasks[0].command, newCommand);
     assert.equal(tasks[0].options.cwd, `${files.a}/src`);
     assert.equal(tasks[1].command, oldCommand);
     assert.equal(tasks[2].command, newCommand);
-    assert.match(tasks[3].command, /codex --sandbox workspace-write --ask-for-approval never;/);
+    assert.match(tasks[3].command, /codex --dangerously-bypass-approvals-and-sandbox;/);
+    for (const [index, profile] of [[4, '.codex'], [5, '.codex-account2']]) {
+        assert.equal(tasks[index].command,
+            newCommand.replace('then exec', `then CODEX_HOME="$HOME/${profile}" exec`));
+    }
     assert.equal(fs.readFileSync(files.saved, 'utf8'), original);
 });
 
@@ -429,6 +437,17 @@ source "$1"
     const defaults = defaultWorkspace.tasks.tasks;
     assert.deepEqual(defaultWorkspace.settings['vibecodeWorkspace.autoStartTasks'], defaults.map(task => task.label));
     assert.ok(defaults.every(task => task.runOptions === undefined));
+    const splitTerminals = defaultWorkspace.settings['vibecodeWorkspace.autoStartTerminals'];
+    assert.equal(defaultWorkspace.settings['python.terminal.activateEnvironment'], false);
+    assert.equal(defaultWorkspace.settings['python.terminal.activateEnvInCurrentTerminal'], false);
+    assert.deepEqual(splitTerminals.map(terminal => terminal.name), defaults.map(task => task.label));
+    assert.deepEqual(splitTerminals.slice(0, 5).map(terminal => terminal.group), ['A', 'A', 'A', 'A', 'A']);
+    assert.equal(splitTerminals[0].command, 'npm run dev');
+    assert.equal(splitTerminals[0].cwd, `${files.a}/frontend`);
+    assert.equal(splitTerminals[0].color, 'terminal.ansiBlue');
+    assert.equal(splitTerminals.at(-1).group, undefined);
+    assert.deepEqual(splitTerminals.at(-1).args, ['python3', path.join(files.dir, 'remote.py'), 'control']);
+    assert.equal(splitTerminals.at(-1).env.VIBECODE_REMOTE_DIR, path.join(files.dir, 'remote'));
     assert.equal(fs.readFileSync(defaultsCapture, 'utf8'), '');
     assert.deepEqual(fs.readFileSync(path.join(files.dir, 'last-selection.txt'), 'utf8').trim().split('\n'),
         [files.a, files.b]);
@@ -460,7 +479,7 @@ source "$1"
     assert.equal(defaultProjectTasks[6].options.cwd, files.b);
     assert.ok(defaultProjectTasks.every((task) => fs.statSync(task.options.cwd).isDirectory()));
     assert.equal(defaultProjectTasks.filter((task) => task.command.includes('exec claude --dangerously-skip-permissions')).length, 2);
-    assert.equal(defaultProjectTasks.filter((task) => task.command.includes('exec codex --sandbox workspace-write --ask-for-approval never')).length, 4);
+    assert.equal(defaultProjectTasks.filter((task) => task.command.includes('exec codex --dangerously-bypass-approvals-and-sandbox')).length, 4);
     assert.equal(defaultProjectTasks.filter((task) => task.command.includes('CODEX_HOME="$HOME/.codex"')).length, 2);
     assert.equal(defaultProjectTasks.filter((task) => task.command.includes('CODEX_HOME="$HOME/.codex-account2"')).length, 2);
     assert.equal(defaultProjectTasks.filter((task) => task.command.includes('exec agy --dangerously-skip-permissions')).length, 0);
@@ -488,14 +507,17 @@ source "$1"
     const globalTasks = globalWorkspace.tasks.tasks;
     assert.equal(globalTasks.length, 11);
     for (const project of ['A', 'B']) {
-        const group = globalTasks.filter(task => task.presentation.group === project);
+        const group = globalTasks.filter(task => task.label.startsWith(`${project} · `));
         assert.deepEqual(group.map(task => task.label),
             ['Frontend', 'Storybook', 'Claude', 'Codex 1', 'Codex 2'].map(name => `${project} · ${name}`));
     }
     assert.deepEqual(globalWorkspace.settings['vibecodeWorkspace.autoStartTasks'], globalTasks.map(task => task.label));
     assert.deepEqual(openedUrls(files, globalWorkspace), ['http://localhost:5173']);
     fs.appendFileSync(path.join(files.dir, 'config.local.zsh'), '\nAUTO_START_TERMINALS=false\n');
-    assert.deepEqual(launch().settings['vibecodeWorkspace.autoStartTasks'], ['VibeCode · Wachhalten + Apps']);
+    const controlOnly = launch();
+    assert.deepEqual(controlOnly.settings['vibecodeWorkspace.autoStartTasks'], ['VibeCode · Wachhalten + Apps']);
+    assert.deepEqual(controlOnly.settings['vibecodeWorkspace.autoStartTerminals'].map(terminal => terminal.name),
+        ['VibeCode · Wachhalten + Apps']);
     fs.appendFileSync(path.join(files.dir, 'config.local.zsh'), '\nAUTO_START_TERMINALS=true\n');
 
     // Three selected folders, each with several tasks, must have three colors.
@@ -509,7 +531,7 @@ source "$1"
     for (const [project, color] of [
         ['A', 'terminal.ansiBlue'], ['B', 'terminal.ansiGreen'], ['C', 'terminal.ansiMagenta'],
     ]) {
-        const group = coloredTasks.filter((task) => task.presentation.group === project);
+        const group = coloredTasks.filter((task) => task.label.startsWith(`${project} · `));
         assert.equal(group.length, 5);
         assert.ok(group.every((task) => task.icon.id === 'terminal' && task.icon.color === color));
     }
