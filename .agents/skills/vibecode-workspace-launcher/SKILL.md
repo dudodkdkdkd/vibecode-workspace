@@ -29,7 +29,7 @@ changing behaviour — several of these look like obvious one-liners and are not
   be full copies that had to be kept in sync by hand — do not reintroduce that. Desktop
   starters are Finder *aliases*; copying a forwarder to the Desktop breaks it, because it
   resolves the module path relative to its own location.
-- **Run the tests after any change:** `node --test tests/terminals.test.js`.
+- **Run the tests after any change:** `node --test tests/terminals.test.js tests/terminal-order.test.js`.
   They drive the real JXA code with scripted dialog answers, so **adding a dialog to the
   wizard breaks every scripted answer array** — update the answers in the tests too.
 - Syntax-check shell and embedded JXA before trusting a change:
@@ -44,6 +44,10 @@ changing behaviour — several of these look like obvious one-liners and are not
   `choose from list` dialog. An empty JXA result still gives `osascript` a trailing
   newline, so cancellation must check command output rather than file size.
   Otherwise cancelling overwrites the saved selection and workspace with empty lists.
+- Terminal startup order comes from `vibecodeWorkspace.autoStartTasks`. The extension
+  waits for `onDidStartTaskProcess` before launching the next task: `executeTask()`
+  resolves before the process starts. Do not restore parallel `runOn: folderOpen`
+  or wait for task exit, because dev servers and agents keep running.
 
 ## Pitfall 1 — `code <url>` does not open a browser tab
 

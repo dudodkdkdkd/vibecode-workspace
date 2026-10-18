@@ -34,7 +34,8 @@ PROJECTS=(
 # TERMINALS
 # =============================================================================
 
-# Diese Terminals gelten für Projekte OHNE eigene Terminal-Auswahl im Setup.
+# Diese Terminals gelten für alle Projekte, wenn USE_PROJECT_TERMINALS=false ist.
+# Bei true gelten sie für Projekte OHNE eigene Terminal-Auswahl im Setup.
 # Zeilen entfernen, ergänzen oder den Befehl frei anpassen.
 # Format: "Terminalname|Befehl|relatives Arbeitsverzeichnis"
 #
@@ -42,11 +43,16 @@ PROJECTS=(
 #
 # Claude Code ohne Sicherheitsabfragen; Codex mit Workspace-Sandbox.
 AUTO_TERMINALS=(
-  "Claude|if command -v claude >/dev/null 2>&1; then exec claude --dangerously-skip-permissions; else echo 'Claude Code ist nicht installiert.'; exec zsh -l; fi|"
-  "Codex|if command -v codex >/dev/null 2>&1; then exec codex --sandbox workspace-write --ask-for-approval never; else echo 'Codex ist nicht installiert.'; exec zsh -l; fi|"
   "Frontend|npm run dev|frontend"
   "Storybook|npm run storybook -- --no-open|frontend"
+  "Claude|if command -v claude >/dev/null 2>&1; then exec claude --dangerously-skip-permissions; else echo 'Claude Code ist nicht installiert.'; exec zsh -l; fi|"
+  'Codex 1|if command -v codex >/dev/null 2>&1; then CODEX_HOME="$HOME/.codex" exec codex --sandbox workspace-write --ask-for-approval never; else echo "Codex ist nicht installiert."; exec zsh -l; fi|'
+  'Codex 2|if command -v codex >/dev/null 2>&1; then CODEX_HOME="$HOME/.codex-account2" exec codex --sandbox workspace-write --ask-for-approval never; else echo "Codex 2 ist nicht installiert."; exec zsh -l; fi|'
 )
+
+# false = diese fünf Terminals für jedes Projekt verwenden, auch wenn im Setup
+# andere Terminals gespeichert sind. Projektspezifische Browser-Tabs bleiben aktiv.
+USE_PROJECT_TERMINALS=false
 
 # Zusätzliche Tasks nur für ein bestimmtes Projekt OHNE Setup-Terminal-Auswahl.
 # Format: "Projektname|Terminalname|Befehl|relatives Arbeitsverzeichnis"

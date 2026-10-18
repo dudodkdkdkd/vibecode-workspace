@@ -109,15 +109,17 @@ TERMINALS=()
 #   "Mein Projekt|Frontend|npm run dev|frontend"
 # )
 
-# Diese Standard-Terminals gelten für Projekte ohne eigene Setup-Auswahl.
+# Diese Standard-Terminals gelten für Projekte ohne eigene Setup-Auswahl;
+# bei USE_PROJECT_TERMINALS=false gelten sie für jedes Projekt.
 # Falls Claude Code oder Codex fehlen, bleibt eine Shell mit
 # Installationshinweis geöffnet, statt dass der Task sofort verschwindet.
 # Claude Code ohne Sicherheitsabfragen; Codex mit Workspace-Sandbox.
 AUTO_TERMINALS=(
-  "Claude|if command -v claude >/dev/null 2>&1; then exec claude --dangerously-skip-permissions; else echo 'Claude Code ist nicht installiert.'; exec zsh -l; fi|"
-  "Codex|if command -v codex >/dev/null 2>&1; then exec codex --sandbox workspace-write --ask-for-approval never; else echo 'Codex ist nicht installiert.'; exec zsh -l; fi|"
   "Frontend|npm run dev|frontend"
   "Storybook|npm run storybook -- --no-open|frontend"
+  "Claude|if command -v claude >/dev/null 2>&1; then exec claude --dangerously-skip-permissions; else echo 'Claude Code ist nicht installiert.'; exec zsh -l; fi|"
+  'Codex 1|if command -v codex >/dev/null 2>&1; then CODEX_HOME="$HOME/.codex" exec codex --sandbox workspace-write --ask-for-approval never; else echo "Codex ist nicht installiert."; exec zsh -l; fi|'
+  'Codex 2|if command -v codex >/dev/null 2>&1; then CODEX_HOME="$HOME/.codex-account2" exec codex --sandbox workspace-write --ask-for-approval never; else echo "Codex 2 ist nicht installiert."; exec zsh -l; fi|'
 )
 
 # Bevorzugter VS-Code-Befehl. Wenn er nicht im PATH liegt, wird die
@@ -137,6 +139,10 @@ LAST_SELECTION="$CONFIG_DIR/last-selection.txt"
 # true = definierte Terminals automatisch beim Öffnen starten.
 # false = Tasks werden angelegt, aber nicht automatisch gestartet.
 AUTO_START_TERMINALS=true
+
+# true = projektspezifische Terminal-Auswahl aus dem Setup verwenden.
+# false = für jedes Projekt die globalen AUTO_TERMINALS verwenden; URLs bleiben aktiv.
+USE_PROJECT_TERMINALS=true
 
 # true = das Kontrollterminal für Wachhalten + Apps automatisch im
 # integrierten Terminal des geöffneten VS-Code-Workspaces starten.
@@ -369,6 +375,10 @@ while IFS=$'\t' read -r project repo_path; do
     rest="${automatic_terminal#*|}"
     command="${rest%%|*}"
     cwd="${rest#*|}"
+    # Auch Repositories ohne frontend-Unterordner bekommen ihre npm-Terminals.
+    if [[ "$cwd" == "frontend" && ! -d "$repo_path/frontend" ]]; then
+      cwd=""
+    fi
     printf '%s\t%s\t%s\t%s\n' "$project" "$terminal_name" "$command" "$cwd" >> "$TMP_TERMINALS"
   done
 done < "$TMP_CONFIG"
@@ -394,6 +404,7 @@ if [[ "$OPEN_CONTROL_TERMINAL" == "true" && -f "$CONTROL_SCRIPT" ]]; then
 fi
 
 AUTO_START_VALUE="$AUTO_START_TERMINALS" \
+USE_PROJECT_TERMINALS_VALUE="$USE_PROJECT_TERMINALS" \
 CONTROL_TERMINAL_ENABLED_VALUE="$CONTROL_TERMINAL_ENABLED" \
 CONTROL_SCRIPT_VALUE="$CONTROL_SCRIPT" \
 CONTROL_CONFIG_DIR_VALUE="$CONFIG_DIR/remote" \
@@ -447,6 +458,10 @@ function run(argv) {
         environment.objectForKey("AUTO_START_VALUE") || $("true")
     );
     const autoStart = String(autoStartValue).toLowerCase() === "true";
+    const useProjectTerminalsValue = ObjC.unwrap(
+        environment.objectForKey("USE_PROJECT_TERMINALS_VALUE")
+    );
+    const useProjectTerminals = String(useProjectTerminalsValue || "true").toLowerCase() === "true";
     const controlEnabledValue = ObjC.unwrap(
         environment.objectForKey("CONTROL_TERMINAL_ENABLED_VALUE") || $("false")
     );
@@ -475,15 +490,15 @@ function run(argv) {
         return { terminals: raw, urls: [] };
     }
 
-    // Eine Setup-Auswahl ersetzt sämtliche Standard- und lokalen Zusatz-Terminals
-    // dieses Repositories. Eine leere Liste bedeutet ausdrücklich null Terminals.
+    // Bei aktivierten Projekt-Terminals ersetzt eine Setup-Auswahl sämtliche
+    // Standard- und lokalen Zusatz-Terminals. Eine leere Liste bedeutet null Terminals.
     const terminalDefinitions = [];
     for (const raw of nonEmptyLines(terminalsFile)) {
         const parts = raw.split("\t");
         while (parts.length < 4) parts.push("");
         const [project, terminalName, command, relativeCwd] = parts;
         if (!selected.includes(project)) continue;
-        if (Object.prototype.hasOwnProperty.call(savedTerminals, projects[project])) continue;
+        if (useProjectTerminals && Object.prototype.hasOwnProperty.call(savedTerminals, projects[project])) continue;
         terminalDefinitions.push({ project, terminalName, command, relativeCwd });
     }
     const openUrls = [];
@@ -505,6 +520,7 @@ function run(argv) {
             seenUrls.add(url);
             openUrls.push(url);
         }
+        if (!useProjectTerminals) continue;
         for (const entry of entries) {
             // Auch früher gespeicherte Codex-Vorlagen verwenden den neuen Standard.
             // Nur den erzeugten Start ersetzen; eigene Befehle und Prompts bleiben erhalten.
@@ -554,9 +570,6 @@ function run(argv) {
             },
         };
 
-        if (autoStart) {
-            task.runOptions = { runOn: "folderOpen" };
-        }
         tasks.push(task);
     }
 
@@ -580,7 +593,6 @@ function run(argv) {
                 clear: false,
                 close: true,
             },
-            runOptions: { runOn: "folderOpen" },
         });
     }
 
@@ -590,6 +602,11 @@ function run(argv) {
         "terminal.integrated.tabs.enabled": true,
         "terminal.integrated.enableMultiLinePasteWarning": "auto",
     };
+    // Die Erweiterung startet die Tasks einzeln bis zum Prozessstart. folderOpen
+    // würde die Terminals parallel und damit in wechselnder Reihenfolge anlegen.
+    const autoStartTasks = autoStart ? tasks.map((task) => task.label)
+        : controlEnabled ? ["VibeCode · Wachhalten + Apps"] : [];
+    if (autoStartTasks.length) settings["vibecodeWorkspace.autoStartTasks"] = autoStartTasks;
     // Von der VibeCode-Auto-Open-Tabs-Erweiterung gelesen; öffnet pro URL einen eigenen Tab.
     if (openUrls.length) settings["vibecodeWorkspace.autoOpenUrls"] = openUrls;
 
