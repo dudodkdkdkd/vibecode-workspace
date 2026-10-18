@@ -1,7 +1,7 @@
 {
   "name": "vibecode-workspace-auto-open-tabs",
   "displayName": "VibeCode Workspace Auto-Open Tabs",
-  "description": "Öffnet die im VibeCode-Workspace-Setup hinterlegten URLs als eigene Tabs, sobald der Workspace geladen wird.",
+  "description": "Startet Workspace-Terminals in fester Reihenfolge und öffnet hinterlegte URLs als eigene Tabs.",
   "version": "0.0.1",
   "publisher": "vibecode-workspace",
   "private": true,
@@ -12,6 +12,12 @@
     "configuration": {
       "title": "VibeCode Workspace",
       "properties": {
+        "vibecodeWorkspace.autoStartTasks": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Workspace-Tasks in ihrer Startreihenfolge. Wird vom VibeCode-Workspace-Starter geschrieben."
+        },
         "vibecodeWorkspace.autoOpenUrls": {
           "type": "array",
           "items": { "type": "string" },

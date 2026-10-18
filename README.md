@@ -155,8 +155,15 @@ TERMINAL_FONT_SIZE=14
 # Format: "Anzeigename|Befehl|Arbeitsverzeichnis"
 AUTO_TERMINALS=(
   "Frontend|npm run dev|frontend"
-  "Backend|npm run server|backend"
+  "Storybook|npm run storybook -- --no-open|frontend"
+  "Claude|claude --dangerously-skip-permissions|"
+  'Codex 1|CODEX_HOME="$HOME/.codex" codex --sandbox workspace-write --ask-for-approval never|'
+  'Codex 2|CODEX_HOME="$HOME/.codex-account2" codex --sandbox workspace-write --ask-for-approval never|'
 )
+AUTO_START_TERMINALS=true
+# Globale Terminals für jedes Projekt; Browser-Tabs bleiben projektspezifisch.
+# true = stattdessen projektspezifische Terminal-Auswahl aus dem Setup verwenden.
+USE_PROJECT_TERMINALS=false
 
 # ========== AUTO-OPEN URLs (Browser-Tabs) ==========
 # Browser-Tabs werden NICHT hier, sondern pro Projekt im Setup-Assistenten
@@ -174,6 +181,13 @@ VSCODE_TERMINAL_LAYOUT="split"
 OPEN_CONTROL_TERMINAL=true
 CLOSE_LAUNCHER_TERMINAL=true
 ```
+
+Die feste Startreihenfolge ist Frontend (`npm run dev`), Storybook, Claude,
+Codex 1 und Codex 2. Die Erweiterung wartet jeweils auf den Prozessstart eines
+Terminals und öffnet dann das nächste; laufende Server bleiben aktiv.
+Die Codex-Profile liegen getrennt in `~/.codex` und
+`~/.codex-account2`. Ohne `frontend`-Unterordner starten die Standard-Terminals im
+Repository-Ordner. Dev- und Storybook-Server benötigen dort passende npm-Skripte.
 
 **💡 Split-Screen in VS Code (manuell):**
 | Aktion | Shortcut (macOS) |

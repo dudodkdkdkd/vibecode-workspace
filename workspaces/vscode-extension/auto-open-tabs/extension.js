@@ -121,13 +121,67 @@ function openTab(url) {
     })();
 }
 
-function activate() {
+function isSameTask(candidate, task) {
+    return candidate.name === task.name && candidate.scope === task.scope;
+}
+
+// executeTask liefert die Ausführung bereits vor dem tatsächlichen Start zurück.
+// Erst das Prozessstart-Ereignis bestätigt, dass das Terminal angelegt wurde.
+function startTask(task) {
+    return new Promise((resolve, reject) => {
+        const subscriptions = [];
+        let timeout;
+        const finish = (error) => {
+            clearTimeout(timeout);
+            subscriptions.forEach((subscription) => subscription.dispose());
+            if (error) reject(error);
+            else resolve();
+        };
+        subscriptions.push(vscode.tasks.onDidStartTaskProcess((event) => {
+            if (isSameTask(event.execution.task, task)) finish();
+        }));
+        // Auch ein sofort beendeter/fehlgeschlagener Task darf die restlichen
+        // Terminals nicht blockieren. Auf das Ende laufender Server warten wir nicht.
+        subscriptions.push(vscode.tasks.onDidEndTask((event) => {
+            if (isSameTask(event.execution.task, task)) finish();
+        }));
+        timeout = setTimeout(() => finish(new Error("Terminal-Start dauert zu lange.")), 30000);
+        try {
+            Promise.resolve(vscode.tasks.executeTask(task)).catch(finish);
+        } catch (error) {
+            finish(error);
+        }
+    });
+}
+
+async function startOrderedTasks() {
+    const labels = vscode.workspace.getConfiguration("vibecodeWorkspace").get("autoStartTasks", []);
+    if (!Array.isArray(labels) || !labels.length) return;
+    const tasks = (await vscode.tasks.fetchTasks()).filter((task) => task.scope === vscode.TaskScope.Workspace);
+    for (const label of new Set(labels)) {
+        if (typeof label !== "string" || !label.trim()) continue;
+        const task = tasks.find((candidate) => candidate.name === label);
+        if (task && vscode.tasks.taskExecutions.some((execution) => isSameTask(execution.task, task))) continue;
+        try {
+            if (!task) throw new Error("Workspace-Task wurde nicht gefunden.");
+            await startTask(task);
+        } catch (error) {
+            vscode.window.showWarningMessage(`VibeCode: ${label} konnte nicht gestartet werden: ${error.message}`);
+        }
+    }
+}
+
+async function activate(context) {
     const urls = vscode.workspace.getConfiguration("vibecodeWorkspace").get("autoOpenUrls", []);
-    if (!Array.isArray(urls)) return;
-    for (const url of urls) {
+    for (const url of Array.isArray(urls) ? urls : []) {
         if (typeof url !== "string" || !url.trim()) continue;
         openTab(url.trim());
     }
+    const start = () => startOrderedTasks().catch((error) => {
+        vscode.window.showErrorMessage(`VibeCode: Terminals konnten nicht gestartet werden: ${error.message}`);
+    });
+    if (vscode.workspace.isTrusted) await start();
+    else context.subscriptions.push(vscode.workspace.onDidGrantWorkspaceTrust(start));
 }
 
 module.exports = { activate };
