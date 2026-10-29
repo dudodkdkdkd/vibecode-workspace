@@ -127,6 +127,14 @@ test('Ctrl+C also keeps the shell open when the startup command uses exec', asyn
     assert.equal(probe(options, { interrupt: true }).exitCode, 0);
 });
 
+test('remote bash terminals survive both command failures and Ctrl+C', async () => {
+    assert.equal(probe(await terminalOptions({ command: 'false', shellPath: '/bin/bash' })).exitCode, 0);
+    const options = await terminalOptions({
+        command: "printf '__TASK_STARTED__\\n'; exec sleep 60", shellPath: '/bin/bash',
+    });
+    assert.equal(probe(options, { interrupt: true }).exitCode, 0);
+});
+
 test('terminals configured to close retain the raw command and its exit status', async () => {
     const command = 'exit 7';
     const options = await terminalOptions({ command, close: true });

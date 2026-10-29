@@ -2,11 +2,12 @@
   "name": "vibecode-workspace-auto-open-tabs",
   "displayName": "VibeCode Workspace Auto-Open Tabs",
   "description": "Startet Workspace-Terminals in fester Reihenfolge und öffnet hinterlegte URLs als eigene Tabs.",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "publisher": "vibecode-workspace",
   "private": true,
   "engines": { "vscode": "^1.74.0" },
   "main": "./extension.js",
+  "extensionKind": ["ui"],
   "activationEvents": ["onStartupFinished"],
   "contributes": {
     "configuration": {

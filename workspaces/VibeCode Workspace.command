@@ -195,6 +195,8 @@ TMP_SELECTED="$(mktemp)"
 TMP_CONFIG="$(mktemp)"
 TMP_TERMINALS="$(mktemp)"
 TMP_DEFAULTS="$(mktemp)"
+TMP_WORKSPACES="$(mktemp)"
+TMP_REMOTE_PROJECTS="$(mktemp)"
 LAUNCHER_TTY="$(tty 2>/dev/null || true)"
 LAUNCH_COMPLETED=false
 
@@ -202,7 +204,7 @@ finish_launcher() {
   local exit_code=$?
   trap - EXIT
 
-  /bin/rm -f "$TMP_NAMES" "$TMP_SELECTED" "$TMP_CONFIG" "$TMP_TERMINALS" "$TMP_DEFAULTS"
+  /bin/rm -f "$TMP_NAMES" "$TMP_SELECTED" "$TMP_CONFIG" "$TMP_TERMINALS" "$TMP_DEFAULTS" "$TMP_WORKSPACES" "$TMP_REMOTE_PROJECTS"
 
   if (( exit_code != 0 )); then
     /usr/bin/osascript - "$exit_code" <<'ERROR_APPLESCRIPT' >/dev/null 2>&1 || true
@@ -251,16 +253,21 @@ add_project() {
   local input_path="$2"
   local real_path base_name suffix project_root
 
-  input_path="${input_path/#\~/$HOME}"
-  # Auch den Elternordner veralteter Pfade merken: ein umbenanntes Repository
-  # soll beim nächsten Start unter seinem aktuellen Namen wieder auftauchen.
-  project_root="${input_path:A:h}"
-  if [[ -d "$project_root" && -z "${SEEN_PROJECT_ROOTS[$project_root]-}" ]]; then
-    SEEN_PROJECT_ROOTS[$project_root]=1
-    PROJECT_ROOTS+=("$project_root")
+  if [[ "$input_path" == vscode-remote://ssh-remote+*/* ]]; then
+    # Ein Remote-Pfad muss auf dem Mac weder existieren noch gescannt werden.
+    real_path="$input_path"
+  else
+    input_path="${input_path/#\~/$HOME}"
+    # Auch den Elternordner veralteter Pfade merken: ein umbenanntes Repository
+    # soll beim nächsten Start unter seinem aktuellen Namen wieder auftauchen.
+    project_root="${input_path:A:h}"
+    if [[ -d "$project_root" && -z "${SEEN_PROJECT_ROOTS[$project_root]-}" ]]; then
+      SEEN_PROJECT_ROOTS[$project_root]=1
+      PROJECT_ROOTS+=("$project_root")
+    fi
+    [[ -d "$input_path" ]] || return 0
+    real_path="$(cd "$input_path" 2>/dev/null && pwd -P)" || return 0
   fi
-  [[ -d "$input_path" ]] || return 0
-  real_path="$(cd "$input_path" 2>/dev/null && pwd -P)" || return 0
   [[ -n "${SEEN_PROJECT_PATHS[$real_path]-}" ]] && return 0
 
   base_name="$name"
@@ -303,6 +310,21 @@ for project_root in "${PROJECT_ROOTS[@]}"; do
   done
 done
 
+# Auf gespeicherten SSH-Hosts rekursiv nach Repositories suchen. Im Diagnosemodus
+# nur den Cache lesen; normale Starts warten nicht auf Passwortdialoge.
+if [[ -f "$CONFIG_DIR/remote-hosts.json" && -f "$SCRIPT_DIR/remote-hosts.py" ]]; then
+  remote_scan_args=()
+  [[ "${1:-}" != "--check" ]] || remote_scan_args+=(--cached)
+  if python3 "$SCRIPT_DIR/remote-hosts.py" discover "$CONFIG_DIR" "${remote_scan_args[@]}" > "$TMP_REMOTE_PROJECTS"; then
+    while IFS=$'\t' read -r remote_name remote_path; do
+      [[ -n "$remote_name" && -n "$remote_path" ]] || continue
+      add_project "$remote_name" "$remote_path"
+    done < "$TMP_REMOTE_PROJECTS"
+  else
+    print -u2 'Remote-Repositories konnten nicht geladen werden. Lokale und einzeln eingerichtete Projekte bleiben verfügbar.'
+  fi
+fi
+
 # Diagnosemodus für Installation und Konfiguration, ohne Fenster zu öffnen.
 if [[ "${1:-}" == "--check" ]]; then
   for required_command in osascript rm mktemp; do
@@ -326,7 +348,7 @@ if [[ ! -s "$TMP_NAMES" ]]; then
     print -u2 'Remote: zuerst Repositories im Workspace-Setup einrichten.'
     exit 1
   fi
-  osascript -e 'display alert "Noch keine Repositories eingerichtet" message "Öffne im VibeCode-Workspace-Ordner die Datei ‚Setup VibeCode Workspace.command‘ und füge dort deine Repository-Ordner hinzu." as informational'
+  osascript -e 'display alert "Keine Repositories verfügbar" message "Öffne ‚Setup Workspace.command‘ und füge lokale Ordner, Remote-Repositories oder einen Remote-Host hinzu. Bei bereits eingerichteten Hosts: SSH-Verbindung und Suchordner prüfen; Details stehen im Terminal." as informational'
   LAUNCH_COMPLETED=true
   exit 0
 fi
@@ -360,11 +382,6 @@ if [[ -z "$(<"$TMP_SELECTED")" ]]; then
 fi
 
 mkdir -p "$CONFIG_DIR"
-: > "$LAST_SELECTION"
-while IFS= read -r selected_name; do
-  [[ -n "${PROJECT_PATH_BY_NAME[$selected_name]-}" ]] || continue
-  printf '%s\n' "${PROJECT_PATH_BY_NAME[$selected_name]}" >> "$LAST_SELECTION"
-done < "$TMP_SELECTED"
 
 WORKSPACE_PATH="$WORKSPACE_DIR/$WORKSPACE_NAME"
 
@@ -376,8 +393,11 @@ while IFS=$'\t' read -r project repo_path; do
     command="${rest%%|*}"
     cwd="${rest#*|}"
     # Auch Repositories ohne frontend-Unterordner bekommen ihre npm-Terminals.
-    if [[ "$cwd" == "frontend" && ! -d "$repo_path/frontend" ]]; then
+    if [[ "$cwd" == "frontend" && "$repo_path" != vscode-remote://* && ! -d "$repo_path/frontend" ]]; then
       cwd=""
+    fi
+    if [[ "$repo_path" == vscode-remote://* ]]; then
+      command="${command//exec zsh -l/exec bash -l}"
     fi
     printf '%s\t%s\t%s\t%s\n' "$project" "$terminal_name" "$command" "$cwd" >> "$TMP_TERMINALS"
   done
@@ -408,7 +428,7 @@ USE_PROJECT_TERMINALS_VALUE="$USE_PROJECT_TERMINALS" \
 CONTROL_TERMINAL_ENABLED_VALUE="$CONTROL_TERMINAL_ENABLED" \
 CONTROL_SCRIPT_VALUE="$CONTROL_SCRIPT" \
 CONTROL_CONFIG_DIR_VALUE="$CONFIG_DIR/remote" \
-osascript -l JavaScript - "$TMP_SELECTED" "$TMP_CONFIG" "$TMP_TERMINALS" "$WORKSPACE_PATH" "$CONFIG_DIR/terminals.json" <<'JXA'
+osascript -l JavaScript - "$TMP_SELECTED" "$TMP_CONFIG" "$TMP_TERMINALS" "$WORKSPACE_PATH" "$CONFIG_DIR/terminals.json" "$TMP_WORKSPACES" <<'JXA'
 ObjC.import("Foundation");
 
 function readText(path) {
@@ -431,7 +451,7 @@ function nonEmptyLines(path) {
 }
 
 function run(argv) {
-    const [selectedFile, configFile, terminalsFile, outputFile, savedTerminalsFile] = argv;
+    const [selectedFile, configFile, terminalsFile, outputFile, savedTerminalsFile, workspaceListFile] = argv;
     const selected = nonEmptyLines(selectedFile);
 
     const projects = Object.create(null);
@@ -448,10 +468,27 @@ function run(argv) {
         throw new Error(`Unbekannte Projekte: ${missing.join(", ")}`);
     }
 
-    const folders = selected.map((name) => ({
-        name,
-        path: projects[name],
-    }));
+    const locations = new Map();
+    const groups = new Map();
+    for (const name of selected) {
+        const value = projects[name];
+        let location = { path: value, authority: "" };
+        if (value.startsWith("vscode-remote:")) {
+            const match = /^vscode-remote:\/\/(ssh-remote\+[a-zA-Z0-9_][a-zA-Z0-9_.@-]*)(\/[^?#]*)$/.exec(value);
+            if (!match) throw new Error(`Ungültiges Remote-Repository: ${name}`);
+            const path = decodeURIComponent(match[2]);
+            if (/[\x00-\x1f\x7f]/.test(path) || path.split("/").some((part) => part === ".." || part === ".")) {
+                throw new Error(`Ungültiger Remote-Pfad: ${name}`);
+            }
+            location = { path, authority: match[1] };
+        }
+        locations.set(name, location);
+        if (!groups.has(location.authority)) groups.set(location.authority, []);
+        groups.get(location.authority).push(name);
+    }
+    function remoteUri(authority, path) {
+        return `vscode-remote://${authority}${path.split("/").map(encodeURIComponent).join("/")}`;
+    }
 
     const environment = $.NSProcessInfo.processInfo.environment;
     const autoStartValue = ObjC.unwrap(
@@ -501,8 +538,7 @@ function run(argv) {
         if (useProjectTerminals && Object.prototype.hasOwnProperty.call(savedTerminals, projects[project])) continue;
         terminalDefinitions.push({ project, terminalName, command, relativeCwd });
     }
-    const openUrls = [];
-    const seenUrls = new Set();
+    const projectUrls = new Map();
     for (const project of selected) {
         if (!Object.prototype.hasOwnProperty.call(savedTerminals, projects[project])) continue;
         const { terminals: entries, urls } = normalizeSavedEntry(savedTerminals[projects[project]]);
@@ -515,11 +551,7 @@ function run(argv) {
         if (!Array.isArray(urls) || urls.some((url) => typeof url !== "string" || !url.trim())) {
             throw new Error(`Ungültige Browser-Tabs für ${project}. Bitte das Setup erneut ausführen.`);
         }
-        for (const url of urls) {
-            if (seenUrls.has(url)) continue;
-            seenUrls.add(url);
-            openUrls.push(url);
-        }
+        projectUrls.set(project, urls);
         if (!useProjectTerminals) continue;
         for (const entry of entries) {
             // Auch früher gespeicherte Codex-Vorlagen verwenden den neuen Standard.
@@ -542,113 +574,140 @@ function run(argv) {
     const projectColors = new Map(selected.map((project, index) =>
         [project, terminalColors[index % terminalColors.length]]));
 
-    const tasks = [];
-    const usedLabels = new Set();
-    for (const { project, terminalName, command, relativeCwd } of terminalDefinitions) {
-        const repoPath = projects[project].replace(/\/$/, "");
-        const cwd = relativeCwd ? `${repoPath}/${relativeCwd}` : repoPath;
-        const baseLabel = `${project} · ${terminalName}`;
-        let label = baseLabel;
-        let suffix = 2;
-        while (usedLabels.has(label)) label = `${baseLabel} (${suffix++})`;
-        usedLabels.add(label);
-        const task = {
-            label,
-            type: "shell",
-            command,
-            options: { cwd },
-            icon: { id: "terminal", color: projectColors.get(project) },
-            problemMatcher: [],
-            presentation: {
-                echo: true,
-                reveal: "always",
-                focus: false,
-                panel: "dedicated",
-                showReuseMessage: false,
-                clear: false,
-                group: project,
+    function buildWorkspace(group, authority) {
+        const folders = group.map((name) => ({ name,
+            ...(authority ? { uri: remoteUri(authority, locations.get(name).path) }
+                : { path: locations.get(name).path }),
+        }));
+        const openUrls = [...new Set(group.flatMap((name) => projectUrls.get(name) || []))];
+        const tasks = [];
+        const usedLabels = new Set();
+        for (const { project, terminalName, command, relativeCwd } of terminalDefinitions) {
+            if (!group.includes(project)) continue;
+            if (relativeCwd.startsWith("/") || relativeCwd.startsWith("~") || relativeCwd.split("/").includes("..")) {
+                throw new Error(`Ungültiges relatives Arbeitsverzeichnis für ${project}: ${relativeCwd}`);
+            }
+            const repoPath = locations.get(project).path.replace(/\/$/, "");
+            const cwd = relativeCwd ? `${repoPath}/${relativeCwd}` : repoPath || "/";
+            const baseLabel = `${project} · ${terminalName}`;
+            let label = baseLabel;
+            let suffix = 2;
+            while (usedLabels.has(label)) label = `${baseLabel} (${suffix++})`;
+            usedLabels.add(label);
+            const task = {
+                label,
+                type: "shell",
+                command,
+                options: { cwd, ...(authority ? { shell: { executable: "/bin/bash", args: ["-l", "-c"] } } : {}) },
+                icon: { id: "terminal", color: projectColors.get(project) },
+                problemMatcher: [],
+                presentation: {
+                    echo: true,
+                    reveal: "always",
+                    focus: false,
+                    panel: "dedicated",
+                    showReuseMessage: false,
+                    clear: false,
+                    group: project,
+                },
+            };
+
+            tasks.push(task);
+        }
+
+        // Wachhalten/App-Steuerung gehört zum Mac, nie als Prozess auf den SSH-Host.
+        const localControlEnabled = controlEnabled && !authority;
+        if (localControlEnabled) {
+            tasks.push({
+                label: "VibeCode · Wachhalten + Apps",
+                type: "process",
+                command: "/usr/bin/env",
+                args: ["python3", controlScript, "control"],
+                options: {
+                    env: { VIBECODE_REMOTE_DIR: controlConfigDir },
+                },
+                icon: { id: "terminal", color: "terminal.ansiYellow" },
+                problemMatcher: [],
+                presentation: {
+                    echo: false,
+                    reveal: "always",
+                    focus: false,
+                    panel: "dedicated",
+                    showReuseMessage: false,
+                    clear: false,
+                    close: true,
+                },
+            });
+        }
+
+        const settings = {
+            "git.autofetch": true,
+            "git.openRepositoryInParentFolders": "always",
+            "terminal.integrated.tabs.enabled": true,
+            "terminal.integrated.enableMultiLinePasteWarning": "auto",
+            // Automatische Aktivierungsbefehle würden in Codex-/Claude-Prompts landen.
+            "python.terminal.activateEnvironment": false,
+            "python.terminal.activateEnvInCurrentTerminal": false,
+        };
+        // Die Erweiterung startet die Tasks einzeln bis zum Prozessstart. folderOpen
+        // würde die Terminals parallel und damit in wechselnder Reihenfolge anlegen.
+        const autoStartTasks = autoStart ? tasks.map((task) => task.label)
+            : localControlEnabled ? ["VibeCode · Wachhalten + Apps"] : [];
+        if (autoStartTasks.length) settings["vibecodeWorkspace.autoStartTasks"] = autoStartTasks;
+        // Direkte Terminal-Splits hängen am jeweils letzten Terminal. Der Task-Runner
+        // würde neue Splits immer hinter dem ersten Terminal derselben Gruppe einfügen.
+        if (autoStartTasks.length) settings["vibecodeWorkspace.autoStartTerminals"] = tasks
+            .filter((task) => autoStartTasks.includes(task.label))
+            .map((task) => ({
+                name: task.label,
+                group: task.presentation.group,
+                type: task.type,
+                command: task.command,
+                args: task.args,
+                cwd: authority ? remoteUri(authority, task.options.cwd) : task.options.cwd,
+                shellPath: authority ? "/bin/bash" : undefined,
+                env: task.options.env,
+                color: task.icon.color,
+                close: task.presentation.close === true,
+            }));
+        // Von der VibeCode-Auto-Open-Tabs-Erweiterung gelesen; öffnet pro URL einen eigenen Tab.
+        if (openUrls.length) settings["vibecodeWorkspace.autoOpenUrls"] = openUrls;
+
+        const workspace = {
+            folders,
+            // VS Code liest remoteAuthority auch aus einer lokalen .code-workspace.
+            // Nur remote folder-URIs setzen noch keinen Remote-Extension-Host auf.
+            ...(authority ? { remoteAuthority: authority } : {}),
+            settings,
+            tasks: {
+                version: "2.0.0",
+                tasks,
             },
         };
 
-        tasks.push(task);
+        return workspace;
     }
 
-    if (controlEnabled) {
-        tasks.push({
-            label: "VibeCode · Wachhalten + Apps",
-            type: "process",
-            command: "/usr/bin/env",
-            args: ["python3", controlScript, "control"],
-            options: {
-                env: { VIBECODE_REMOTE_DIR: controlConfigDir },
-            },
-            icon: { id: "terminal", color: "terminal.ansiYellow" },
-            problemMatcher: [],
-            presentation: {
-                echo: false,
-                reveal: "always",
-                focus: false,
-                panel: "dedicated",
-                showReuseMessage: false,
-                clear: false,
-                close: true,
-            },
-        });
+    // Erst alles validieren/erzeugen, dann die Workspace-Dateien ersetzen.
+    const outputs = [...groups].map(([authority, group]) => ({
+        path: authority ? outputFile.replace(/(?:\.code-workspace)?$/, `-SSH-${encodeURIComponent(authority.slice("ssh-remote+".length))}.code-workspace`) : outputFile,
+        workspace: buildWorkspace(group, authority),
+    }));
+    function writeText(path, text) {
+        const written = $(text).writeToFileAtomicallyEncodingError(
+            $(path),
+            true,
+            $.NSUTF8StringEncoding,
+            null
+        );
+        if (!written) {
+            throw new Error(`Workspace konnte nicht geschrieben werden: ${path}`);
+        }
     }
+    for (const output of outputs) writeText(output.path, `${JSON.stringify(output.workspace, null, 2)}\n`);
+    if (workspaceListFile) writeText(workspaceListFile, outputs.map((output) => output.path).join("\n") + "\n");
 
-    const settings = {
-        "git.autofetch": true,
-        "git.openRepositoryInParentFolders": "always",
-        "terminal.integrated.tabs.enabled": true,
-        "terminal.integrated.enableMultiLinePasteWarning": "auto",
-        // Automatische Aktivierungsbefehle würden in Codex-/Claude-Prompts landen.
-        "python.terminal.activateEnvironment": false,
-        "python.terminal.activateEnvInCurrentTerminal": false,
-    };
-    // Die Erweiterung startet die Tasks einzeln bis zum Prozessstart. folderOpen
-    // würde die Terminals parallel und damit in wechselnder Reihenfolge anlegen.
-    const autoStartTasks = autoStart ? tasks.map((task) => task.label)
-        : controlEnabled ? ["VibeCode · Wachhalten + Apps"] : [];
-    if (autoStartTasks.length) settings["vibecodeWorkspace.autoStartTasks"] = autoStartTasks;
-    // Direkte Terminal-Splits hängen am jeweils letzten Terminal. Der Task-Runner
-    // würde neue Splits immer hinter dem ersten Terminal derselben Gruppe einfügen.
-    if (autoStartTasks.length) settings["vibecodeWorkspace.autoStartTerminals"] = tasks
-        .filter((task) => autoStartTasks.includes(task.label))
-        .map((task) => ({
-            name: task.label,
-            group: task.presentation.group,
-            type: task.type,
-            command: task.command,
-            args: task.args,
-            cwd: task.options.cwd,
-            env: task.options.env,
-            color: task.icon.color,
-            close: task.presentation.close === true,
-        }));
-    // Von der VibeCode-Auto-Open-Tabs-Erweiterung gelesen; öffnet pro URL einen eigenen Tab.
-    if (openUrls.length) settings["vibecodeWorkspace.autoOpenUrls"] = openUrls;
-
-    const workspace = {
-        folders,
-        settings,
-        tasks: {
-            version: "2.0.0",
-            tasks,
-        },
-    };
-
-    const output = `${JSON.stringify(workspace, null, 2)}\n`;
-    const written = $(output).writeToFileAtomicallyEncodingError(
-        $(outputFile),
-        true,
-        $.NSUTF8StringEncoding,
-        null
-    );
-    if (!written) {
-        throw new Error(`Workspace konnte nicht geschrieben werden: ${outputFile}`);
-    }
-
-    return outputFile;
+    return outputs.map((output) => output.path).join("\n");
 }
 JXA
 
@@ -659,11 +718,35 @@ if [[ -f "$EXTENSION_SOURCE/install.zsh" ]]; then
   /bin/zsh "$EXTENSION_SOURCE/install.zsh" "$EDITOR_CMD"
 fi
 
-# Workspace öffnen.
+# Remote SSH bei Bedarf im gewählten Editor installieren; die Verbindung und
+# Authentifizierung übernimmt anschließend dessen regulärer Remote-SSH-Dialog.
+while IFS= read -r selected_name; do
+  if [[ "${PROJECT_PATH_BY_NAME[$selected_name]-}" == vscode-remote://* ]]; then
+    if ! "$EDITOR_CMD" --list-extensions | /usr/bin/grep -qi '^ms-vscode-remote.remote-ssh$'; then
+      "$EDITOR_CMD" --install-extension ms-vscode-remote.remote-ssh
+    fi
+    break
+  fi
+done < "$TMP_SELECTED"
+
+: > "$LAST_SELECTION"
+while IFS= read -r selected_name; do
+  [[ -n "${PROJECT_PATH_BY_NAME[$selected_name]-}" ]] || continue
+  printf '%s\n' "${PROJECT_PATH_BY_NAME[$selected_name]}" >> "$LAST_SELECTION"
+done < "$TMP_SELECTED"
+
+# Lokale Projekte und jeder SSH-Host bekommen je einen eigenen Workspace.
+workspace_paths=()
+while IFS= read -r workspace_path; do
+  [[ -n "$workspace_path" ]] || continue
+  workspace_paths+=("$workspace_path")
+done < "$TMP_WORKSPACES"
+# Gemeinsam übergeben, damit VS Code auch bei Fenster-Wiederverwendung alle
+# ausgewählten Workspaces öffnet und keinen durch den nächsten ersetzt.
 if [[ -n "$EDITOR_APP" ]]; then
-  open -a "$EDITOR_APP" "$WORKSPACE_PATH"
+  open -a "$EDITOR_APP" "${workspace_paths[@]}"
 else
-  "$EDITOR_CMD" "$WORKSPACE_PATH"
+  "$EDITOR_CMD" "${workspace_paths[@]}"
 fi
 
 # Kurzer Hinweis beim ersten Start automatischer Tasks.

@@ -13,12 +13,13 @@ function shellQuote(value) {
     return "'" + value.replace(/'/g, "'\\''") + "'";
 }
 
-function terminalCommand(type, prompt) {
-    if (type === "Shell") return "exec zsh -l";
+function terminalCommand(type, prompt, remote = false) {
+    const shell = remote ? "bash" : "zsh";
+    if (type === "Shell") return `exec ${shell} -l`;
     if (type === "Eigener Befehl") return prompt;
     if (type === "Antigravity") {
         const argument = prompt ? ` --prompt-interactive ${shellQuote(prompt)}` : "";
-        return `if command -v agy >/dev/null 2>&1; then exec agy --dangerously-skip-permissions${argument}; else echo 'Antigravity (agy) ist nicht installiert.'; exec zsh -l; fi`;
+        return `if command -v agy >/dev/null 2>&1; then exec agy --dangerously-skip-permissions${argument}; else echo 'Antigravity (agy) ist nicht installiert.'; exec ${shell} -l; fi`;
     }
     const executable = type === "Claude Code" ? "claude" : "codex";
     const flag = type === "Claude Code"
@@ -27,10 +28,10 @@ function terminalCommand(type, prompt) {
     const account = type === "Codex 2" ? 'CODEX_HOME="$HOME/.codex-account2" '
         : type === "Codex" ? 'CODEX_HOME="$HOME/.codex" ' : "";
     const argument = prompt ? ` -- ${shellQuote(prompt)}` : "";
-    return `if command -v ${executable} >/dev/null 2>&1; then ${account}exec ${executable} ${flag}${argument}; else echo '${type} ist nicht installiert.'; exec zsh -l; fi`;
+    return `if command -v ${executable} >/dev/null 2>&1; then ${account}exec ${executable} ${flag}${argument}; else echo '${type} ist nicht installiert.'; exec ${shell} -l; fi`;
 }
 
-function defaultTerminals() {
+function defaultTerminals(remote = false) {
     return [
         { name: "Frontend", type: "Eigener Befehl", prompt: "npm run dev", cwd: "frontend" },
         // --no-open verhindert, dass Storybook zusätzlich den Systembrowser öffnet.
@@ -39,7 +40,7 @@ function defaultTerminals() {
         { name: "Codex 1", type: "Codex", prompt: "", cwd: "" },
         { name: "Codex 2", type: "Codex 2", prompt: "", cwd: "" },
     ].map((terminal) => ({
-        ...terminal, command: terminalCommand(terminal.type, terminal.prompt),
+        ...terminal, command: terminalCommand(terminal.type, terminal.prompt, remote),
     }));
 }
 
@@ -90,10 +91,12 @@ function validateUrls(urls, projectName) {
 
 function configureProject(app, project, existing) {
     const title = `Terminals · ${project.name}`;
+    const remoteHint = project.path.startsWith("vscode-remote://")
+        ? "\n\nDiese Terminals starten auf dem SSH-Host. Agenten müssen dort installiert und angemeldet sein; Arbeitsverzeichnisse beziehen sich auf das Remote-Repository." : "";
     let count;
     while (true) {
         const answer = ask(app,
-            `Wie viele Terminals sollen für „${project.name}“ geöffnet werden?\n\n0 = keine Terminals. Claude Code und Antigravity starten ohne Sicherheitsabfragen. Beide Codex-Profile starten mit vollem Zugriff ohne Sandbox und ohne Bestätigungsabfragen.`,
+            `Wie viele Terminals sollen für „${project.name}“ geöffnet werden?\n\n0 = keine Terminals. Claude Code und Antigravity starten ohne Sicherheitsabfragen. Beide Codex-Profile starten mit vollem Zugriff ohne Sandbox und ohne Bestätigungsabfragen.${remoteHint}`,
             String(existing.length), title).trim();
         if (/^\d+$/.test(answer) && Number.isSafeInteger(Number(answer))) {
             count = Number(answer);
@@ -137,7 +140,7 @@ function configureProject(app, project, existing) {
                 cwd = null;
             }
         } while (cwd === null);
-        terminals.push({ name, type, prompt, command: terminalCommand(type, prompt), cwd });
+        terminals.push({ name, type, prompt, command: terminalCommand(type, prompt, project.path.startsWith("vscode-remote://")), cwd });
     }
     return terminals;
 }
@@ -177,7 +180,7 @@ function run(argv) {
         if (selected === false) return "cancelled";
         for (const project of projects) {
             if (!selected.includes(project.name)) continue;
-            const existing = result.projects[project.path] || { terminals: defaultTerminals(), urls: [] };
+            const existing = result.projects[project.path] || { terminals: defaultTerminals(project.path.startsWith("vscode-remote://")), urls: [] };
             const terminals = configureProject(app, project, existing.terminals);
             if (terminals === null) return "cancelled";
             const urls = configureUrls(app, project, existing.urls);

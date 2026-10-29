@@ -3,6 +3,8 @@ config.local.zsh
 projects.tsv
 terminals.json
 last-selection.txt
+remote-hosts.json
+remote-repositories.json
 terminal-close.log
 *.code-workspace
 .vscode/
