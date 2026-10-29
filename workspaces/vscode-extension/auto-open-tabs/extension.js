@@ -106,10 +106,22 @@ function openTab(url) {
     panel.webview.html = statusHtml(`Warte auf ${url} …`);
 
     (async () => {
+        // Die UI-Erweiterung läuft auf dem Mac. VS Code leitet localhost-URLs
+        // zum SSH-Host weiter, auch wenn der lokale Port bereits belegt ist.
+        let target = url;
+        try {
+            const parsed = new URL(url);
+            if (vscode.env?.remoteName && ["localhost", "127.0.0.1", "[::1]"].includes(parsed.hostname)) {
+                target = (await vscode.env.asExternalUri(vscode.Uri.parse(url))).toString();
+            }
+        } catch (error) {
+            if (!disposed) panel.webview.html = statusHtml(`${url} konnte nicht weitergeleitet werden: ${error.message}`);
+            return;
+        }
         const deadline = Date.now() + MAX_WAIT_MS;
         while (!disposed) {
-            if (await isReachable(url)) {
-                if (!disposed) panel.webview.html = frameHtml(url);
+            if (await isReachable(target)) {
+                if (!disposed) panel.webview.html = frameHtml(target);
                 return;
             }
             if (Date.now() >= deadline) {
@@ -199,17 +211,20 @@ async function startSplitTerminals(definitions) {
             const command = definition.type === "process"
                 ? [definition.command, ...(definition.args || [])].map(shellQuote).join(" ")
                 : definition.command;
+            const shellPath = definition.shellPath || "/bin/zsh";
             terminal = vscode.window.createTerminal({
                 name: definition.name,
-                cwd: definition.cwd,
+                // Ein URI erhält die SSH-Authority; ein fsPath würde diese verlieren.
+                cwd: definition.cwd?.startsWith("vscode-remote://")
+                    ? vscode.Uri.parse(definition.cwd) : definition.cwd,
                 env: definition.env,
-                shellPath: "/bin/zsh",
+                shellPath,
                 // Ein direkter Start wie bei Shell-Tasks verhindert, dass andere
                 // Erweiterungen Aktivierungsbefehle in laufende Agenten schicken.
                 // Ctrl+C beendet nur den gestarteten Befehl. Auch ein exec im
                 // Befehl darf die Shell, die danach den Prompt öffnet, nicht ersetzen.
                 shellArgs: ["-l", "-c", definition.close ? command
-                    : `trap ':' INT\n(\ntrap - INT\n${command}\n)\nexec /bin/zsh -l`],
+                    : `trap ':' INT\n(\ntrap - INT\n${command}\n)\nexec ${shellQuote(shellPath)} -l`],
                 iconPath: new vscode.ThemeIcon("terminal",
                     definition.color ? new vscode.ThemeColor(definition.color) : undefined),
                 color: definition.color ? new vscode.ThemeColor(definition.color) : undefined,

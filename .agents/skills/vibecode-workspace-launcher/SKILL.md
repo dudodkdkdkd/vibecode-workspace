@@ -205,6 +205,41 @@ osascript -l JavaScript /tmp/jxa.js "$d/sel.txt" "$d/cfg.tsv" "$d/defaults.tsv" 
 python3 -c "import json;d=json.load(open('$d/out.json'));print(d['settings'].get('vibecodeWorkspace.autoOpenUrls'));print([t['label'] for t in d['tasks']['tasks']])"
 ```
 
+## Remote SSH workspaces
+
+- `ssh-setup.py` is the guided connection wizard (`--connect-remote` in setup).
+  It imports existing aliases, can create a dedicated Ed25519 key and prefixes
+  a validated Host block in `~/.ssh/config` with a backup. The trailing `Host *`
+  resets context before the untouched original config. Preserve symlinked configs.
+  Register discovery only after a fresh BatchMode SSH probe and scan succeed;
+  disable ControlPath reuse for probes so stale authenticated sockets cannot hide
+  broken key setup. Never capture passwords/passphrases in application dialogs.
+  Test with `python3 -m unittest discover -s tests -p 'test_ssh_setup.py'`.
+- Host discovery lives in `remote-hosts.py`: `remote-hosts.json` stores SSH hosts
+  and scan roots; `remote-repositories.json` stores the last successful inventory.
+  The POSIX scanner runs over SSH stdin, uses NUL-delimited paths and prunes
+  dependency/cache directories. Keep shell quoting on the remote root argument.
+  Normal launches use BatchMode and bounded timeouts; `--check` reads cache only.
+  Offline/partial scans retain previous entries. Dynamic entries must never be
+  written into `projects.tsv`, including when editing their terminal settings.
+- Remote projects are entries in `projects.tsv` whose path is a
+  `vscode-remote://ssh-remote+HOST/encoded/absolute/path` URI. `remote-project.js`
+  handles setup dialogs and `--add-remote HOST /path [name]`. Never stat these
+  paths on the Mac or discard them because the host is offline.
+- Generate one workspace per SSH authority and a separate local workspace.
+  Remote files need both `folders[].uri` **and** top-level `remoteAuthority`;
+  VS Code reads that authority from the local `.code-workspace` when opening it.
+  Pass all generated workspace files together to `open -a` so window reuse
+  cannot replace one selected workspace with the next.
+- The bundled extension declares `extensionKind: ["ui"]` and is installed
+  locally. VS Code's terminal API starts remote processes; preserve the
+  `vscode-remote` cwd as a `vscode.Uri`, and use `/bin/bash` on SSH hosts instead
+  of assuming that zsh exists. The macOS control task stays in local workspaces.
+- UI-side HTTP probes and iframes must use the full URI returned by
+  `vscode.env.asExternalUri` for remote localhost URLs. This forwards the port
+  and handles conflicts between hosts. Keep the iframe sandbox unchanged.
+- Run `node --test tests/terminals.test.js tests/terminal-order.test.js tests/terminal-lifecycle.test.js tests/remote-tabs.test.js`.
+
 ## Current project ports
 
 | Project | Dev server | Storybook |

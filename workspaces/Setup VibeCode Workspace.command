@@ -23,6 +23,8 @@ CLOSE_SETUP_TERMINAL=true
 TMP_PROJECTS="$(mktemp)"
 TMP_CHOSEN_PATHS="$(mktemp)"
 TMP_TERMINAL_CONFIG="$(mktemp)"
+TMP_SETUP_PROJECTS="$(mktemp)"
+TMP_REMOTE_PROJECTS="$(mktemp)"
 SETUP_TTY="$(tty 2>/dev/null || true)"
 SETUP_COMPLETED=false
 
@@ -30,7 +32,7 @@ finish_setup() {
   local exit_code=$?
   trap - EXIT
 
-  /bin/rm -f "$TMP_PROJECTS" "$TMP_CHOSEN_PATHS" "$TMP_TERMINAL_CONFIG"
+  /bin/rm -f "$TMP_PROJECTS" "$TMP_CHOSEN_PATHS" "$TMP_TERMINAL_CONFIG" "$TMP_SETUP_PROJECTS" "$TMP_REMOTE_PROJECTS"
 
   if (( exit_code != 0 )); then
     /usr/bin/osascript - "$exit_code" <<'ERROR_APPLESCRIPT' >/dev/null 2>&1 || true
@@ -71,7 +73,8 @@ mkdir -p "$CONFIG_DIR"
 existing_count=0
 if [[ -f "$PROJECTS_FILE" ]]; then
   while IFS=$'\t' read -r existing_name existing_path; do
-    [[ -n "$existing_name" && -d "$existing_path" ]] || continue
+    [[ -n "$existing_name" ]] || continue
+    [[ -d "$existing_path" || "$existing_path" == vscode-remote://ssh-remote+*/* ]] || continue
     (( existing_count += 1 ))
   done < "$PROJECTS_FILE"
 fi
@@ -85,6 +88,7 @@ if [[ "${1:-}" == "--check" ]]; then
 fi
 
 SETUP_NONINTERACTIVE=false
+REMOTE_PROJECT_NAME=""
 
 if [[ "${1:-}" == "--remote" ]]; then
   "$SCRIPT_DIR/workspace" remote menu
@@ -92,6 +96,24 @@ if [[ "${1:-}" == "--remote" ]]; then
   exit 0
 elif [[ "${1:-}" == "--terminals" ]]; then
   setup_mode="Terminals ändern"
+elif [[ "${1:-}" == "--connect-remote" ]]; then
+  setup_mode="Remote-Verbindung einrichten"
+elif [[ "${1:-}" == "--add-remote-host" ]]; then
+  setup_mode="Remote-Host hinzufügen"
+  shift
+  if (( $# > 0 )); then
+    remote_entry="$(osascript -l JavaScript "$SCRIPT_DIR/remote-project.js" --host "$@")"
+    SETUP_NONINTERACTIVE=true
+    CLOSE_SETUP_TERMINAL=false
+  fi
+elif [[ "${1:-}" == "--add-remote" ]]; then
+  setup_mode="Remote-Repository hinzufügen"
+  shift
+  if (( $# > 0 )); then
+    remote_entry="$(osascript -l JavaScript "$SCRIPT_DIR/remote-project.js" "$@")"
+    SETUP_NONINTERACTIVE=true
+    CLOSE_SETUP_TERMINAL=false
+  fi
 elif [[ "${1:-}" == "--add" || "${1:-}" == "--replace" ]]; then
   if [[ "$1" == "--add" ]]; then
     setup_mode="Hinzufügen"
@@ -110,8 +132,8 @@ else
   if ! setup_mode="$(osascript - "$existing_count" <<'MODE_APPLESCRIPT'
 on run argv
     set existingCount to item 1 of argv
-    set dialogText to "Aktuell sind " & existingCount & " gültige Ordner eingerichtet." & return & return & "Ordner hinzufügen, die Liste ersetzen oder nur die Terminals ändern?"
-    set chosenMode to choose from list {"Hinzufügen", "Ersetzen", "Terminals ändern", "Wachhalten & Apps"} with title "VibeCode Workspace Setup" with prompt dialogText default items {"Hinzufügen"}
+    set dialogText to "Aktuell sind " & existingCount & " Projekte eingerichtet." & return & return & "Lokale Ordner oder Remote-Repositories hinzufügen, die Liste ersetzen oder Terminals und Browser-Tabs ändern?"
+    set chosenMode to choose from list {"Hinzufügen", "Remote-Verbindung einrichten", "Remote-Host hinzufügen", "Remote-Repository hinzufügen", "Ersetzen", "Terminals ändern", "Wachhalten & Apps"} with title "VibeCode Workspace Setup" with prompt dialogText default items {"Hinzufügen"}
     if chosenMode is false then return ""
     return item 1 of chosenMode
 end run
@@ -134,7 +156,52 @@ fi
   exit 0
 }
 
-if [[ "$SETUP_NONINTERACTIVE" == "false" && "$setup_mode" != "Terminals ändern" ]]; then
+if [[ "$setup_mode" == "Remote-Verbindung einrichten" ]]; then
+  if python3 "$SCRIPT_DIR/ssh-setup.py" "$CONFIG_DIR"; then
+    osascript -e 'display notification "SSH-Zugang und Repository-Suche sind eingerichtet. Jetzt Launch Workspace öffnen." with title "Remote-Verbindung bereit"'
+  else
+    setup_exit_code=$?
+    [[ "$setup_exit_code" == "130" ]] || exit "$setup_exit_code"
+  fi
+  SETUP_COMPLETED=true
+  exit 0
+fi
+
+if [[ "$setup_mode" == "Remote-Host hinzufügen" ]]; then
+  if [[ "$SETUP_NONINTERACTIVE" == "false" ]]; then
+    remote_entry="$(osascript -l JavaScript "$SCRIPT_DIR/remote-project.js" --host)"
+  fi
+  [[ -n "$remote_entry" ]] || { SETUP_COMPLETED=true; exit 0; }
+  remote_host="${remote_entry%%$'\t'*}"
+  remote_root="${remote_entry#*$'\t'}"
+  python3 "$SCRIPT_DIR/remote-hosts.py" add "$CONFIG_DIR" "$remote_host" "$remote_root"
+  printf 'Remote-Host %s gespeichert. Suche nach Repositories; SSH-Rückfragen erscheinen hier im Terminal.\n' "$remote_host"
+  python3 "$SCRIPT_DIR/remote-hosts.py" discover "$CONFIG_DIR" --interactive > "$TMP_REMOTE_PROJECTS"
+  remote_count=0
+  while IFS= read -r remote_project; do
+    [[ -n "$remote_project" ]] || continue
+    (( remote_count += 1 ))
+  done < "$TMP_REMOTE_PROJECTS"
+  printf '%s Remote-Repositories verfügbar. Beim Workspace-Start erscheinen sie zur Auswahl. Agenten und Browser-Tabs lassen sich über „Terminals ändern“ anpassen.\n' "$remote_count"
+  if [[ "$SETUP_NONINTERACTIVE" == "false" ]]; then
+    osascript - "$remote_count" <<'HOST_APPLESCRIPT'
+on run argv
+    display notification (item 1 of argv) & " Remote-Repositories verfügbar. Jetzt Launch Workspace öffnen und Projekte auswählen." with title "Remote-Host gespeichert"
+end run
+HOST_APPLESCRIPT
+  fi
+  SETUP_COMPLETED=true
+  exit 0
+fi
+
+if [[ "$setup_mode" == "Remote-Repository hinzufügen" ]]; then
+  if [[ "$SETUP_NONINTERACTIVE" == "false" ]]; then
+    remote_entry="$(osascript -l JavaScript "$SCRIPT_DIR/remote-project.js")"
+  fi
+  [[ -n "$remote_entry" ]] || { SETUP_COMPLETED=true; exit 0; }
+  REMOTE_PROJECT_NAME="${remote_entry%%$'\t'*}"
+  printf '%s\n' "${remote_entry#*$'\t'}" > "$TMP_CHOSEN_PATHS"
+elif [[ "$SETUP_NONINTERACTIVE" == "false" && "$setup_mode" != "Terminals ändern" ]]; then
   if ! osascript <<'FOLDER_APPLESCRIPT' > "$TMP_CHOSEN_PATHS"
 set chosenFolders to choose folder with prompt "Wähle die Repository-Ordner aus. Für mehrere einzelne Ordner beim Anklicken ⌘ gedrückt halten." with multiple selections allowed
 set oldDelims to AppleScript's text item delimiters
@@ -160,14 +227,19 @@ fi
 
 typeset -A SEEN_PROJECT_PATHS
 typeset -A SEEN_PROJECT_NAMES
+PROJECT_LIST_FILE="$TMP_PROJECTS"
 
 add_project() {
   local project_name="$1"
   local input_path="$2"
   local real_path base_name suffix
 
-  [[ -d "$input_path" ]] || return 0
-  real_path="$(cd "$input_path" 2>/dev/null && pwd -P)" || return 0
+  if [[ "$input_path" == vscode-remote://ssh-remote+*/* ]]; then
+    real_path="$input_path"
+  else
+    [[ -d "$input_path" ]] || return 0
+    real_path="$(cd "$input_path" 2>/dev/null && pwd -P)" || return 0
+  fi
   [[ -n "${SEEN_PROJECT_PATHS[$real_path]-}" ]] && return 0
 
   base_name="$project_name"
@@ -179,7 +251,7 @@ add_project() {
 
   SEEN_PROJECT_PATHS[$real_path]=1
   SEEN_PROJECT_NAMES[$project_name]=1
-  printf '%s\t%s\n' "$project_name" "$real_path" >> "$TMP_PROJECTS"
+  printf '%s\t%s\n' "$project_name" "$real_path" >> "$PROJECT_LIST_FILE"
 }
 
 if [[ "$setup_mode" != "Ersetzen" && -f "$PROJECTS_FILE" ]]; then
@@ -191,13 +263,30 @@ fi
 
 while IFS= read -r chosen_path; do
   [[ -n "$chosen_path" ]] || continue
-  chosen_path="${chosen_path%/}"
+  [[ "$chosen_path" == vscode-remote://* ]] || chosen_path="${chosen_path%/}"
   chosen_name="${chosen_path:t}"
+  [[ -z "$REMOTE_PROJECT_NAME" ]] || chosen_name="$REMOTE_PROJECT_NAME"
   add_project "$chosen_name" "$chosen_path"
 done < "$TMP_CHOSEN_PATHS"
 
-[[ -s "$TMP_PROJECTS" ]] || {
-  printf 'Keine gültigen Ordner ausgewählt.\n' >&2
+/bin/cp "$TMP_PROJECTS" "$TMP_SETUP_PROJECTS"
+if [[ "$SETUP_NONINTERACTIVE" == "false" && -f "$CONFIG_DIR/remote-hosts.json" && -f "$SCRIPT_DIR/remote-hosts.py" ]]; then
+  # Entdeckte Projekte nur dem Terminal-Wizard geben. Sie bleiben dynamisch und
+  # werden nicht als feste, später veraltete Einträge in projects.tsv gespeichert.
+  PROJECT_LIST_FILE="$TMP_SETUP_PROJECTS"
+  if python3 "$SCRIPT_DIR/remote-hosts.py" discover "$CONFIG_DIR" > "$TMP_REMOTE_PROJECTS"; then
+    while IFS=$'\t' read -r remote_name remote_path; do
+      [[ -n "$remote_name" && -n "$remote_path" ]] || continue
+      add_project "$remote_name" "$remote_path"
+    done < "$TMP_REMOTE_PROJECTS"
+  else
+    print -u2 'Remote-Konfiguration konnte nicht geladen werden. Die Projekt- und Terminal-Einstellungen wurden nicht verändert.'
+    exit 1
+  fi
+fi
+
+[[ -s "$TMP_SETUP_PROJECTS" ]] || {
+  printf 'Keine verfügbaren Projekte gefunden. Remote-Host und Suchordner prüfen oder lokale Ordner hinzufügen.\n' >&2
   exit 1
 }
 
@@ -206,7 +295,7 @@ configured_count="${#SEEN_PROJECT_PATHS}"
 if [[ "$SETUP_NONINTERACTIVE" == "false" ]]; then
   # Erst nach allen Dialogen speichern. Abbrechen lässt die alte Einrichtung stehen.
   setup_result="$(osascript -l JavaScript "$SCRIPT_DIR/terminal-setup.js" \
-    "$TMP_PROJECTS" "$TERMINALS_FILE" "$TMP_TERMINAL_CONFIG")"
+    "$TMP_SETUP_PROJECTS" "$TERMINALS_FILE" "$TMP_TERMINAL_CONFIG")"
   if [[ "$setup_result" == "cancelled" ]]; then
     SETUP_COMPLETED=true
     exit 0

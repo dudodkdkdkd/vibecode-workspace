@@ -33,7 +33,7 @@ function createProjectDialog(names, defaults) {
 
     const alert = $.NSAlert.alloc.init;
     alert.messageText = $("Vibe Workspace");
-    alert.informativeText = $("Welche Repositories sollen geöffnet werden? Klicke die gewünschten Projekte an. Mehrere Häkchen sind möglich. Neue Git-Repositories in den bekannten Elternordnern werden bei jedem Start ergänzt. Weitere Ordner kannst du im Workspace-Setup hinzufügen.");
+    alert.informativeText = $("Welche Repositories sollen geöffnet werden? Klicke die gewünschten Projekte an. Mehrere Häkchen sind möglich. Lokale Repositories und Repositories auf eingerichteten SSH-Hosts werden bei jedem Start ergänzt. Weitere Ordner und Remote-Hosts kannst du im Workspace-Setup hinzufügen.");
     alert.accessoryView = scroll;
     alert.addButtonWithTitle($("Öffnen"));
     alert.addButtonWithTitle($("Abbrechen"));

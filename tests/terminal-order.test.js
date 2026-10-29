@@ -27,6 +27,10 @@ function extension({ trusted = true, active = [], fail, end, configured = labels
         TerminalLocation: { Panel: 1 },
         ThemeColor: class { constructor(id) { this.id = id; } },
         ThemeIcon: class { constructor(id, color) { this.id = id; this.color = color; } },
+        Uri: { parse: value => {
+            const parsed = new URL(value);
+            return { scheme: parsed.protocol.slice(0, -1), authority: parsed.host, path: decodeURIComponent(parsed.pathname) };
+        } },
         workspace: {
             isTrusted: trusted,
             getConfiguration: () => ({ get: key => key === 'autoStartTasks' ? configured
@@ -215,6 +219,7 @@ exit "\${INSTALL_EXIT_CODE:-0}"
     assert.equal(fs.existsSync(args[1]), false, 'temporary package must be removed');
     const member = name => execFileSync('/usr/bin/unzip', ['-p', archive, name], { encoding: 'utf8' });
     const manifest = JSON.parse(member('extension/package.json'));
+    assert.deepEqual(manifest.extensionKind, ['ui'], 'local installation must also activate in Remote SSH windows');
     assert.equal(member('extension/extension.js'), source);
     assert.match(member('\\[Content_Types\\].xml'), /application\/json/);
     const identity = member('extension.vsixmanifest');
@@ -225,4 +230,22 @@ exit "\${INSTALL_EXIT_CODE:-0}"
     }), { status: 17 });
     const failedArgs = fs.readFileSync(argsFile, 'utf8').trim().split('\n');
     assert.equal(fs.existsSync(failedArgs[1]), false, 'failed installation must remove its temporary package');
+});
+
+test('SSH terminals retain remote authority and use bash while preserving their split order', async () => {
+    const app = extension({ definitions: labels.map(name => ({
+        name, group: 'Remote', command: 'exec codex', shellPath: '/bin/bash',
+        cwd: 'vscode-remote://ssh-remote+spark/home/user/Repo%20A',
+    })) });
+    await app.activate();
+    assert.deepEqual(app.started, labels);
+    for (const { options } of app.created) {
+        assert.equal(options.cwd.scheme, 'vscode-remote');
+        assert.equal(options.cwd.authority, 'ssh-remote+spark');
+        assert.equal(options.cwd.path, '/home/user/Repo A');
+        assert.equal(options.shellPath, '/bin/bash');
+        assert.match(options.shellArgs[2], /exec '\/bin\/bash' -l$/);
+    }
+    assert.equal(app.created[1].options.location.parentTerminal, app.created[0].terminal);
+    assert.deepEqual(app.warnings, []);
 });

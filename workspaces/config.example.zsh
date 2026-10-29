@@ -29,6 +29,15 @@ PROJECTS=(
   "Mein Projekt|$HOME/Documents/GitHub/mein-projekt"
   "Zweites Projekt|$HOME/Projects/zweites-projekt"
 )
+# Remote-Repositories über das Setup hinzufügen: „Remote-Repository hinzufügen“
+# oder: ./Setup\ VibeCode\ Workspace.command --add-remote spark /home/user/projects/app
+# Sie erscheinen dann in derselben Projektauswahl und öffnen per Remote SSH.
+# Alle Repos auf einem Host automatisch entdecken: „Remote-Host hinzufügen“
+# oder: ./Setup\ VibeCode\ Workspace.command --add-remote-host spark '~/projects'
+# Ohne Suchordner wird das Home-Verzeichnis des SSH-Benutzers durchsucht.
+# Noch kein SSH-Zugang? Im Setup „Remote-Verbindung einrichten“ wählen
+# oder: ./Setup\ VibeCode\ Workspace.command --connect-remote
+# Der Assistent verbindet SSH-Schlüssel, Host-Eintrag und Repository-Suche.
 
 # =============================================================================
 # TERMINALS

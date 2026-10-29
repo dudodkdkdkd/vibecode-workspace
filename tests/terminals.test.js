@@ -35,6 +35,7 @@ function fixture(t) {
 function jxa(source, args, env = {}) {
     return execFileSync('/usr/bin/osascript', ['-l', 'JavaScript', '-', ...args], {
         input: source, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'],
+        timeout: 10000,
         env: { ...process.env, ...env },
     }).trim();
 }
@@ -62,7 +63,7 @@ const testApp = {
         [files.projects, files.saved, files.output]);
 }
 
-function workspace(files, { selected = ['A', 'B'], autoStart = 'true' } = {}) {
+function workspace(files, { selected = ['A', 'B'], autoStart = 'true', all = false, env = {} } = {}) {
     const selection = path.join(files.dir, 'selection.txt');
     const defaults = path.join(files.dir, 'defaults.tsv');
     fs.writeFileSync(selection, selected.join('\n') + '\n');
@@ -71,8 +72,11 @@ function workspace(files, { selected = ['A', 'B'], autoStart = 'true' } = {}) {
         'A\tExtra\tnpm test\t',
         'B\tShell\texec zsh -l\t',
     ].join('\n') + '\n');
-    jxa(workspaceSource, [selection, files.projects, defaults, files.output, files.saved],
-        { AUTO_START_VALUE: autoStart });
+    const list = path.join(files.dir, 'workspace-list.txt');
+    jxa(workspaceSource, [selection, files.projects, defaults, files.output, files.saved, list],
+        { AUTO_START_VALUE: autoStart, ...env });
+    if (all) return fs.readFileSync(list, 'utf8').trim().split('\n')
+        .map(file => ({ file, ...JSON.parse(fs.readFileSync(file, 'utf8')) }));
     return JSON.parse(fs.readFileSync(files.output, 'utf8'));
 }
 
@@ -565,4 +569,316 @@ source "$1"
     execFileSync('/bin/zsh', ['-c', wrapper, 'test', script]);
     assert.equal(fs.readFileSync(files.projects, 'utf8'), originalProjects);
     assert.equal(fs.readFileSync(files.saved, 'utf8'), originalTerminals);
+});
+
+test('remote setup registers SSH projects without a local checkout and retains them when adding local folders', t => {
+    const files = fixture(t);
+    const script = path.join(files.dir, 'Setup.command');
+    fs.writeFileSync(script, fs.readFileSync(path.join(workspacesRoot, 'Setup VibeCode Workspace.command'), 'utf8')
+        .replace('CONFIG_DIR="$HOME/.config/vibecode-workspace"', `CONFIG_DIR=${quote(files.dir)}`)
+        // Expected CLI validation failures must not open real error alerts.
+        .replace('/usr/bin/osascript - "$exit_code"', 'osascript - "$exit_code"'));
+    fs.copyFileSync(path.join(workspacesRoot, 'remote-project.js'), path.join(files.dir, 'remote-project.js'));
+    const remotePath = "/home/user/Repo 'ä' #1%";
+    const uri = 'vscode-remote://ssh-remote+spark' + remotePath.split('/').map(encodeURIComponent).join('/');
+    const wrapper = `osascript() { if [[ "\${1:-}" == "-l" ]]; then /usr/bin/osascript "$@"; fi; }; source "$1" "\${@:2}"`;
+    const run = (...args) => execFileSync('/bin/zsh', ['-c', wrapper, 'test', script, ...args], { stdio: 'pipe', encoding: 'utf8' });
+    run('--add-remote', 'spark', remotePath);
+    run('--add-remote', 'spark', remotePath);
+    run('--add', files.b);
+    const projects = fs.readFileSync(files.projects, 'utf8');
+    assert.ok(projects.includes(`Repo 'ä' #1% [SSH: spark]\t${uri}\n`));
+    assert.equal(projects.trim().split('\n').length, 3);
+    for (const [host, remote] of [['-oProxyCommand=oops', '/repo'], ['spark:22', '/repo'],
+        ['spark', '~/repo'], ['spark', ''], ['spark', '/repo/../outside'], ['spark', '/repo\nother']]) {
+        assert.throws(() => run('--add-remote', host, remote));
+        assert.equal(fs.readFileSync(files.projects, 'utf8'), projects);
+    }
+    assert.match(run('--check'), /Ordner: 3/);
+});
+
+test('remote project and terminal dialogs support cancellation and remote shell defaults', t => {
+    const files = fixture(t);
+    const source = fs.readFileSync(path.join(workspacesRoot, 'remote-project.js'), 'utf8');
+    const mock = `const answers = ["spark", "/home/user/app", ""];\nconst testApp = {
+        displayDialog: () => ({ textReturned: answers.shift() }), displayAlert: () => {} };\n`;
+    assert.equal(jxa(mock + source.replace('Application.currentApplication()', 'testApp'), []),
+        'app [SSH: spark]\tvscode-remote://ssh-remote+spark/home/user/app');
+    const cancel = `const testApp = { displayDialog: () => { const e = new Error(); e.errorNumber = -128; throw e; } };\n`;
+    assert.equal(jxa(cancel + source.replace('Application.currentApplication()', 'testApp'), []), '');
+    const uri = 'vscode-remote://ssh-remote+spark/home/user/app';
+    fs.writeFileSync(files.projects, `Remote\t${uri}\n`);
+    assert.equal(setup(files, [['Remote'], '2', ['Shell'], 'Shell', '', ['Codex'], '', 'Codex', '', '']), 'saved');
+    const saved = JSON.parse(fs.readFileSync(files.output, 'utf8')).projects[uri];
+    assert.equal(saved.terminals[0].command, 'exec bash -l');
+    assert.match(saved.terminals[1].command, /exec bash -l; fi$/);
+    assert.match(saved.terminals[1].command, /CODEX_HOME="\$HOME\/\.codex" exec codex/);
+});
+
+test('cancelling remote registration or its terminal setup preserves the saved project and terminal files', t => {
+    const files = fixture(t);
+    const originalProjects = fs.readFileSync(files.projects, 'utf8');
+    const originalTerminals = '{"version":2,"projects":{}}';
+    fs.writeFileSync(files.saved, originalTerminals);
+    const script = path.join(files.dir, 'Setup.command');
+    fs.writeFileSync(script, fs.readFileSync(path.join(workspacesRoot, 'Setup VibeCode Workspace.command'), 'utf8')
+        .replace('CONFIG_DIR="$HOME/.config/vibecode-workspace"', `CONFIG_DIR=${quote(files.dir)}`));
+    const wrapper = `
+osascript() {
+    if [[ "\${3:-}" == */remote-project.js ]]; then
+        [[ "$CANCEL_REGISTRATION" == true ]] || print -r -- $'Remote\tvscode-remote://ssh-remote+spark/home/user/app'
+        return 0
+    elif [[ "\${1:-}" == "-l" ]]; then print -r -- cancelled; fi
+}
+source "$1" --add-remote
+`;
+    for (const cancelled of ['true', 'false']) {
+        execFileSync('/bin/zsh', ['-c', wrapper, 'test', script], {
+            env: { ...process.env, CANCEL_REGISTRATION: cancelled },
+        });
+        assert.equal(fs.readFileSync(files.projects, 'utf8'), originalProjects);
+        assert.equal(fs.readFileSync(files.saved, 'utf8'), originalTerminals);
+    }
+});
+
+test('workspaces group remote repos by SSH host with matching Git folders and terminal URIs', t => {
+    const files = fixture(t);
+    const a = 'vscode-remote://ssh-remote+spark/home/user/Repo%20A%23';
+    const b = 'vscode-remote://ssh-remote+spark/home/user/B';
+    const c = 'vscode-remote://ssh-remote+user@other/home/user/C';
+    fs.appendFileSync(files.projects, `Remote A\t${a}\nRemote B\t${b}\nRemote C\t${c}\n`);
+    const entry = { terminals: [{ name: 'Codex', command: 'exec codex', cwd: 'src #1' }], urls: ['http://localhost:5173'] };
+    fs.writeFileSync(files.saved, JSON.stringify({ version: 2, projects: { [a]: entry, [b]: entry, [c]: entry } }));
+    const results = workspace(files, { selected: ['A', 'Remote A', 'Remote B', 'Remote C'], all: true,
+        env: { CONTROL_TERMINAL_ENABLED_VALUE: 'true', CONTROL_SCRIPT_VALUE: '/local/remote.py' } });
+    assert.equal(results.length, 3);
+    const [local, spark, other] = results;
+    assert.equal(local.remoteAuthority, undefined);
+    assert.deepEqual(local.folders, [{ name: 'A', path: files.a }]);
+    assert.equal(local.settings['vibecodeWorkspace.autoOpenUrls'], undefined);
+    assert.equal(local.tasks.tasks.at(-1).label, 'VibeCode · Wachhalten + Apps');
+    assert.equal(spark.remoteAuthority, 'ssh-remote+spark');
+    assert.deepEqual(spark.folders, [{ name: 'Remote A', uri: a }, { name: 'Remote B', uri: b }]);
+    assert.deepEqual(spark.tasks.tasks.map(task => task.options.cwd), ['/home/user/Repo A#/src #1', '/home/user/B/src #1']);
+    assert.deepEqual(spark.settings['vibecodeWorkspace.autoStartTerminals'].map(terminal => terminal.cwd),
+        [a + '/src%20%231', b + '/src%20%231']);
+    assert.ok(spark.settings['vibecodeWorkspace.autoStartTerminals'].every(terminal => terminal.shellPath === '/bin/bash'));
+    assert.ok(spark.tasks.tasks.every(task => task.options.shell.executable === '/bin/bash'));
+    assert.deepEqual(spark.settings['vibecodeWorkspace.autoOpenUrls'], ['http://localhost:5173']);
+    assert.equal(other.remoteAuthority, 'ssh-remote+user@other');
+    assert.deepEqual(other.folders, [{ name: 'Remote C', uri: c }]);
+    assert.deepEqual(other.settings['vibecodeWorkspace.autoOpenUrls'], ['http://localhost:5173']);
+    assert.ok(other.file.endsWith('-SSH-user%40other.code-workspace'));
+    const remoteOnly = workspace(files, { selected: ['Remote A'], autoStart: 'false', all: true,
+        env: { CONTROL_TERMINAL_ENABLED_VALUE: 'true' } });
+    assert.equal(remoteOnly.length, 1);
+    assert.equal(remoteOnly[0].tasks.tasks.length, 1);
+    assert.equal(remoteOnly[0].settings['vibecodeWorkspace.autoStartTerminals'], undefined);
+    assert.equal(remoteOnly[0].settings['vibecodeWorkspace.autoStartTasks'], undefined);
+});
+
+test('full launcher keeps offline remote entries, installs Remote SSH and opens each workspace through LaunchServices', t => {
+    const files = fixture(t);
+    const remote = 'vscode-remote://ssh-remote+spark/not/on/this/mac';
+    fs.appendFileSync(files.projects, `Remote\t${remote}\n`);
+    const cli = path.join(files.dir, 'Editor.app/Contents/Resources/app/bin/code');
+    fs.mkdirSync(path.dirname(cli), { recursive: true });
+    fs.writeFileSync(cli, '#!/bin/zsh\nprintf "%s\\n" "$@" >> "$EDITOR_CAPTURE"\n', { mode: 0o755 });
+    const script = path.join(files.dir, 'Launch.command');
+    fs.writeFileSync(script, launcherSource);
+    fs.writeFileSync(path.join(files.dir, 'config.local.zsh'), `
+CONFIG_DIR=${quote(files.dir)}
+SAVED_PROJECTS=${quote(files.projects)}
+LAST_SELECTION=${quote(path.join(files.dir, 'last-selection.txt'))}
+WORKSPACE_DIR=${quote(files.dir)}
+EDITOR_CMD=${quote(cli)}
+OPEN_CONTROL_TERMINAL=false
+CLOSE_LAUNCHER_TERMINAL=false
+`);
+    const wrapper = `
+osascript() {
+    if [[ "\${3:-}" == */project-selection.js ]]; then cat "$TMP_NAMES"
+    elif [[ "\${1:-}" == "-l" ]]; then /usr/bin/osascript "$@"; fi
+}
+open() { printf '%s\\n' "$@" >> "$OPEN_CAPTURE"; }
+source "$1"
+`;
+    const capture = path.join(files.dir, 'open.txt');
+    const editorCapture = path.join(files.dir, 'editor.txt');
+    execFileSync('/bin/zsh', ['-c', wrapper, 'test', script], {
+        env: { ...process.env, OPEN_CAPTURE: capture, EDITOR_CAPTURE: editorCapture },
+    });
+    assert.deepEqual(fs.readFileSync(editorCapture, 'utf8').trim().split('\n'),
+        ['--list-extensions', '--install-extension', 'ms-vscode-remote.remote-ssh']);
+    assert.deepEqual(fs.readFileSync(capture, 'utf8').trim().split('\n'), [
+        '-a', path.join(files.dir, 'Editor.app'), path.join(files.dir, 'Vibe-Session.code-workspace'),
+        path.join(files.dir, 'Vibe-Session-SSH-spark.code-workspace'),
+    ]);
+    const result = JSON.parse(fs.readFileSync(path.join(files.dir, 'Vibe-Session-SSH-spark.code-workspace')));
+    assert.equal(result.tasks.tasks.length, 5);
+    assert.equal(result.tasks.tasks[0].options.cwd, '/not/on/this/mac/frontend');
+    assert.equal(result.settings['vibecodeWorkspace.autoStartTerminals'][0].cwd, remote + '/frontend');
+    assert.ok(result.tasks.tasks.every(task => !task.command.includes('exec zsh')));
+    assert.ok(fs.readFileSync(path.join(files.dir, 'last-selection.txt'), 'utf8').includes(remote));
+});
+
+test('malformed remote URIs and escaping terminal directories leave previous workspaces intact', t => {
+    const files = fixture(t);
+    fs.writeFileSync(files.output, 'unchanged');
+    for (const remote of ['vscode-remote://ssh-remote+spark/home/user/%0Aapp',
+        'vscode-remote://ssh-remote+spark/home/user/../app', 'vscode-remote://ssh-remote+spark/home/user/app?query']) {
+        fs.writeFileSync(files.projects, `A\t${files.a}\nRemote\t${remote}\n`);
+        assert.throws(() => workspace(files, { selected: ['A', 'Remote'], all: true }));
+        assert.equal(fs.readFileSync(files.output, 'utf8'), 'unchanged');
+    }
+    const remote = 'vscode-remote://ssh-remote+spark/home/user/app';
+    fs.writeFileSync(files.projects, `A\t${files.a}\nRemote\t${remote}\n`);
+    fs.writeFileSync(files.saved, JSON.stringify({ version: 2, projects: { [remote]: {
+        terminals: [{ name: 'Shell', command: 'exec bash -l', cwd: '../outside' }], urls: [],
+    } } }));
+    assert.throws(() => workspace(files, { selected: ['A', 'Remote'], all: true }));
+    assert.equal(fs.readFileSync(files.output, 'utf8'), 'unchanged');
+});
+
+test('remote host dialogs accept a server home root and cancel without saving', t => {
+    const files = fixture(t);
+    const source = fs.readFileSync(path.join(workspacesRoot, 'remote-project.js'), 'utf8');
+    const mock = `const answers = ['spark', '']; const testApp = {
+        displayDialog: () => ({ textReturned: answers.shift() }), displayAlert: () => {} };\n`;
+    assert.equal(jxa(mock + source.replaceAll('Application.currentApplication()', 'testApp'), ['--host']), 'spark\t~');
+    assert.equal(jxa(source, ['--host', 'user@spark', '~/projects/']), 'user@spark\t~/projects');
+    const cancel = `const testApp = { displayDialog: () => { const e = new Error(); e.errorNumber = -128; throw e; } };\n`;
+    assert.equal(jxa(cancel + source.replaceAll('Application.currentApplication()', 'testApp'), ['--host']), '');
+    const script = path.join(files.dir, 'Setup.command');
+    fs.writeFileSync(script, fs.readFileSync(path.join(workspacesRoot, 'Setup VibeCode Workspace.command'), 'utf8')
+        .replace('CONFIG_DIR="$HOME/.config/vibecode-workspace"', `CONFIG_DIR=${quote(files.dir)}`));
+    const previous = fs.readFileSync(files.projects, 'utf8');
+    execFileSync('/bin/zsh', ['-c', 'osascript() { print -r -- ""; }; source "$1" --add-remote-host', 'test', script]);
+    assert.equal(fs.existsSync(path.join(files.dir, 'remote-hosts.json')), false);
+    assert.equal(fs.readFileSync(files.projects, 'utf8'), previous);
+});
+
+test('host registration, recursive launcher discovery and terminal setup share dynamic repo identities', t => {
+    const files = fixture(t);
+    const server = path.join(files.dir, 'server');
+    const repo = path.join(server, 'group', "Remote 'ä' #");
+    fs.mkdirSync(path.join(repo, '.git'), { recursive: true });
+    const bin = path.join(files.dir, 'bin');
+    fs.mkdirSync(bin);
+    fs.writeFileSync(path.join(bin, 'ssh'), `#!/bin/sh
+for arg do remote_command="$arg"; done
+exec /bin/sh -c "$remote_command"
+`, { mode: 0o755 });
+    for (const name of ['remote-project.js', 'remote-hosts.py']) {
+        fs.copyFileSync(path.join(workspacesRoot, name), path.join(files.dir, name));
+    }
+    const script = path.join(files.dir, 'Setup.command');
+    fs.writeFileSync(script, fs.readFileSync(path.join(workspacesRoot, 'Setup VibeCode Workspace.command'), 'utf8')
+        .replace('CONFIG_DIR="$HOME/.config/vibecode-workspace"', `CONFIG_DIR=${quote(files.dir)}`));
+    const wrapper = `
+python3() { PATH="$TEST_BIN:$PATH" command python3 "$@"; }
+osascript() { if [[ "\${1:-}" == "-l" ]]; then /usr/bin/osascript "$@"; fi; }
+source "$1" "\${@:2}"
+`;
+    const env = { ...process.env, TEST_BIN: bin };
+    const previousProjects = fs.readFileSync(files.projects, 'utf8');
+    execFileSync('/bin/zsh', ['-c', wrapper, 'test', script, '--add-remote-host', 'spark', server], { env });
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(files.dir, 'remote-hosts.json'))),
+        { version: 1, hosts: [{ host: 'spark', root: server }] });
+    assert.equal(fs.readFileSync(files.projects, 'utf8'), previousProjects);
+
+    const inventoryScript = path.join(files.dir, 'Inventory.command');
+    fs.writeFileSync(inventoryScript, launcherSource.split('\n# Diagnosemodus')[0] + '\ncat "$TMP_CONFIG"\n');
+    fs.writeFileSync(path.join(files.dir, 'config.local.zsh'), `
+CONFIG_DIR=${quote(files.dir)}
+SAVED_PROJECTS=${quote(files.projects)}
+WORKSPACE_DIR=${quote(files.dir)}
+EDITOR_CMD=/usr/bin/true
+export PATH=${quote(bin)}:"$PATH"
+`);
+    const uri = 'vscode-remote://ssh-remote+spark' + repo.split('/').map(encodeURIComponent).join('/');
+    const name = "Remote 'ä' # [SSH: spark]";
+    const inventory = () => execFileSync('/bin/zsh', [inventoryScript], { encoding: 'utf8', stdio: 'pipe' });
+    assert.ok(inventory().includes(`${name}\t${uri}\n`));
+    const newRepo = path.join(server, 'another', 'new-repo');
+    fs.mkdirSync(path.join(newRepo, '.git'), { recursive: true });
+    assert.ok(inventory().includes('new-repo [SSH: spark]'));
+    fs.writeFileSync(path.join(bin, 'ssh'), '#!/bin/sh\nexit 255\n', { mode: 0o755 });
+    assert.ok(inventory().includes(`${name}\t${uri}\n`), 'offline hosts must preserve cached choices');
+
+    // The diagnostics path must not attempt any SSH connection.
+    const called = path.join(files.dir, 'ssh-must-not-run');
+    fs.writeFileSync(path.join(bin, 'ssh'), `#!/bin/sh\ntouch ${quote(called)}\nexit 255\n`, { mode: 0o755 });
+    execFileSync('/bin/zsh', [inventoryScript, '--check']);
+    assert.equal(fs.existsSync(called), false);
+
+    // An offline terminal setup uses the snapshot, without persisting its repos
+    // into projects.tsv. Explicit and discovered entries must deduplicate.
+    fs.appendFileSync(files.projects, `Manual name\t${uri}\n`);
+    const fixedProjects = fs.readFileSync(files.projects, 'utf8');
+    fs.writeFileSync(path.join(files.dir, 'terminal-setup.js'), `
+const answers = [['Manual name'], '0', ''];
+const testApp = { chooseFromList: () => answers.shift(),
+    displayDialog: () => ({ textReturned: answers.shift() }), displayAlert() {} };
+` + setupSource.replace('Application.currentApplication()', 'testApp'));
+    execFileSync('/bin/zsh', ['-c', wrapper, 'test', script, '--terminals'], { env });
+    assert.equal(fs.readFileSync(files.projects, 'utf8'), fixedProjects);
+    assert.deepEqual(JSON.parse(fs.readFileSync(files.saved)).projects[uri], { terminals: [], urls: [] });
+    // Removing a repo on the host removes it from the next successful scan.
+    fs.writeFileSync(path.join(bin, 'ssh'), '#!/bin/sh\nfor arg do remote_command="$arg"; done\nexec /bin/sh -c "$remote_command"\n', { mode: 0o755 });
+    fs.rmSync(newRepo, { recursive: true });
+    assert.ok(!inventory().includes('new-repo [SSH: spark]'));
+
+    // A host alone is sufficient; no manual/local project entries are required.
+    fs.writeFileSync(files.projects, '');
+    const wizard = path.join(files.dir, 'terminal-setup.js');
+    fs.writeFileSync(wizard, fs.readFileSync(wizard, 'utf8').replace("[['Manual name'], '0', '']", `${JSON.stringify([[name], '0', ''])}`));
+    execFileSync('/bin/zsh', ['-c', wrapper, 'test', script, '--terminals'], { env, stdio: 'pipe' });
+    assert.equal(fs.readFileSync(files.projects, 'utf8'), '');
+    assert.deepEqual(JSON.parse(fs.readFileSync(files.saved)).projects[uri], { terminals: [], urls: [] });
+
+    // Corrupt discovery data must abort setup before its normalizer can drop
+    // previously saved remote terminal settings.
+    const previousTerminals = fs.readFileSync(files.saved, 'utf8');
+    fs.writeFileSync(path.join(files.dir, 'remote-repositories.json'), '{broken');
+    fs.writeFileSync(script, fs.readFileSync(script, 'utf8')
+        .replace('/usr/bin/osascript - "$exit_code"', 'osascript - "$exit_code"'));
+    assert.throws(() => execFileSync('/bin/zsh', ['-c', wrapper, 'test', script, '--terminals'], { env, stdio: 'pipe' }));
+    assert.equal(fs.readFileSync(files.projects, 'utf8'), '');
+    assert.equal(fs.readFileSync(files.saved, 'utf8'), previousTerminals);
+});
+
+test('guided remote setup routes the CLI and setup menu to the same assistant and handles cancellation', t => {
+    const files = fixture(t);
+    const script = path.join(files.dir, 'Setup.command');
+    fs.writeFileSync(script, fs.readFileSync(path.join(workspacesRoot, 'Setup VibeCode Workspace.command'), 'utf8')
+        .replace('CONFIG_DIR="$HOME/.config/vibecode-workspace"', `CONFIG_DIR=${quote(files.dir)}`));
+    fs.writeFileSync(path.join(files.dir, 'ssh-setup.py'), `
+import json, os, sys
+with open(os.environ['ASSISTANT_CAPTURE'], 'w') as handle:
+    json.dump(sys.argv[1:], handle)
+raise SystemExit(int(os.environ.get('ASSISTANT_EXIT', '0')))
+`);
+    const previous = fs.readFileSync(files.projects, 'utf8');
+    const capture = path.join(files.dir, 'assistant.json');
+    const notices = path.join(files.dir, 'notices.txt');
+    const wrapper = `
+osascript() {
+    if [[ "\${1:-}" == "-e" ]]; then print -r -- notice >> "$NOTICE_CAPTURE"
+    else print -r -- 'Remote-Verbindung einrichten'; fi
+}
+source "$1" "\${@:2}"
+`;
+    for (const args of [[], ['--connect-remote']]) {
+        execFileSync('/bin/zsh', ['-c', wrapper, 'test', script, ...args], {
+            env: { ...process.env, ASSISTANT_CAPTURE: capture, NOTICE_CAPTURE: notices },
+        });
+        assert.deepEqual(JSON.parse(fs.readFileSync(capture)), [files.dir]);
+        assert.equal(fs.readFileSync(files.projects, 'utf8'), previous);
+    }
+    const completedNotices = fs.readFileSync(notices, 'utf8');
+    execFileSync('/bin/zsh', ['-c', wrapper, 'test', script, '--connect-remote'], {
+        env: { ...process.env, ASSISTANT_CAPTURE: capture, NOTICE_CAPTURE: notices, ASSISTANT_EXIT: '130' },
+    });
+    assert.equal(fs.readFileSync(notices, 'utf8'), completedNotices, 'cancellation must not announce success');
 });
