@@ -1,0 +1,6 @@
+{
+  "entries": [
+    {"id": "remote", "title": "Remote: Wachhalten, Apps und SSH",
+     "run": ["python3", "{module}/remote.py"], "menu": true}
+  ]
+}

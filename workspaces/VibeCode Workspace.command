@@ -74,6 +74,15 @@ if [[ "${1:-}" == "remote" ]]; then
   exec "$SCRIPT_DIR/workspace" "$@"
 fi
 
+# Projekte ohne Auswahldialog öffnen: --project NAME (mehrfach möglich). So starten
+# gespeicherte Workspaces und ihre Schreibtisch-Shortcuts direkt.
+PRESELECTED_PROJECTS=()
+while [[ "${1:-}" == "--project" ]]; do
+  [[ -n "${2:-}" ]] || { print -u2 'Fehler: --project braucht einen Projektnamen.'; exit 2; }
+  PRESELECTED_PROJECTS+=("$2")
+  shift 2
+done
+
 # ============================================================
 # VIBE WORKSPACE LAUNCHER
 # macOS + Visual Studio Code
@@ -198,6 +207,8 @@ TMP_DEFAULTS="$(mktemp)"
 TMP_WORKSPACES="$(mktemp)"
 TMP_REMOTE_PROJECTS="$(mktemp)"
 LAUNCHER_TTY="$(tty 2>/dev/null || true)"
+# true = der Fehler wurde dem Benutzer schon erklärt; kein zweiter, allgemeiner Alarm.
+HANDLED_ERROR=false
 LAUNCH_COMPLETED=false
 
 finish_launcher() {
@@ -207,12 +218,14 @@ finish_launcher() {
   /bin/rm -f "$TMP_NAMES" "$TMP_SELECTED" "$TMP_CONFIG" "$TMP_TERMINALS" "$TMP_DEFAULTS" "$TMP_WORKSPACES" "$TMP_REMOTE_PROJECTS"
 
   if (( exit_code != 0 )); then
-    /usr/bin/osascript - "$exit_code" <<'ERROR_APPLESCRIPT' >/dev/null 2>&1 || true
+    if [[ "$HANDLED_ERROR" != "true" ]]; then
+      /usr/bin/osascript - "$exit_code" <<'ERROR_APPLESCRIPT' >/dev/null 2>&1 || true
 on run argv
     set errorCode to item 1 of argv
     display alert "VibeCode Workspace konnte nicht gestartet werden" message "Fehlercode: " & errorCode & return & return & "Das Terminal bleibt geöffnet. Dort stehen die technischen Details." as critical
 end run
 ERROR_APPLESCRIPT
+    fi
   elif [[ "$LAUNCH_COMPLETED" == "true" \
        && "$CLOSE_LAUNCHER_TERMINAL" == "true" \
        && "${TERM_PROGRAM:-}" == "Apple_Terminal" \
@@ -310,11 +323,11 @@ for project_root in "${PROJECT_ROOTS[@]}"; do
   done
 done
 
-# Auf gespeicherten SSH-Hosts rekursiv nach Repositories suchen. Im Diagnosemodus
-# nur den Cache lesen; normale Starts warten nicht auf Passwortdialoge.
+# Auf gespeicherten SSH-Hosts rekursiv nach Repositories suchen. Diagnose und
+# reine Projektlisten lesen nur den Cache; normale Starts warten nicht auf Passwortdialoge.
 if [[ -f "$CONFIG_DIR/remote-hosts.json" && -f "$SCRIPT_DIR/remote-hosts.py" ]]; then
   remote_scan_args=()
-  [[ "${1:-}" != "--check" ]] || remote_scan_args+=(--cached)
+  [[ "${1:-}" != "--check" && "${1:-}" != "--list-projects" ]] || remote_scan_args+=(--cached)
   if python3 "$SCRIPT_DIR/remote-hosts.py" discover "$CONFIG_DIR" "${remote_scan_args[@]}" > "$TMP_REMOTE_PROJECTS"; then
     while IFS=$'\t' read -r remote_name remote_path; do
       [[ -n "$remote_name" && -n "$remote_path" ]] || continue
@@ -339,6 +352,12 @@ if [[ "${1:-}" == "--check" ]]; then
   printf 'Gültige Projekte: %s\n' "${#SEEN_PROJECT_PATHS}"
   printf 'Standard-Terminals pro Projekt ohne Setup-Auswahl: %s\n' "${#AUTO_TERMINALS}"
   printf 'Terminal-Konfiguration aus dem Setup: %s\n' "$CONFIG_DIR/terminals.json"
+  exit 0
+fi
+
+# Projektnamen für die VibeCode-App ausgeben: dieselbe Liste wie im Auswahldialog.
+if [[ "${1:-}" == "--list-projects" ]]; then
+  if [[ -s "$TMP_NAMES" ]]; then cat "$TMP_NAMES"; fi
   exit 0
 fi
 
@@ -372,6 +391,27 @@ fi
 if [[ "${1:-}" == "--remote-workspace" ]]; then
   [[ -s "$TMP_DEFAULTS" ]] || cp "$TMP_NAMES" "$TMP_DEFAULTS"
   cp "$TMP_DEFAULTS" "$TMP_SELECTED"
+elif (( ${#PRESELECTED_PROJECTS[@]} )); then
+  : > "$TMP_SELECTED"
+  MISSING_PROJECTS=()
+  for selected_name in "${PRESELECTED_PROJECTS[@]}"; do
+    if [[ -n "${PROJECT_PATH_BY_NAME[$selected_name]-}" ]]; then
+      print -r -- "$selected_name" >> "$TMP_SELECTED"
+    else
+      MISSING_PROJECTS+=("$selected_name")
+    fi
+  done
+  if (( ${#MISSING_PROJECTS[@]} )); then
+    print -u2 "Projekte nicht gefunden: ${(j:, :)MISSING_PROJECTS}"
+    # Namen laufen als Argument in AppleScript, nie als Quelltext.
+    if [[ -s "$TMP_SELECTED" ]]; then
+      osascript -e 'on run argv' -e 'display notification (item 1 of argv) with title "VibeCode: Projekte nicht gefunden"' -e 'end run' "${(j:, :)MISSING_PROJECTS}" || true
+    else
+      osascript -e 'on run argv' -e 'display alert "Projekte nicht gefunden" message ("Nicht mehr vorhanden: " & item 1 of argv & ". Bearbeite den Workspace in der VibeCode-App oder richte die Repository-Ordner neu ein.") as critical' -e 'end run' "${(j:, :)MISSING_PROJECTS}" || true
+      HANDLED_ERROR=true
+      exit 1
+    fi
+  fi
 else
   osascript -l JavaScript "$SCRIPT_DIR/project-selection.js" "$TMP_NAMES" "$TMP_DEFAULTS" > "$TMP_SELECTED"
 fi
@@ -729,11 +769,15 @@ while IFS= read -r selected_name; do
   fi
 done < "$TMP_SELECTED"
 
-: > "$LAST_SELECTION"
-while IFS= read -r selected_name; do
-  [[ -n "${PROJECT_PATH_BY_NAME[$selected_name]-}" ]] || continue
-  printf '%s\n' "${PROJECT_PATH_BY_NAME[$selected_name]}" >> "$LAST_SELECTION"
-done < "$TMP_SELECTED"
+# Ein gespeicherter Workspace hat seine eigene Konfiguration; "zuletzt gewählt"
+# gehört dem Auswahldialog und bleibt davon unberührt.
+if (( ! ${#PRESELECTED_PROJECTS[@]} )); then
+  : > "$LAST_SELECTION"
+  while IFS= read -r selected_name; do
+    [[ -n "${PROJECT_PATH_BY_NAME[$selected_name]-}" ]] || continue
+    printf '%s\n' "${PROJECT_PATH_BY_NAME[$selected_name]}" >> "$LAST_SELECTION"
+  done < "$TMP_SELECTED"
+fi
 
 # Lokale Projekte und jeder SSH-Host bekommen je einen eigenen Workspace.
 workspace_paths=()

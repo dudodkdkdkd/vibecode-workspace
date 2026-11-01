@@ -1,0 +1,6 @@
+{
+  "entries": [
+    {"id": "local", "title": "Local Dev: MLX/Ollama mit Agent starten",
+     "run": ["/bin/zsh", "{module}/launcher.zsh"], "menu": true}
+  ]
+}

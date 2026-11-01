@@ -1,0 +1,8 @@
+{
+  "entries": [
+    {"id": "launch", "title": "Projekte auswählen und starten (Auswahldialog)",
+     "run": ["{module}/VibeCode Workspace.command"], "menu": true},
+    {"id": "setup", "title": "Repository-Ordner, Terminals und URLs einrichten",
+     "run": ["{module}/Setup VibeCode Workspace.command"], "menu": true}
+  ]
+}
