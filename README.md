@@ -12,11 +12,53 @@ Erzeuge für diese Dateien einen **Finder-Alias** auf dem Schreibtisch und start
 
 | Datei | Modul | Zweck |
 |-------|-------|-------|
+| `VibeCode.command` | Grundapp | Hauptfenster: Workspaces, Config, Shortcuts |
 | `Setup Workspace.command` | Workspaces | Repository-Ordner einrichten |
 | `Launch Workspace.command` | Workspaces | Workspace mit Terminals starten |
 | `Local Dev.command` | Local Dev | Profil starten: MLX/Ollama → OpenCode/Codex/Claude Code |
 
 **Wichtig:** Nutze **Aliase** (Rechtsklick → Alias erzeugen), damit die Starter ihre Module finden und Updates automatisch übernehmen.
+
+---
+
+## 🪟 VibeCode App (Grundapp)
+
+Eine App für alles: Doppelklick auf `VibeCode.command` öffnet das Hauptfenster.
+
+| Schaltfläche | Was sie tut |
+|--------------|-------------|
+| **Starten** | startet den gewählten Workspace direkt, ohne Auswahldialog |
+| **Neuer Workspace… / Bearbeiten…** | Name, Projekte und „Shortcut auf dem Schreibtisch anlegen“ |
+| **Mehr…** | Setup (Repository-Ordner, Terminals, URLs), Remote (Wachhalten, Apps, SSH), Local Dev, Schreibtisch-Shortcuts erneuern |
+
+Ein **Workspace** ist eine benannte Auswahl von Projekten, z. B. „Patigon“ = capential + orthonovex + omniperc.
+Mit dem Häkchen **Shortcut auf dem Schreibtisch** legt VibeCode alles Nötige selbst an:
+einen kleinen Starter in `~/.config/vibecode-workspace/shortcuts/` und einen **Finder-Alias** mit dem
+Namen des Workspaces auf dem Schreibtisch. Ein Doppelklick startet den Workspace direkt.
+
+- Umbenennen, Häkchen entfernen oder Löschen aktualisiert den Alias mit.
+- Eine fremde Datei mit demselben Namen auf dem Schreibtisch wird **nie** überschrieben oder gelöscht;
+  stattdessen gibt es eine Fehlermeldung und nichts wird gespeichert.
+- Verschiebst du das Repository, öffne die App einmal aus dem neuen Ordner: die Shortcuts finden es dann wieder.
+- Beim ersten Shortcut kann macOS einmal nach dem Zugriff auf den Schreibtisch-Ordner fragen.
+- Workspaces speichern Projekt-*Namen*, nicht Pfade. Fehlt ein Projekt, warnt das Fenster, und der Shortcut
+  zeigt einen Alarm statt still nichts zu tun.
+- Kennt der Launcher noch keine Projekte, sagt das Fenster es: unter **Mehr… → Setup** die Repository-Ordner einrichten.
+
+Auch ohne Fenster:
+
+```bash
+./VibeCode.command list                     # gespeicherte Workspaces
+./VibeCode.command run Patigon              # Workspace starten
+./VibeCode.command save --name=Patigon --project=patigon-capential --project=patigon-orthonovex --shortcut
+./VibeCode.command delete --name=Patigon    # samt Schreibtisch-Shortcut
+./VibeCode.command shortcuts sync           # alle Shortcuts neu anlegen
+./VibeCode.command remote ssh share         # Modul-Befehle: launch, setup, remote …, local
+```
+
+**Module melden sich selbst an:** Jeder Modulordner enthält eine `module.json` mit `entries`
+(`id`, `title`, `run`, optional `menu`). `{module}` steht für den Ordner des Moduls. Löschst du einen
+Modulordner, verschwinden seine Einträge; ein neues Modul braucht nur einen Ordner mit `module.json`.
 
 ---
 
@@ -47,18 +89,19 @@ Erzeuge für diese Dateien einen **Finder-Alias** auf dem Schreibtisch und start
 ---
 
 ### 2️⃣ **Remote Management** (`remote/`)
-**Zweck:** Fernverwaltung von Servern (Wake-on-LAN, SSH, Status-Check)
+**Zweck:** Einen Mac (z. B. ein Mac Studio) wach halten, Claude/Codex darauf laufen
+lassen und sich von einem anderen Mac per SSH verbinden.
 
 | Feature | Beschreibung |
 |---------|-------------|
-| **Wake-on-LAN** | Weckt Server per Magic Packet |
-| **SSH-Verwaltung** | Einfache SSH-Verbindungen zu mehreren Servern |
-| **Port-Forwarding** | Leitet Ports für Remote-Zugriff weiter |
-| **Status-Monitoring** | Prüft, ob Server erreichbar sind |
+| **Wachhalten** | Hält den Mac per `caffeinate` wach, bis du ihn ausschaltest |
+| **Plattformen / Apps** | Startet und beendet Claude, Claude Code, Codex, OpenCode mit dem Wachhalten |
+| **Kontrollterminal** | Menü zum Ein-/Ausschalten und zur App-Auswahl |
+| **SSH zum Mac Studio** | Speichert das Ziel einmalig, prüft die Erreichbarkeit und verbindet |
 
 **Hauptdateien:**
 - `remote.py` – Hauptskript für Remote-Funktionen
-- `remote.example.json` – Beispiel-Konfiguration für Server
+- `remote.example.json` – Standardwerte für Wachhalten und Apps
 
 ---
 
@@ -95,8 +138,8 @@ rm -rf workspaces/ local-dev/
 ```
 
 **⚠️ Wichtig:**
-- Die Module sind **völlig unabhängig** – Löschen eines Moduls beeinträchtigt die anderen nicht
-- **Keine Abhängigkeiten** zwischen den Modulen
+- Die Module sind **unabhängig** – Löschen eines Moduls beeinträchtigt die anderen nicht; die Grundapp zeigt nur noch die vorhandenen
+- Nur lose Verbindungen: der Launcher öffnet das Kontrollterminal nur, wenn `remote/` vorhanden ist. Workspaces starten braucht `workspaces/`
 - Jedes Modul hat seine **eigene Dokumentation** (README.md im Ordner)
 
 ---
@@ -256,35 +299,46 @@ Repository-Ordner. Dev- und Storybook-Server benötigen dort passende npm-Skript
 ### Remote Management (`remote/`)
 | Datei | Zweck |
 |-------|-------|
-| `remote.example.json` | Kopiere nach `remote.json` und trage deine Server ein |
+| `remote.example.json` | Standardwerte (`keep_awake`, `apps`); deine Einstellungen liegen in `~/.config/vibecode-workspace/remote/config.json` |
 
-**Beispiel-Konfiguration (`remote.json`):**
-```json
-{
-  "servers": [
-    {
-      "name": "Mein Server",
-      "host": "192.168.1.100",
-      "mac": "00:11:22:33:44:55",
-      "wake_on_lan": true,
-      "ssh_port": 22,
-      "user": "benutzer"
-    }
-  ]
-}
-```
-
-**Usage:**
+**Usage** (`workspace` steht hier für `./workspaces/workspace`):
 ```bash
-# Server wecken
-python3 remote/remote.py --wake "Mein Server"
-
-# Alle Server prüfen
-python3 remote/remote.py --check-all
-
-# SSH-Verbindung
-python3 remote/remote.py --ssh "Mein Server"
+workspace remote on        # Wachhalten + gewählte Apps starten
+workspace remote off       # Wachhalten lösen, Apps beenden
+workspace remote status    # aktuellen Zustand zeigen
+workspace remote control   # Kontrollterminal (Menü)
 ```
+
+#### SSH vom MacBook zum Mac Studio
+
+Zwei Sätze, ein Satz pro Gerät, kein Passwort. Jedes Gerät gibt **eine Zeile** aus, die du
+zum anderen trägst (sie landet auch in der Zwischenablage, mit Universal Clipboard genügt Einfügen).
+
+| Schritt | Auf dem … | Du sagst / tippst | Ergebnis |
+|---------|-----------|-------------------|----------|
+| 1 | **Mac Studio** (gibt Zugriff) | „gib Zugriff frei“ oder `workspace remote ssh share` | prüft Entfernte Anmeldung (öffnet bei Bedarf die Einstellungen) und gibt eine `join`-Zeile aus |
+| 2 | **MacBook** (bekommt Zugriff) | „ich will Zugriff“ + die `join`-Zeile einfügen | prüft den Fingerprint des Studios, speichert das Ziel und gibt eine `allow`-Zeile aus |
+| 3 | **Mac Studio** | die `allow`-Zeile einfügen, Fingerprint bestätigen | der Schlüssel des MacBooks ist freigegeben |
+| 4 | **MacBook** | `workspace remote ssh join` | `✔ Verbunden` |
+
+`share --wake` hält das Studio zusätzlich wach (wie `workspace remote on`, startet also auch
+die gewählten Apps). Ohne Wachhalten kann das Studio einschlafen, dann ist SSH nicht erreichbar.
+
+**Danach:** `workspace remote ssh` (interaktiv) oder `workspace remote ssh run -- <befehl>`
+(ohne Terminal, für Agenten; bricht sofort ab statt auf ein Passwort zu warten).
+
+**Mit einem KI-Agenten:** Er folgt dem Skill `.agents/skills/vibecode-remote-ssh/SKILL.md`.
+Er führt `share`, `join` und `allow` selbst aus; den Fingerprint bestätigst du, bevor er einen
+Schlüssel freigibt. Rückgängig machen: die Zeile des Schlüssels aus `~/.ssh/authorized_keys` löschen.
+
+Das Ziel steht in `~/.config/vibecode-workspace/remote/ssh.json`. Der Fingerprint in der
+`join`-Zeile ist der Host-Schlüssel des Studios: Stimmt er nicht, wird die Verbindung abgelehnt.
+Alternativ ohne Zeilen-Austausch: `workspace remote ssh set benutzer@host` und danach
+`workspace remote ssh pair` (fragt einmal das Studio-Passwort).
+
+**Von unterwegs:** `mac-studio.local` funktioniert nur im selben Netzwerk. Außerhalb
+installierst du [Tailscale](https://tailscale.com) auf beiden Macs und trägst statt
+`mac-studio.local` den Tailscale-Namen oder die Tailscale-IP ein.
 
 ---
 
@@ -313,8 +367,8 @@ python3 remote/remote.py --ssh "Mein Server"
 # Lokale KI einrichten (optional)
 ./Local\ Dev.command --setup
 
-# Remote-Server einrichten (optional)
-# Kopiere remote/remote.example.json nach remote/remote.json und passe an
+# SSH-Ziel (Mac Studio) einrichten (optional)
+./workspaces/workspace remote ssh set benutzer@mac-studio.local
 ```
 
 ### 2️⃣ Nur Workspaces nutzen
@@ -345,10 +399,9 @@ rm -rf workspaces/ remote/
 # Module entfernen, die du nicht brauchst
 rm -rf workspaces/ local-dev/
 
-# Server konfigurieren
-cp remote/remote.example.json remote/remote.json
-# Anpassen und nutzen
-python3 remote/remote.py --wake server1
+# SSH-Ziel speichern und verbinden (ohne den workspaces/-Dispatcher direkt über remote.py)
+python3 remote/remote.py ssh set benutzer@mac-studio.local
+python3 remote/remote.py ssh
 ```
 
 ---
@@ -360,11 +413,14 @@ vibecode-workspace/
 ├── README.md                    # Diese Datei – Modul-Übersicht
 ├── .gitignore                  # Git-Ignore-Regeln
 │
+├── VibeCode.command            # ⭐ Quick-Launch: Hauptfenster (Grundapp)
 ├── Setup Workspace.command     # ⭐ Quick-Launch: Setup-Assistent
 ├── Launch Workspace.command    # ⭐ Quick-Launch: Workspace starten
 ├── Local Dev.command           # ⭐ Quick-Launch: Provider + Modell + Framework
 │
-├── workspaces/                 # Modul 1: Workspace-Management
+├── core/                       # Grundapp: Logik (vibecode.py) und Hauptfenster (window.js)
+│
+├── workspaces/                 # Modul 1: Workspace-Management (+ module.json)
 │   ├── workspace               # Einstiegspunkt
 │   ├── VibeCode Workspace.command
 │   ├── Setup VibeCode Workspace.command
@@ -386,6 +442,9 @@ vibecode-workspace/
 
 ## 🛠️ Anforderungen
 
+### Grundapp
+- macOS, Python 3 (`xcode-select --install` oder `brew install python`)
+
 ### Workspaces
 - macOS
 - VS Code oder Cursor (optional: Claude Code, Codex, Antigravity)
@@ -394,7 +453,7 @@ vibecode-workspace/
 
 ### Remote Management
 - Python 3.x
-- Network-Tools (`ping`, `arp`, `nc`)
+- OpenSSH (`/usr/bin/ssh`, bei macOS dabei)
 
 ### Local Dev
 - Zsh, `curl` und `jq`
@@ -408,7 +467,9 @@ vibecode-workspace/
 | Datei | Ort | Zweck |
 |-------|-----|-------|
 | `config.local.zsh` | `workspaces/` | Lokale Workspace-Einstellungen |
-| `remote.json` | `remote/` | Server-Konfiguration |
+| `config.json`, `ssh.json` | `~/.config/vibecode-workspace/remote/` | Wachhalten/Apps und SSH-Ziel |
+| `workspaces.json` | `~/.config/vibecode-workspace/` | Gespeicherte Workspaces (Name, Projekte, Shortcut) |
+| `shortcuts/`, `home` | `~/.config/vibecode-workspace/` | Erzeugte Starter hinter den Schreibtisch-Aliassen; Pfad dieses Repos |
 | `local-ai.json` | `local-dev/` | Lokaler Provider, Modell, Endpoint und Framework |
 
 **⚠️ Wichtig:**
@@ -445,7 +506,9 @@ vibecode-workspace/
 
 ### Remote Management
 - **Python fehlt:** `brew install python`
-- **Server nicht erreichbar:** IP-Adresse und MAC-Adresse prüfen
+- **SSH: Mac Studio nicht erreichbar:** auf dem Studio `workspace remote ssh info` ausführen
+  (Entfernte Anmeldung an? Wachhalten an?) und prüfen, ob beide Macs im selben Netz sind
+  oder Tailscale läuft
 
 ### Local Dev
 - **Ollama nicht installiert:** [ollama.com](https://ollama.com)

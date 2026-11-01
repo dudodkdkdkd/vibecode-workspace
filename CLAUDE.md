@@ -26,10 +26,29 @@ The short version:
 - **Run `node --test tests/terminals.test.js`.** The tests drive the real JXA wizard with
   scripted dialog answers, so adding a dialog breaks them and the answers must be updated.
 
+## Base app (core/)
+
+Before changing `core/`, a `module.json`, `VibeCode.command` or the launcher's `--project` /
+`--list-projects` flags, read `.agents/skills/vibecode-core/SKILL.md`. It covers how the
+Desktop shortcuts (Finder aliases) work, the invariants behind them, and the JXA pitfalls
+that already cost failed runs (`$()` instead of `null`, button constants are strings).
+Run `node --test tests/*.test.js` and `python3 -m unittest tests.test_remote tests.test_core`.
+
+## Reaching the other Mac (SSH)
+
+When the user wants to grant or get SSH access between their Macs ("gib Zugriff frei",
+"ich will Zugriff"), connect to their other Mac (the Mac Studio), or run something on it,
+read `.agents/skills/vibecode-remote-ssh/SKILL.md` first. The commands are
+`workspaces/workspace remote ssh share | join | allow | run`. Never use plain `ssh`: you
+have no terminal, and the helper checks the target and fails fast instead of hanging on a
+prompt. Never authorize a key (`allow`) the user did not explicitly ask you to authorize.
+
 ## Layout
 
+- `VibeCode.command` + `core/` — base app: main window, saved workspaces, Desktop shortcuts
 - `workspaces/` — launcher, setup wizard (`terminal-setup.js`), auto-open-tabs extension
-- `remote/` — Wake-on-LAN / SSH helper
+- `remote/` — keep-awake controller and SSH helper (MacBook → Mac Studio)
 - `local-dev/` — local AI provider profiles
-- `tests/` — Node test runner, executes the real JXA code
+- `tests/` — Node test runner (executes the real JXA code) and Python unittest
+- Each module folder has a `module.json`; the base app finds modules through it
 - User data lives outside the repo in `~/.config/vibecode-workspace/terminals.json`

@@ -29,7 +29,8 @@ changing behaviour — several of these look like obvious one-liners and are not
   be full copies that had to be kept in sync by hand — do not reintroduce that. Desktop
   starters are Finder *aliases*; copying a forwarder to the Desktop breaks it, because it
   resolves the module path relative to its own location.
-- **Run the tests after any change:** `node --test tests/terminals.test.js tests/terminal-order.test.js`.
+- **Run the tests after any change:** `node --test tests/*.test.js` (the launcher flags have their own
+  `tests/launcher-projects.test.js`).
   They drive the real JXA code with scripted dialog answers, so **adding a dialog to the
   wizard breaks every scripted answer array** — update the answers in the tests too.
 - Syntax-check shell and embedded JXA before trusting a change:
@@ -64,6 +65,16 @@ changing behaviour — several of these look like obvious one-liners and are not
   order. `presentation.group` is retained for manual tasks, not automatic layout.
   `autoStartTasks` remains a fallback for older workspace files; it waits for
   `onDidStartTaskProcess` because `executeTask()` resolves before actual startup.
+
+## Flags the base app relies on
+
+- `--list-projects` prints the project names the selection dialog would show (no side effects).
+- `--project NAME` (repeatable) opens exactly those projects **without the dialog** and does not touch
+  `last-selection.txt`. Unknown names: partial → notification and continue; none → alert, exit 1.
+- The EXIT trap shows a generic "konnte nicht gestartet werden" alert on every non-zero exit. A failure
+  that already showed its own alert must set `HANDLED_ERROR=true` first, or the user gets two alerts.
+
+See `.agents/skills/vibecode-core/SKILL.md` for the shortcut side.
 
 ## Pitfall 1 — `code <url>` does not open a browser tab
 

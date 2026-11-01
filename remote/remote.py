@@ -2,6 +2,7 @@
 """Persistent macOS wake/app control terminal. No third-party packages required."""
 import datetime as dt
 import fcntl
+import getpass
 import json
 import math
 import os
@@ -11,6 +12,7 @@ import re
 import shlex
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -352,6 +354,294 @@ def status(output=print):
         output('Plattformen     keine')
     if live and health.get('error'):
         output(f'Fehler          {health["error"]}')
+
+
+# SSH to a second Mac (e.g. MacBook -> Mac Studio). The target lives in its own
+# file: config.json is limited to {keep_awake, apps} by simple_config(), and
+# normalize_settings() would drop any extra key from it.
+SSH_FILE = 'ssh.json'
+# Neither pattern may start with "-": the values end up as ssh arguments and
+# must never be readable as an option such as -oProxyCommand=...
+SSH_HOST = re.compile(r'[A-Za-z0-9][A-Za-z0-9._:-]*')
+SSH_USER = re.compile(r'[A-Za-z0-9_][A-Za-z0-9._-]*')
+SSH_SETUP_HINT = 'Einmalig einrichten: workspace remote ssh join benutzer@host'
+SSH_DIR = Path.home() / '.ssh'
+# A key line is accepted only if it STARTS with a key type. authorized_keys lines may
+# begin with options such as command="...", which must never be smuggled in.
+KEY_LINE = re.compile(r'(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(?:256|384|521)) '
+                      r'([A-Za-z0-9+/]+={0,2})(?: ([^\x00-\x1f\x7f]{1,200}))?')
+FINGERPRINT = re.compile(r'SHA256:[A-Za-z0-9+/]{43}')
+SHARING_PANE = 'x-apple.systempreferences:com.apple.Sharing-Settings.extension'
+JOIN_USAGE = 'Aufruf: workspace remote ssh join benutzer@host [SHA256:…] [port]'
+
+
+def ssh_target(value, port=22):
+    """Validate "[benutzer@]host" plus port; reject anything ssh could parse as an option."""
+    user, at, host = value.rpartition('@')
+    # An "@" with nothing before it is a typo, not "current user".
+    if not SSH_HOST.fullmatch(host) or (at and not SSH_USER.fullmatch(user)):
+        raise ValueError('SSH-Ziel muss benutzer@host sein, z. B. tobias@mac-studio.local')
+    if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+        raise ValueError('SSH-Port: Zahl von 1 bis 65535.')
+    return {'user': user, 'host': host, 'port': port}
+
+
+def saved_ssh_target():
+    saved = read(SSH_FILE)
+    if saved is None:
+        raise ValueError('Kein SSH-Ziel gespeichert. ' + SSH_SETUP_HINT)
+    # Corrupt data is rejected, never defaulted: a silent fallback would connect elsewhere.
+    if not isinstance(saved, dict) or not all(
+            isinstance(saved.get(key, ''), str) for key in ('user', 'host')):
+        raise ValueError(SSH_FILE + ' ist ungültig. ' + SSH_SETUP_HINT)
+    user, host = saved.get('user', ''), saved.get('host', '')
+    return ssh_target(f'{user}@{host}' if user else host, saved.get('port', 22))
+
+
+def ssh_destination(target):
+    return f'{target["user"]}@{target["host"]}' if target['user'] else target['host']
+
+
+def ssh_command(target, remote=None):
+    """Interactive login, or with `remote` a non-interactive one-shot command.
+
+    BatchMode makes the one-shot variant fail immediately instead of waiting for a
+    password or host-key prompt nobody can answer (agents have no terminal).
+    """
+    command = ['/usr/bin/ssh', '-p', str(target['port']),
+               '-o', 'ConnectTimeout=10', '-o', 'ServerAliveInterval=30']
+    if remote is not None:
+        command += ['-o', 'BatchMode=yes']
+    command.append(ssh_destination(target))
+    return command + [remote] if remote is not None else command
+
+
+def ssh_set(args):
+    if not args or len(args) > 2:
+        raise ValueError('Aufruf: workspace remote ssh set benutzer@host [port]')
+    try:
+        port = int(args[1]) if len(args) == 2 else 22
+    except ValueError:
+        raise ValueError('SSH-Port: Zahl von 1 bis 65535.') from None
+    target = ssh_target(args[0], port)
+    write(SSH_FILE, target)
+    print(f'SSH-Ziel gespeichert: {ssh_command(target)[-1]} (Port {port})')
+    print('Verbinden mit: workspace remote ssh')
+
+
+def ssh_require_reachable(target):
+    # A sleeping or unreachable Mac would otherwise just hang for a while.
+    try:
+        socket.create_connection((target['host'], target['port']), timeout=5).close()
+    except OSError as exc:
+        raise ValueError(
+            f'{target["host"]}:{target["port"]} nicht erreichbar ({exc}). Prüfen: Mac Studio '
+            'an und wach (dort: workspace remote on), Entfernte Anmeldung aktiv (dort: '
+            'workspace remote ssh info), gleiches Netz bzw. Tailscale läuft.') from exc
+
+
+def ssh_connect(remote=None):
+    """exec ssh: interactive login, or one non-interactive command when `remote` is given."""
+    target = saved_ssh_target()
+    command = ssh_command(target, remote)
+    ssh_require_reachable(target)
+    # exec hands the terminal, stdin/stdout and the exit status straight to ssh.
+    os.execv(command[0], command)
+
+
+def ssh_pair():
+    """Install this Mac's public key on the target. Needs the target's password: a human step."""
+    target = saved_ssh_target()
+    ssh_require_reachable(target)
+    command = ['/usr/bin/ssh-copy-id', '-p', str(target['port']), ssh_destination(target)]
+    os.execv(command[0], command)
+
+
+def ssh_listening(port=22):
+    try:
+        socket.create_connection(('127.0.0.1', port), timeout=1).close()
+        return True
+    except OSError:
+        return False
+
+
+def wake_active():
+    c, state, now = config(), read('request.json', {}), time.time()
+    health = read('health.json', {})
+    end = window(c, state, now)
+    return bool(end and now - health.get('updated', 0) < 75 and health.get('until', 0) > now)
+
+
+def host_fingerprint():
+    """Fingerprint of THIS Mac's sshd host key; '' while sshd has not generated one yet."""
+    found = FINGERPRINT.search(run(
+        '/usr/bin/ssh-keygen', '-lf', '/etc/ssh/ssh_host_ed25519_key.pub', check=False).stdout)
+    return found.group(0) if found else ''
+
+
+def ssh_info(output=print, waking=False):
+    """Status of THIS Mac as an SSH target (run on the Mac Studio). Returns the join line or ''."""
+    name = run('/usr/sbin/scutil', '--get', 'LocalHostName', check=False).stdout.strip()
+    host = (name or socket.gethostname().split('.')[0]) + '.local'
+    listening, awake = ssh_listening(), waking or wake_active()
+    output('SSH-ZUGANG DIESES MACS')
+    output(f'Entfernte Anmeldung  {"AN (Port 22)" if listening else "AUS"}')
+    output(f'Wachhalten           {"AN" if awake else "AUS (Mac kann einschlafen, dann ist SSH nicht erreichbar)"}')
+    if not listening:
+        output('Aktivieren: Systemeinstellungen → Allgemein → Teilen → Entfernte Anmeldung')
+        output('            (oder im Terminal: sudo systemsetup -setremotelogin on)')
+    if not awake:
+        output('Wachhalten:  workspace remote ssh share --wake   (oder: workspace remote on)')
+    if not listening:
+        return ''
+    fingerprint = host_fingerprint()
+    if not fingerprint:
+        output('Host-Schlüssel nicht lesbar: der andere Mac kann den Fingerprint nicht prüfen.')
+    line = ' '.join(['workspace remote ssh join', f'{getpass.getuser()}@{host}'] +
+                    ([fingerprint] if fingerprint else []))
+    output('Auf dem anderen Mac ausführen:')
+    output('  ' + line)
+    return line
+
+
+def clipboard(text):
+    """Best effort, so Universal Clipboard can carry the line to the other Mac."""
+    try:
+        subprocess.run(['/usr/bin/pbcopy'], input=text, text=True, timeout=5, check=True)
+        return True
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def ssh_share(args):
+    """Prepare THIS Mac to be reached over SSH and print the one line the other Mac needs."""
+    if any(arg != '--wake' for arg in args):
+        raise ValueError('Aufruf: workspace remote ssh share [--wake]')
+    waking = bool(args)
+    if waking:
+        # Same switch as `workspace remote on`: it also starts the configured apps.
+        activate()
+    line = ssh_info(print, waking)
+    if not line:
+        run('/usr/bin/open', SHARING_PANE, check=False)
+        print('Systemeinstellungen geöffnet. „Entfernte Anmeldung“ einschalten, dann diesen Befehl wiederholen.')
+    elif clipboard(line):
+        print('(in die Zwischenablage kopiert)')
+
+
+def keygen_fingerprint(key):
+    """SHA256 fingerprint of a "type base64" public key; ValueError if it is not one."""
+    result = subprocess.run(['/usr/bin/ssh-keygen', '-lf', '-'], input=key + '\n',
+                            capture_output=True, text=True, timeout=10)
+    found = FINGERPRINT.search(result.stdout)
+    if result.returncode or not found:
+        raise ValueError('Das ist kein gültiger öffentlicher SSH-Schlüssel.')
+    return found.group(0)
+
+
+def checked_public_key(text):
+    """Validate exactly one public-key line. Returns (canonical line, fingerprint)."""
+    match = KEY_LINE.fullmatch(text.strip())
+    if not match:
+        raise ValueError('Erwartet wird genau eine Zeile: ssh-ed25519 AAAA… name')
+    kind, blob, comment = match.groups()
+    return ' '.join(part for part in (kind, blob, comment) if part), keygen_fingerprint(f'{kind} {blob}')
+
+
+def append_line(path, line):
+    """Append one line to a file in ~/.ssh with owner-only permissions."""
+    path.parent.mkdir(mode=0o700, exist_ok=True)
+    existing = path.read_bytes() if path.exists() else b''
+    separator = b'' if not existing or existing.endswith(b'\n') else b'\n'
+    with os.fdopen(os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600), 'ab') as f:
+        f.write(separator + line.encode() + b'\n')
+
+
+def own_public_key():
+    for name in ('id_ed25519', 'id_ecdsa', 'id_rsa'):
+        path = SSH_DIR / (name + '.pub')
+        if path.is_file():
+            return (path,) + checked_public_key(path.read_text())
+    raise ValueError('Kein SSH-Schlüssel gefunden. Erzeugen: ssh-keygen -t ed25519')
+
+
+def ssh_allow(args):
+    """Authorize ONE public key on THIS Mac (run on the Mac Studio). Shows the fingerprint first."""
+    key, fingerprint = checked_public_key(' '.join(arg for arg in args if arg != '--yes'))
+    path = SSH_DIR / 'authorized_keys'
+    blob = key.split()[1]
+    if path.exists() and any(blob in line.split() for line in path.read_text().splitlines()):
+        print(f'Schon freigegeben: {fingerprint}')
+        return
+    name = key.split(' ', 2)[2] if key.count(' ') >= 2 else '(ohne Name)'
+    print(f'Zugriff auf diesen Mac für: {name}\nFingerprint: {fingerprint}')
+    if '--yes' not in args:
+        if not sys.stdin.isatty():
+            raise ValueError('Bestätigung nötig: Fingerprint dem Besitzer zeigen, dann mit --yes wiederholen.')
+        if input('Diesem Schlüssel Zugriff geben? [j/N] ').strip().lower() not in ('j', 'ja', 'y', 'yes'):
+            raise ValueError('Abgebrochen, nichts geändert.')
+    append_line(path, key)
+    print('Freigegeben. Auf dem anderen Mac jetzt: workspace remote ssh join')
+
+
+def pin_host_key(target, fingerprint):
+    """Trust the target's host key only if it matches the fingerprint the target itself printed."""
+    spec = target['host'] if target['port'] == 22 else f'[{target["host"]}]:{target["port"]}'
+    if run('/usr/bin/ssh-keygen', '-F', spec, check=False).returncode == 0:
+        return  # already known; ssh itself refuses a changed key
+    scan = run('/usr/bin/ssh-keyscan', '-T', '5', '-p', str(target['port']),
+               '-t', 'ed25519', target['host'], check=False).stdout
+    entry = next((line for line in scan.splitlines() if line.strip() and not line.startswith('#')), '')
+    fields = entry.split()
+    if len(fields) < 3:
+        raise ValueError(f'Host-Schlüssel von {target["host"]} konnte nicht gelesen werden.')
+    if keygen_fingerprint(' '.join(fields[1:3])) != fingerprint:
+        raise ValueError(
+            f'Der Host-Schlüssel von {target["host"]} stimmt NICHT mit dem Fingerprint überein, den '
+            'der Mac Studio angezeigt hat. Nicht verbinden: falscher Rechner oder jemand dazwischen.')
+    append_line(SSH_DIR / 'known_hosts', entry)
+
+
+def ssh_join(args):
+    """Run on the Mac that wants access: pin the host key, save the target, check the login.
+
+    Exit 0 = connected, 1 = error, 2 = the other Mac still has to run `ssh allow`.
+    """
+    fingerprint, port = '', 22
+    for extra in args[1:]:
+        if FINGERPRINT.fullmatch(extra):
+            fingerprint = extra
+        elif re.fullmatch(r'[0-9]{1,5}', extra):
+            port = int(extra)
+        else:
+            raise ValueError(JOIN_USAGE)
+    target = ssh_target(args[0], port) if args else saved_ssh_target()
+    ssh_require_reachable(target)
+    if args:
+        if fingerprint:
+            pin_host_key(target, fingerprint)
+        write(SSH_FILE, target)
+    probe = subprocess.run(ssh_command(target, 'true'), capture_output=True, text=True, timeout=30)
+    if probe.returncode == 0:
+        print(f'✔ Verbunden mit {ssh_destination(target)}. Befehle: workspace remote ssh run -- <befehl>')
+        return
+    if 'Host key verification failed' in probe.stderr:
+        raise ValueError('Host-Schlüssel unbekannt oder geändert. Auf dem Mac Studio `workspace remote '
+                         'ssh share` ausführen und den ganzen join-Befehl mit Fingerprint verwenden.')
+    if 'Permission denied' not in probe.stderr:
+        raise ValueError('Verbindung fehlgeschlagen: ' +
+                         (probe.stderr.strip().splitlines() or [f'Exit {probe.returncode}'])[-1])
+    path, key, fingerprint = own_public_key()
+    line = f'workspace remote ssh allow {shlex.quote(key)}'
+    copied = clipboard(line)
+    print('Noch nicht freigegeben. Auf dem Mac Studio ausführen' +
+          (' (in der Zwischenablage):' if copied else ':'))
+    print('  ' + line)
+    print(f'Fingerprint dieses Schlüssels: {fingerprint}')
+    print('Danach hier: workspace remote ssh join')
+    print(f'Hilft das nicht, hat der Schlüssel eine Passphrase und ist nicht im ssh-agent: '
+          f'ssh-add --apple-use-keychain {str(path)[:-4]}')
+    raise SystemExit(2)
 
 
 def control_running():
@@ -743,6 +1033,33 @@ def main(args):
     elif cmd == 'install':
         install()
         print('Remote-Controller installiert. Einstellungen:', BASE / 'config.json')
+    elif cmd == 'ssh':
+        sub = args[1] if len(args) > 1 else 'connect'
+        if sub == 'connect' and len(args) <= 2:
+            ssh_connect()
+        elif sub == 'run':
+            words = args[2:]
+            if words[:1] == ['--']:
+                words = words[1:]
+            if not ' '.join(words).strip():
+                raise ValueError('Aufruf: workspace remote ssh run -- <befehl>')
+            ssh_connect(' '.join(words))
+        elif sub == 'pair' and len(args) == 2:
+            ssh_pair()
+        elif sub == 'share':
+            ssh_share(args[2:])
+        elif sub == 'join':
+            ssh_join(args[2:])
+        elif sub == 'allow':
+            ssh_allow(args[2:])
+        elif sub == 'set':
+            ssh_set(args[2:])
+        elif sub == 'info':
+            ssh_info()
+        else:
+            raise ValueError('ssh-Befehle: ssh share [--wake] | ssh join benutzer@host [SHA256:…] | '
+                             'ssh allow \'<schlüssel>\' | ssh run -- <befehl> | ssh | ssh pair | '
+                             'ssh set benutzer@host [port] | ssh info')
     elif cmd == 'off':
         deactivate()
         print('AUS: Wachhaltesperre gelöst; ausgewählte Apps werden vollständig beendet.')
@@ -754,7 +1071,7 @@ def main(args):
         PLIST.unlink(missing_ok=True)
         print('Remote-Dienst entfernt. Konfiguration bleibt erhalten.')
     else:
-        raise ValueError('Befehle: control | on | off | status | install | uninstall')
+        raise ValueError('Befehle: control | on | off | status | ssh | install | uninstall')
 
 
 if __name__ == '__main__':
