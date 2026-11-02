@@ -7,6 +7,7 @@ import io
 import json
 import os
 import shlex
+import socket
 from pathlib import Path
 import shutil
 import stat
@@ -276,10 +277,10 @@ class RemoteTests(unittest.TestCase):
 
     def test_ssh_connect_hands_over_to_ssh_when_reachable(self):
         r.ssh_set(['user@remote-mac.local', '2222'])
-        with patch.object(r.socket, 'create_connection') as reach, \
+        with patch.object(r, 'unreachable_reason', return_value=None) as reach, \
              patch.object(r.os, 'execv') as execv:
             r.ssh_connect()
-        reach.assert_called_once_with(('remote-mac.local', 2222), timeout=5)
+        reach.assert_called_once_with('remote-mac.local', 2222)
         argv = execv.call_args.args[1]
         self.assertEqual(execv.call_args.args[0], '/usr/bin/ssh')
         self.assertEqual(argv[:3], ['/usr/bin/ssh', '-p', '2222'])
@@ -287,16 +288,54 @@ class RemoteTests(unittest.TestCase):
 
     def test_ssh_connect_explains_unreachable_mac_and_never_execs(self):
         r.ssh_set(['user@remote-mac.local'])
-        with patch.object(r.socket, 'create_connection', side_effect=OSError('timed out')), \
+        with patch.object(r, 'unreachable_reason', return_value='keine Antwort innerhalb von 5 Sekunden'), \
              patch.object(r.os, 'execv') as execv:
             with self.assertRaises(ValueError) as caught:
                 r.ssh_connect()
         execv.assert_not_called()
         self.assertIn('workspace remote on', str(caught.exception))
+        self.assertIn('keine Antwort innerhalb von 5 Sekunden', str(caught.exception))
+        self.assertNotIn('Der Name wird nicht gefunden', str(caught.exception))      # kein Namensproblem: kein Namenshinweis
+
+    def test_the_reachability_probe_uses_apples_nc_so_names_resolve_like_they_do_for_ssh(self):
+        done = lambda code, out='', err='': subprocess.CompletedProcess([], code, stdout=out, stderr=err)
+        with patch.object(r.subprocess, 'run', return_value=done(0)) as run:
+            self.assertIsNone(r.unreachable_reason('Example-Remote-Mac.local', 22))
+        self.assertEqual(run.call_args.args[0], ['/usr/bin/nc', '-z', '-G', '5', '--', 'Example-Remote-Mac.local', '22'])
+        self.assertEqual(run.call_args.kwargs['timeout'], 15)                                    # nie hängen bleiben
+        for stderr, expected in [('nc: getaddrinfo: nodename nor servname provided, or not known\n',
+                                  'getaddrinfo: nodename nor servname provided, or not known'),
+                                 ('nc: connectx to h port 22 (tcp) failed: Connection refused\n', 'connectx to h port 22 (tcp) failed: Connection refused'),
+                                 ('', 'keine Antwort innerhalb von 5 Sekunden')]:          # nc -z meldet einen Zeitablauf nicht
+            with patch.object(r.subprocess, 'run', return_value=done(1, err=stderr)):
+                self.assertEqual(r.unreachable_reason('h', 22), expected)
+        for failure in (subprocess.TimeoutExpired('nc', 15), FileNotFoundError('/usr/bin/nc')):
+            with patch.object(r.subprocess, 'run', side_effect=failure):
+                self.assertTrue(r.unreachable_reason('h', 22))                                   # ein Grund, kein Absturz
+
+    def test_the_probe_really_connects_to_an_open_port_and_reports_a_closed_one(self):
+        with socket.socket() as server:
+            server.bind(('127.0.0.1', 0))
+            server.listen()
+            self.assertIsNone(r.unreachable_reason('127.0.0.1', server.getsockname()[1]))
+            port = server.getsockname()[1]
+        self.assertIsNotNone(r.unreachable_reason('127.0.0.1', port))                           # jetzt geschlossen
+        self.assertIn('nodename nor servname', r.unreachable_reason('gibt-es-nicht.invalid', 22))
+
+    def test_an_unknown_name_says_what_to_do_and_names_tailscale(self):
+        r.ssh_set(['user@remote-mac.local'])
+        with patch.object(r, 'unreachable_reason', return_value='getaddrinfo: nodename nor servname provided, or not known'):
+            with self.assertRaises(ValueError) as caught:
+                r.ssh_require_reachable(r.saved_ssh_target())
+        text = str(caught.exception)
+        self.assertIn('remote-mac.local:22 nicht erreichbar', text)
+        self.assertIn('Der Name wird nicht gefunden', text)
+        self.assertIn('Tailscale', text)
+        self.assertIn('100.x-Adresse', text)
 
     def test_ssh_run_is_a_non_interactive_one_shot(self):
         r.ssh_set(['user@remote-mac.local', '2222'])
-        with patch.object(r.socket, 'create_connection'), patch.object(r.os, 'execv') as execv:
+        with patch.object(r, 'unreachable_reason', return_value=None), patch.object(r.os, 'execv') as execv:
             r.main(['ssh', 'run', '--', 'uname', '-a'])
             run_argv = execv.call_args.args[1]
             r.main(['ssh'])
@@ -309,7 +348,7 @@ class RemoteTests(unittest.TestCase):
 
     def test_ssh_run_needs_a_command(self):
         r.ssh_set(['user@remote-mac.local'])
-        with patch.object(r.socket, 'create_connection'), patch.object(r.os, 'execv') as execv:
+        with patch.object(r, 'unreachable_reason', return_value=None), patch.object(r.os, 'execv') as execv:
             for words in (['ssh', 'run'], ['ssh', 'run', '--'], ['ssh', 'run', '  ']):
                 with self.assertRaises(ValueError, msg=repr(words)):
                     r.main(words)
@@ -317,7 +356,7 @@ class RemoteTests(unittest.TestCase):
 
     def test_ssh_pair_installs_the_key_with_the_saved_port(self):
         r.ssh_set(['user@remote-mac.local', '2222'])
-        with patch.object(r.socket, 'create_connection'), patch.object(r.os, 'execv') as execv:
+        with patch.object(r, 'unreachable_reason', return_value=None), patch.object(r.os, 'execv') as execv:
             r.main(['ssh', 'pair'])
             execv.assert_called_once_with(
                 '/usr/bin/ssh-copy-id',
@@ -327,7 +366,7 @@ class RemoteTests(unittest.TestCase):
 
     def test_ssh_run_and_pair_never_exec_when_unreachable(self):
         r.ssh_set(['user@remote-mac.local'])
-        with patch.object(r.socket, 'create_connection', side_effect=OSError('down')), \
+        with patch.object(r, 'unreachable_reason', return_value='down'), \
              patch.object(r.os, 'execv') as execv:
             for words in (['ssh', 'run', '--', 'true'], ['ssh', 'pair'], ['ssh']):
                 with self.assertRaises(ValueError, msg=repr(words)):

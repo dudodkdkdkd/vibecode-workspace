@@ -429,15 +429,36 @@ def ssh_set(args):
     print('Verbinden mit: workspace remote ssh')
 
 
+def unreachable_reason(host, port, timeout=5):
+    """None if host:port accepts a connection, otherwise a short reason.
+
+    Probed with Apple's nc, not with Python's socket: the python.org Python cannot resolve .local (Bonjour) names on some Macs
+    ("[Errno 8] nodename nor servname provided") although ssh, which comes next, resolves and connects without trouble. nc
+    resolves like ssh does, so "not reachable" now means what it says."""
+    try:
+        result = subprocess.run(['/usr/bin/nc', '-z', '-G', str(timeout), '--', host, str(port)],
+                                capture_output=True, text=True, timeout=timeout + 10)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return str(exc) or exc.__class__.__name__
+    if result.returncode == 0:
+        return None
+    lines = (result.stderr or result.stdout).strip().splitlines()
+    # Ein Zeitablauf meldet nc mit -z gar nichts.
+    return re.sub(r'^nc: ', '', lines[-1]) if lines else f'keine Antwort innerhalb von {timeout} Sekunden'
+
+
 def ssh_require_reachable(target):
     # A sleeping or unreachable Mac would otherwise just hang for a while.
-    try:
-        socket.create_connection((target['host'], target['port']), timeout=5).close()
-    except OSError as exc:
-        raise ValueError(
-            f'{target["host"]}:{target["port"]} nicht erreichbar ({exc}). Prüfen: Remote-Mac '
-            'an und wach (dort: workspace remote on), Entfernte Anmeldung aktiv (dort: '
-            'workspace remote ssh info), gleiches Netz bzw. Tailscale läuft.') from exc
+    reason = unreachable_reason(target['host'], target['port'])
+    if reason is None:
+        return
+    unknown_name = 'nodename nor servname' in reason or 'not known' in reason
+    raise ValueError(
+        f'{target["host"]}:{target["port"]} nicht erreichbar ({reason}). Prüfen: Remote-Mac '
+        'an und wach (dort: workspace remote on), Entfernte Anmeldung aktiv (dort: '
+        'workspace remote ssh info), gleiches Netz bzw. Tailscale läuft.' +
+        (' Der Name wird nicht gefunden: sind beide Macs im selben Netz? Unterwegs hilft Tailscale auf beiden Macs: '
+         'als Host dann den Tailscale-Namen oder die 100.x-Adresse des Remote-Macs verwenden.' if unknown_name else ''))
 
 
 def ssh_connect(remote=None):

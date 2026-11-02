@@ -147,6 +147,14 @@ Zwischen zwei Macs, jeweils mit dieser App: auf dem **Remote-Mac** *Diesen Mac f
 einfügen, Fingerprint prüfen, bestätigen; auf dem **Client-Mac** *Verbinden*. *Wach halten* startet auch die gewählten Apps
 (wie `remote on`); ohne Wachhalten kann der Remote-Mac einschlafen und ist dann nicht erreichbar.
 
+**Unterwegs:** `.local`-Namen und die Heimnetz-Adressen (192.168.…) gibt es nur im selben Netz. Von außerhalb braucht es
+[Tailscale](https://tailscale.com) auf **beiden** Macs (gleiches Konto): als Host in der `join`-Zeile dann den Tailscale-Namen oder die
+100.x-Adresse des Remote-Macs verwenden. Tailscale legt nur eine private Verbindung zwischen deinen eigenen Geräten an. Das normale Internet
+läuft weiter über die eigene Leitung jedes Macs (außer du schaltest ausdrücklich einen „Exit Node“ ein). Die Agenten laufen auf dem
+Remote-Mac und nutzen dessen Internetanschluss, sie verlieren also nichts. Der Remote-Mac muss dafür wach sein (Wach halten).
+Meldet `join` „nicht erreichbar … nodename nor servname“, wird der Name nicht gefunden (anderes Netz): dann die IP-Adresse des Remote-Macs
+nehmen (`ipconfig getifaddr en0`, bei WLAN `en1`) oder Tailscale.
+
 Auch ohne Fenster:
 
 ```bash

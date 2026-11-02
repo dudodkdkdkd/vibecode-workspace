@@ -56,6 +56,7 @@ To take access away again, delete that key's line from `~/.ssh/authorized_keys` 
    |------|---------|------|
    | 0 | `✔ Verbunden` | do the task with `ssh run` |
    | 2 | not authorized yet; it printed `workspace remote ssh allow '<key>'` | give that line to the user for the remote Mac (Role A step 4), then `join` again |
+   | 1, `nicht erreichbar … nodename nor servname` | the name did not resolve (another network, or no Bonjour across subnets). The probe is `/usr/bin/nc` on purpose: python.org's Python cannot resolve `.local` names on some Macs (`[Errno 8]`) while `ssh` can, so never switch it back to `socket.create_connection` | use the remote Mac's IP (`ipconfig getifaddr en0`, Wi-Fi `en1`) or its Tailscale name / 100.x address in the `join` line |
    | 1, `nicht erreichbar` | remote Mac asleep, Remote Login off, other network | ask the user to run `share` on the remote Mac; away from home both Macs need Tailscale and the host must be its Tailscale name/IP, not `*.local` |
    | 1, `stimmt NICHT mit dem Fingerprint überein` | wrong machine or someone in between | **stop**, tell the user, do not retry or bypass |
    | 1, `Host-Schlüssel unbekannt oder geändert` | host key missing or changed | ask for a fresh `join` line from `share`; never edit `known_hosts` or use `StrictHostKeyChecking=no` |
