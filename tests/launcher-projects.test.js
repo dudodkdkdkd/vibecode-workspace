@@ -3,6 +3,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
@@ -138,4 +139,152 @@ test('without flags the selection dialog still runs and stores the last selectio
     assert.ok(log(files).includes('DIALOG'));
     assert.deepEqual(folders(files), [files.a]);
     assert.equal(fs.readFileSync(files.last, 'utf8'), `${files.a}\n`);
+});
+
+// ------------------------------------------------------------------ --summary und SSH-Hosts
+
+function withHosts(files) {
+    // Ein falsches remote-hosts.py meldet, ob und wie die Host-Suche aufgerufen wurde.
+    files.argsFile = path.join(files.dir, 'hosts-args.txt');
+    fs.writeFileSync(path.join(files.dir, 'remote-hosts.json'),
+        '{"version": 1, "hosts": [{"host": "spark", "root": "~/p"}]}');
+    fs.writeFileSync(path.join(files.dir, 'remote-hosts.py'), `import pathlib, sys
+pathlib.Path(sys.argv[0]).with_name('hosts-args.txt').write_text(' '.join(sys.argv[3:]))   # argv: Skript, discover, Konfigordner, Flags …
+print('repo [SSH: spark]\\tvscode-remote://ssh-remote+spark/home/example/repo')
+`);
+    return files;
+}
+
+const summary = (files) => JSON.parse(launch(files, '--summary').stdout);
+
+test('--summary: eine Statuszeile mit Anzahl, auch im Singular und ohne Projekte', (t) => {
+    const files = fixture(t);
+    assert.deepEqual(summary(files), { text: '2 Projekte eingerichtet', level: 'ok' });
+    fs.writeFileSync(path.join(files.dir, 'projects.tsv'), `A\t${files.a}\n`);
+    assert.deepEqual(summary(files), { text: '1 Projekt eingerichtet', level: 'ok' });
+    fs.writeFileSync(path.join(files.dir, 'projects.tsv'), `A\t${path.join(files.dir, 'weg')}\n`);
+    assert.deepEqual(summary(files), { text: 'Keine Projekte gefunden: Repository-Ordner einrichten', level: 'warn' });
+    assert.ok(!fs.existsSync(files.workspace));                       // reine Auskunft: nichts wird gestartet
+});
+
+test('--summary zählt Remote-Repositories mit', (t) => {
+    const files = withHosts(fixture(t));
+    assert.deepEqual(summary(files), { text: '3 Projekte eingerichtet (davon 1 per SSH)', level: 'ok' });
+});
+
+test('Auskünfte befragen nie SSH-Hosts, ein normaler Start schon', (t) => {
+    const files = withHosts(fixture(t));
+    for (const flag of ['--summary', '--list-projects', '--check']) {
+        fs.rmSync(files.argsFile, { force: true });
+        assert.equal(launch(files, flag).status, 0, flag);
+        assert.equal(fs.readFileSync(files.argsFile, 'utf8'), '--cached', flag);   // nur der Cache
+    }
+    fs.rmSync(files.argsFile, { force: true });
+    assert.equal(launch(files, '--project', 'A').status, 0);
+    assert.equal(fs.readFileSync(files.argsFile, 'utf8'), '');                      // live suchen
+});
+
+// ------------------------------------------------------------------ lokale Suchordner
+
+function withSearchFolder(files, folders) {
+    fs.copyFileSync(path.join(root, 'workspaces', 'local-folders.py'), path.join(files.dir, 'local-folders.py'));
+    files.search = path.join(files.dir, 'search');
+    for (const name of ['x', 'y']) fs.mkdirSync(path.join(files.search, name, '.git'), { recursive: true });
+    fs.mkdirSync(path.join(files.search, 'node_modules', 'pkg', '.git'), { recursive: true });
+    fs.writeFileSync(path.join(files.dir, 'search-folders.json'),
+        JSON.stringify({ version: 1, folders: (folders || [files.search]).map((folder) => ({ path: folder })) }));
+    return files;
+}
+
+test('Suchordner: Repositories darin erscheinen in der Projektliste, Abhängigkeitsordner nicht', (t) => {
+    const files = withSearchFolder(fixture(t));
+    const result = launch(files, '--list-projects');
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(result.stdout.trim().split('\n'), ['A', 'B', 'x', 'y']);
+    assert.deepEqual(summary(files), { text: '4 Projekte eingerichtet', level: 'ok' });
+});
+
+test('Suchordner: ein Projekt daraus lässt sich per --project starten', (t) => {
+    const files = withSearchFolder(fixture(t));
+    assert.equal(launch(files, '--project', 'y').status, 0);
+    assert.deepEqual(JSON.parse(fs.readFileSync(files.workspace, 'utf8')).folders.map((f) => f.path),
+        [path.join(files.search, 'y')]);
+});
+
+test('Suchordner: ein fehlender Ordner wird übersprungen, ein kaputtes File bricht den Start nicht', (t) => {
+    const files = withSearchFolder(fixture(t), [path.join(os.tmpdir(), 'vibecode-gibt-es-nicht')]);
+    assert.deepEqual(launch(files, '--list-projects').stdout.trim().split('\n'), ['A', 'B']);
+    fs.writeFileSync(path.join(files.dir, 'search-folders.json'), '{kaputt');
+    const broken = launch(files, '--list-projects');
+    assert.equal(broken.status, 0);
+    assert.deepEqual(broken.stdout.trim().split('\n'), ['A', 'B']);                // eingetragene Projekte bleiben
+    assert.match(broken.stderr, /Suchordner konnten nicht gelesen werden/);
+});
+
+test('Suchordner: ohne search-folders.json ändert sich nichts', (t) => {
+    const files = fixture(t);
+    fs.copyFileSync(path.join(root, 'workspaces', 'local-folders.py'), path.join(files.dir, 'local-folders.py'));
+    assert.equal(launch(files, '--list-projects').stdout, 'A\nB\n');
+});
+
+// ------------------------------------------------------------------ Presets pro Repository
+
+function savePreset(files, repo, preset) {
+    fs.writeFileSync(path.join(files.dir, 'preset.json'), JSON.stringify(preset));
+    const result = spawnSync('/usr/bin/osascript', ['-l', 'JavaScript', path.join(root, 'workspaces', 'presets.js'),
+        path.join(root, 'workspaces'), 'save', files.dir, repo, path.join(files.dir, 'preset.json')], { encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+}
+
+// VS Code nennt jedes Terminal "<Projekt> · <Name>"; die Tests vergleichen den Namen aus dem Preset.
+const terminalsOf = (files, group) => JSON.parse(fs.readFileSync(files.workspace, 'utf8'))
+    .settings['vibecodeWorkspace.autoStartTerminals'].filter((terminal) => terminal.group === group)
+    .map((terminal) => Object.assign({}, terminal, { name: terminal.name.replace(`${group} · `, '') }));
+
+test('--list-paths gibt Name und Pfad genau so aus, wie der Launcher sie nachschlägt', (t) => {
+    const files = fixture(t);
+    const result = launch(files, '--list-paths');
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, `A\t${files.a}\nB\t${files.b}\n`);
+});
+
+test('Presets: der echte Launcher startet die Terminals und Tabs aus einem gespeicherten Preset', (t) => {
+    const files = fixture(t);
+    fs.mkdirSync(path.join(files.a, 'frontend'));
+    // Ohne Preset gelten die fünf Standard-Terminals.
+    assert.equal(launch(files, '--project', 'A').status, 0);
+    assert.deepEqual(terminalsOf(files, 'A').map((terminal) => terminal.name),
+        ['Frontend', 'Storybook', 'Claude', 'Codex 1', 'Codex 2']);
+
+    savePreset(files, files.a, {
+        terminals: [{ name: 'Dev', type: 'Eigener Befehl', prompt: 'npm run dev', cwd: 'frontend' },
+            { name: 'Agent', type: 'Claude Code', prompt: 'Räum "auf"', cwd: '' }],
+        urls: ['http://localhost:5173'],
+    });
+    assert.equal(launch(files, '--project', 'A').status, 0);
+    const terminals = terminalsOf(files, 'A');
+    assert.deepEqual(terminals.map((terminal) => terminal.name), ['Dev', 'Agent']);
+    assert.equal(terminals[0].command, 'npm run dev');
+    assert.equal(terminals[0].cwd, `${files.a}/frontend`);
+    assert.equal(terminals[1].cwd, files.a);
+    assert.ok(terminals[1].command.includes("exec claude --dangerously-skip-permissions -- 'Räum \"auf\"'"));
+    assert.deepEqual(JSON.parse(fs.readFileSync(files.workspace, 'utf8')).settings['vibecodeWorkspace.autoOpenUrls'],
+        ['http://localhost:5173']);
+});
+
+test('Presets: ein anderes Repository behält seine Standard-Terminals', (t) => {
+    const files = fixture(t);
+    savePreset(files, files.a, { terminals: [{ name: 'Nur eins', type: 'Shell', prompt: '', cwd: '' }], urls: [] });
+    assert.equal(launch(files, '--project', 'A', '--project', 'B').status, 0);
+    assert.deepEqual(terminalsOf(files, 'A').map((terminal) => terminal.name), ['Nur eins']);
+    assert.equal(terminalsOf(files, 'B').length, 5);
+});
+
+test('Presets: ein zurückgesetztes Preset bringt die Standard-Terminals zurück', (t) => {
+    const files = fixture(t);
+    savePreset(files, files.a, { terminals: [{ name: 'Nur eins', type: 'Shell', prompt: '', cwd: '' }], urls: [] });
+    spawnSync('/usr/bin/osascript', ['-l', 'JavaScript', path.join(root, 'workspaces', 'presets.js'),
+        path.join(root, 'workspaces'), 'reset', files.dir, files.a], { encoding: 'utf8' });
+    assert.equal(launch(files, '--project', 'A').status, 0);
+    assert.equal(terminalsOf(files, 'A').length, 5);
 });

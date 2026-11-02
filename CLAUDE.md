@@ -20,15 +20,16 @@ The short version:
 - **Launch the editor via `open -a "<bundle>.app"`**, never by calling the `code` binary
   directly; the direct call re-registers the app with LaunchServices and adds a new Dock
   icon on every start.
-- **Never copy a starter.** The root `Launch Workspace.command` and
-  `Setup Workspace.command` are six-line forwarders into `workspaces/`; the logic exists
-  once. Desktop starters are Finder *aliases*, never copies.
+- **Never copy a starter.** The only root starter is `VibeCode Workspace.command`, a short forwarder
+  into `core/`; the logic exists once. The launcher and setup wizard are reached through
+  the app window (or `./VibeCode\ Workspace.command launch | setup`). Desktop starters are Finder
+  *aliases*, never copies; the app creates them itself for saved workspaces.
 - **Run `node --test tests/terminals.test.js`.** The tests drive the real JXA wizard with
   scripted dialog answers, so adding a dialog breaks them and the answers must be updated.
 
 ## Base app (core/)
 
-Before changing `core/`, a `module.json`, `VibeCode.command` or the launcher's `--project` /
+Before changing `core/`, a `module.json`, `VibeCode Workspace.command` or the launcher's `--project` /
 `--list-projects` flags, read `.agents/skills/vibecode-core/SKILL.md`. It covers how the
 Desktop shortcuts (Finder aliases) work, the invariants behind them, and the JXA pitfalls
 that already cost failed runs (`$()` instead of `null`, button constants are strings).
@@ -45,7 +46,8 @@ prompt. Never authorize a key (`allow`) the user did not explicitly ask you to a
 
 ## Layout
 
-- `VibeCode.command` + `core/` — base app: main window, saved workspaces, Desktop shortcuts
+- `VibeCode Workspace.command` + `core/` — base app (the root file is the app; the same-named file in
+  `workspaces/` is the launcher underneath): main window, saved workspaces, Desktop shortcuts
 - `workspaces/` — launcher, setup wizard (`terminal-setup.js`), auto-open-tabs extension
 - `remote/` — keep-awake controller and SSH helper (client Mac → remote Mac)
 - `local-dev/` — local AI provider profiles

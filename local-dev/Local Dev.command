@@ -6,4 +6,4 @@ set -u
 SCRIPT_FILE="${0:A}"
 SCRIPT_DIR="${SCRIPT_FILE:h}"
 
-exec /bin/zsh "$SCRIPT_DIR/../Local Dev.command" "$@"
+exec /bin/zsh "$SCRIPT_DIR/launcher.zsh" "$@"

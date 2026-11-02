@@ -158,7 +158,7 @@ fi
 
 if [[ "$setup_mode" == "Remote-Verbindung einrichten" ]]; then
   if python3 "$SCRIPT_DIR/ssh-setup.py" "$CONFIG_DIR"; then
-    osascript -e 'display notification "SSH-Zugang und Repository-Suche sind eingerichtet. Jetzt Launch Workspace öffnen." with title "Remote-Verbindung bereit"'
+    osascript -e 'display notification "SSH-Zugang und Repository-Suche sind eingerichtet. Jetzt die VibeCode-App öffnen." with title "Remote-Verbindung bereit"'
   else
     setup_exit_code=$?
     [[ "$setup_exit_code" == "130" ]] || exit "$setup_exit_code"
@@ -186,7 +186,7 @@ if [[ "$setup_mode" == "Remote-Host hinzufügen" ]]; then
   if [[ "$SETUP_NONINTERACTIVE" == "false" ]]; then
     osascript - "$remote_count" <<'HOST_APPLESCRIPT'
 on run argv
-    display notification (item 1 of argv) & " Remote-Repositories verfügbar. Jetzt Launch Workspace öffnen und Projekte auswählen." with title "Remote-Host gespeichert"
+    display notification (item 1 of argv) & " Remote-Repositories verfügbar. Jetzt die VibeCode-App öffnen und Projekte auswählen." with title "Remote-Host gespeichert"
 end run
 HOST_APPLESCRIPT
   fi

@@ -18,6 +18,11 @@ across (it is also copied to the clipboard, so Universal Clipboard usually does 
 W="$(git rev-parse --show-toplevel)/workspaces/workspace"   # do not assume `workspace` is on PATH
 ```
 
+The user can do all of this without an agent in the app window (Bereich **SSH** → *Diesen Mac freigeben…* /
+*Neue Verbindung…*). Same commands underneath, so what follows applies to both. For a window-less check,
+`ssh show` prints the saved target as JSON and `ssh allow --check '<key>'` prints name, fingerprint and whether the key
+is already authorized, without writing anything.
+
 ## Role A — this Mac grants access ("gib Zugriff frei")
 
 1. Run `"$W" remote ssh share`. Add `--wake` to also keep the Mac awake — ask first: it is

@@ -15,7 +15,7 @@ changing behaviour — several of these look like obvious one-liners and are not
 |-------|------|
 | Launcher (source of truth) | `workspaces/VibeCode Workspace.command` |
 | Project checkbox dialog (JXA/AppKit) | `workspaces/project-selection.js` |
-| Root starters (forwarders) | `Launch Workspace.command`, `Setup Workspace.command` |
+| Only root starter (forwarder into `core/`) | `VibeCode Workspace.command` — reaches the launcher as `launch`, the wizard as `setup` |
 | Setup wizard (JXA dialogs) | `workspaces/terminal-setup.js` |
 | Auto-open-tabs extension | `workspaces/vscode-extension/auto-open-tabs/` |
 | Per-project config (user data) | `~/.config/vibecode-workspace/terminals.json` |
@@ -24,11 +24,12 @@ changing behaviour — several of these look like obvious one-liners and are not
 
 ## Rules that always apply
 
-- **Never duplicate a starter.** The root `.command` files are six-line forwarders
-  (`exec "${0:A:h}/workspaces/..." "$@"`) so the logic exists exactly once. They used to
-  be full copies that had to be kept in sync by hand — do not reintroduce that. Desktop
-  starters are Finder *aliases*; copying a forwarder to the Desktop breaks it, because it
-  resolves the module path relative to its own location.
+- **Never duplicate a starter.** `VibeCode Workspace.command` is the only root starter and a short
+  forwarder (`exec python3 "${0:A:h}/core/vibecode.py" "$@"`) so the logic exists exactly once.
+  Older root starters (`Launch Workspace.command`, `Setup Workspace.command`, `Local Dev.command`)
+  were removed on purpose; they used to be full copies that had to be kept in sync by hand —
+  do not reintroduce them. Desktop starters are Finder *aliases*; copying a forwarder to the
+  Desktop breaks it, because it resolves the module path relative to its own location.
 - **Run the tests after any change:** `node --test tests/*.test.js` (the launcher flags have their own
   `tests/launcher-projects.test.js`).
   They drive the real JXA code with scripted dialog answers, so **adding a dialog to the
@@ -69,6 +70,13 @@ changing behaviour — several of these look like obvious one-liners and are not
 ## Flags the base app relies on
 
 - `--list-projects` prints the project names the selection dialog would show (no side effects).
+- `--list-paths` prints `name<TAB>path` exactly as the launcher looks projects up. `terminals.json` (presets) is keyed by that
+  path, so anything writing presets must use these paths, not paths it computed itself.
+- `--summary` prints one `{"text", "level"}` status line for the app.
+- All read-only flags (`--check`, `--list-projects`, `--list-paths`, `--summary`) must stay in the `--cached` list for the
+  remote scan, or opening the app window waits on every unreachable SSH host.
+- Local search folders (`search-folders.json`, found by `local-folders.py discover`) are added before the sibling scan and
+  on every flag, including the read-only ones: a local scan is fast and does not touch the network.
 - `--project NAME` (repeatable) opens exactly those projects **without the dialog** and does not touch
   `last-selection.txt`. Unknown names: partial → notification and continue; none → alert, exit 1.
 - The EXIT trap shows a generic "konnte nicht gestartet werden" alert on every non-zero exit. A failure

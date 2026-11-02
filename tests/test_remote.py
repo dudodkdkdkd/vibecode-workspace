@@ -4,6 +4,7 @@ import datetime as dt
 import getpass
 import importlib.util
 import io
+import json
 import os
 from pathlib import Path
 import shutil
@@ -545,6 +546,19 @@ class RemoteTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.out(r.ssh_share, ['--wirklich'])
             activate.assert_called_once_with()
+
+    def test_summary_is_one_json_line_for_the_window(self):
+        self.c.update(apps=['Codex', 'Claude'])
+        r.write('config.json', self.c)
+        for active, text, level in [(True, 'Wachhalten AN · Apps: Codex, Claude', 'ok'),
+                                    (False, 'Wachhalten AUS · Apps: Codex, Claude', 'off')]:
+            with patch.object(r, 'wake_active', return_value=active):
+                shown = self.out(r.summary)
+            self.assertEqual(json.loads(shown), {'text': text, 'level': level})
+        self.c.update(apps=[])
+        r.write('config.json', self.c)
+        with patch.object(r, 'wake_active', return_value=False):
+            self.assertIn('keine Apps gewählt', json.loads(self.out(r.summary))['text'])
 
     def test_app_error_does_not_block_control_terminal(self):
         self.c.update(apps=['Codex', 'Claude'], open_control_terminal=True)

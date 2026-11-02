@@ -313,6 +313,19 @@ if [[ -f "$SAVED_PROJECTS" ]]; then
   done < "$SAVED_PROJECTS"
 fi
 
+# Suchordner: Git-Repositories in den Ordnern, die der Benutzer in der VibeCode-App hinzugefügt hat.
+# Rein lokal und schnell, deshalb auch bei --list-projects und --summary.
+if [[ -f "$CONFIG_DIR/search-folders.json" && -f "$SCRIPT_DIR/local-folders.py" ]]; then
+  if search_projects="$(python3 "$SCRIPT_DIR/local-folders.py" discover "$CONFIG_DIR")"; then
+    while IFS=$'\t' read -r search_name search_path; do
+      [[ -n "$search_name" && -n "$search_path" ]] || continue
+      add_project "$search_name" "$search_path"
+    done <<< "$search_projects"
+  else
+    print -u2 'Suchordner konnten nicht gelesen werden. Eingetragene Projekte bleiben verfügbar.'
+  fi
+fi
+
 # Bei jedem Start neue Git-Repositories direkt in den bekannten Elternordnern
 # ergänzen. .git darf auch eine Datei sein (Git-Worktree); normale Ordner und
 # tiefer verschachtelte Repositories werden nicht automatisch aufgenommen.
@@ -327,7 +340,8 @@ done
 # reine Projektlisten lesen nur den Cache; normale Starts warten nicht auf Passwortdialoge.
 if [[ -f "$CONFIG_DIR/remote-hosts.json" && -f "$SCRIPT_DIR/remote-hosts.py" ]]; then
   remote_scan_args=()
-  [[ "${1:-}" != "--check" && "${1:-}" != "--list-projects" ]] || remote_scan_args+=(--cached)
+  # Reine Auskünfte (für Diagnose und die VibeCode-App) befragen keine SSH-Hosts: nur der Cache.
+  [[ "${1:-}" != "--check" && "${1:-}" != "--list-projects" && "${1:-}" != "--list-paths" && "${1:-}" != "--summary" ]] || remote_scan_args+=(--cached)
   if python3 "$SCRIPT_DIR/remote-hosts.py" discover "$CONFIG_DIR" "${remote_scan_args[@]}" > "$TMP_REMOTE_PROJECTS"; then
     while IFS=$'\t' read -r remote_name remote_path; do
       [[ -n "$remote_name" && -n "$remote_path" ]] || continue
@@ -361,13 +375,41 @@ if [[ "${1:-}" == "--list-projects" ]]; then
   exit 0
 fi
 
+# Name und Pfad jedes Projekts, genau wie der Launcher sie nachschlägt (Presets sind pro Pfad gespeichert).
+if [[ "${1:-}" == "--list-paths" ]]; then
+  if [[ -s "$TMP_CONFIG" ]]; then cat "$TMP_CONFIG"; fi
+  exit 0
+fi
+
+# Eine Statuszeile für die VibeCode-App: {"text", "level"} (level: ok | warn | off).
+if [[ "${1:-}" == "--summary" ]]; then
+  total=0
+  remote_total=0
+  if [[ -s "$TMP_NAMES" ]]; then
+    while IFS= read -r project_name; do
+      (( total += 1 ))
+      if [[ "$project_name" == *"[SSH: "* ]]; then (( remote_total += 1 )); fi
+    done < "$TMP_NAMES"
+  fi
+  projects_word="Projekte"
+  if (( total == 1 )); then projects_word="Projekt"; fi
+  if (( total == 0 )); then
+    print -r -- '{"text": "Keine Projekte gefunden: Repository-Ordner einrichten", "level": "warn"}'
+  elif (( remote_total > 0 )); then
+    print -r -- "{\"text\": \"$total $projects_word eingerichtet (davon $remote_total per SSH)\", \"level\": \"ok\"}"
+  else
+    print -r -- "{\"text\": \"$total $projects_word eingerichtet\", \"level\": \"ok\"}"
+  fi
+  exit 0
+fi
+
 # Ohne gültige Konfiguration auf das separate Setup-Programm verweisen.
 if [[ ! -s "$TMP_NAMES" ]]; then
   if [[ "${1:-}" == "--remote-workspace" ]]; then
     print -u2 'Remote: zuerst Repositories im Workspace-Setup einrichten.'
     exit 1
   fi
-  osascript -e 'display alert "Keine Repositories verfügbar" message "Öffne ‚Setup Workspace.command‘ und füge lokale Ordner, Remote-Repositories oder einen Remote-Host hinzu. Bei bereits eingerichteten Hosts: SSH-Verbindung und Suchordner prüfen; Details stehen im Terminal." as informational'
+  osascript -e 'display alert "Keine Repositories verfügbar" message "Öffne die App „VibeCode Workspace“, öffne in der Übersicht die Einrichtung und füge lokale Ordner, Remote-Repositories oder einen Remote-Host hinzu. Bei bereits eingerichteten Hosts: SSH-Verbindung und Suchordner prüfen; Details stehen im Terminal." as informational'
   LAUNCH_COMPLETED=true
   exit 0
 fi

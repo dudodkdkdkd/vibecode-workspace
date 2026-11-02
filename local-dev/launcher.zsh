@@ -1753,7 +1753,7 @@ provider_is_active() {
 
 show_help() {
     cat <<'EOF'
-Verwendung: Local Dev.command [Aktion]
+Verwendung: ./VibeCode\ Workspace.command local [Aktion]
 
 Ohne Argument       Toggle: Wenn aus -> starten; wenn an -> stoppen & Speicher freigeben
 --toggle             Explizit als Ein/Aus-Schalter ausfuehren

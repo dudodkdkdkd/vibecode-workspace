@@ -457,6 +457,20 @@ def ssh_pair():
     os.execv(command[0], command)
 
 
+def summary():
+    """One status line for the VibeCode window: {"text", "level"}."""
+    active = wake_active()
+    apps = ', '.join(config()['apps']) or 'keine Apps gewählt'
+    print(json.dumps({'text': f'Wachhalten {"AN" if active else "AUS"} · Apps: {apps}',
+                      'level': 'ok' if active else 'off'}, ensure_ascii=False))
+
+
+def ssh_show():
+    """The saved target as JSON ({"target": null} if none), for the VibeCode window."""
+    target = saved_ssh_target() if read(SSH_FILE) is not None else None
+    print(json.dumps({'target': target}))
+
+
 def ssh_listening(port=22):
     try:
         socket.create_connection(('127.0.0.1', port), timeout=1).close()
@@ -567,13 +581,18 @@ def own_public_key():
 
 def ssh_allow(args):
     """Authorize ONE public key on THIS Mac (run on the remote Mac). Shows the fingerprint first."""
-    key, fingerprint = checked_public_key(' '.join(arg for arg in args if arg != '--yes'))
+    key, fingerprint = checked_public_key(' '.join(arg for arg in args if arg not in ('--yes', '--check')))
     path = SSH_DIR / 'authorized_keys'
     blob = key.split()[1]
-    if path.exists() and any(blob in line.split() for line in path.read_text().splitlines()):
+    known = path.exists() and any(blob in line.split() for line in path.read_text().splitlines())
+    name = key.split(' ', 2)[2] if key.count(' ') >= 2 else '(ohne Name)'
+    if '--check' in args:
+        # Für das Hauptfenster: Name und Fingerprint zum Bestätigen zeigen, nichts schreiben.
+        print(json.dumps({'name': name, 'fingerprint': fingerprint, 'known': known}, ensure_ascii=False))
+        return
+    if known:
         print(f'Schon freigegeben: {fingerprint}')
         return
-    name = key.split(' ', 2)[2] if key.count(' ') >= 2 else '(ohne Name)'
     print(f'Zugriff auf diesen Mac für: {name}\nFingerprint: {fingerprint}')
     if '--yes' not in args:
         if not sys.stdin.isatty():
@@ -1052,6 +1071,8 @@ def main(args):
             ssh_join(args[2:])
         elif sub == 'allow':
             ssh_allow(args[2:])
+        elif sub == 'show':
+            ssh_show()
         elif sub == 'set':
             ssh_set(args[2:])
         elif sub == 'info':
@@ -1060,6 +1081,8 @@ def main(args):
             raise ValueError('ssh-Befehle: ssh share [--wake] | ssh join benutzer@host [SHA256:…] | '
                              'ssh allow \'<schlüssel>\' | ssh run -- <befehl> | ssh | ssh pair | '
                              'ssh set benutzer@host [port] | ssh info')
+    elif cmd == 'summary':
+        summary()
     elif cmd == 'off':
         deactivate()
         print('AUS: Wachhaltesperre gelöst; ausgewählte Apps werden vollständig beendet.')

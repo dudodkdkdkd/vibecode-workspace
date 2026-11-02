@@ -256,7 +256,7 @@ def wizard(config, ssh_dir=None, input_fn=input, output=print):
         paths = sorted(set(paths + previous.get('paths', [])))
     old[host] = {'root': normalized_root, 'paths': paths}
     remote_hosts.write_json(config / 'remote-repositories.json', {'version': 1, 'hosts': old})
-    output(f'Fertig: {len(paths)} Repositories verfügbar. Jetzt „Launch Workspace.command“ starten.\nAgenten und Browser-Tabs lassen sich über „Terminals ändern“ anpassen.')
+    output(f'Fertig: {len(paths)} Repositories verfügbar. Jetzt die App „VibeCode Workspace“ öffnen.\nAgenten und Browser-Tabs lassen sich über „Terminals ändern“ anpassen.')
     return host
 
 

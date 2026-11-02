@@ -175,5 +175,24 @@ raise SystemExit(result.returncode)
             self.assertEqual(cache.read_text(), contents)
 
 
+    def test_remove_host_forgets_host_and_cache_but_only_that_host(self):
+        r.add_host(self.config, 'spark', '~/p')
+        r.add_host(self.config, 'other', '/srv')
+        r.write_json(self.config / 'remote-repositories.json', {'version': 1, 'hosts': {
+            'spark': {'root': '~/p', 'paths': ['/h/a']}, 'other': {'root': '/srv', 'paths': ['/srv/b']}}})
+        r.remove_host(self.config, 'spark')
+        self.assertEqual([entry['host'] for entry in r.hosts(self.config)], ['other'])
+        self.assertEqual(list(r.snapshot(self.config)), ['other'])
+        with self.assertRaisesRegex(ValueError, 'nicht eingerichtet'):
+            r.remove_host(self.config, 'spark')
+
+    def test_remove_host_never_replaces_a_corrupt_file(self):
+        self.config.mkdir()
+        (self.config / 'remote-hosts.json').write_text('{"version": 9}')
+        with self.assertRaises(ValueError):
+            r.remove_host(self.config, 'spark')
+        self.assertEqual((self.config / 'remote-hosts.json').read_text(), '{"version": 9}')
+
+
 if __name__ == '__main__':
     unittest.main()

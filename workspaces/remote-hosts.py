@@ -104,6 +104,19 @@ def add_host(config, host, root):
     write_json(config / 'remote-hosts.json', {'version': 1, 'hosts': entries})
 
 
+def remove_host(config, host):
+    """Forget a host and its cached repositories; never touches the server or ~/.ssh/config."""
+    entries = hosts(config)
+    kept = [entry for entry in entries if entry['host'] != host]
+    if len(kept) == len(entries):
+        raise ValueError(f'Dieser SSH-Host ist nicht eingerichtet: {host}')
+    cache = snapshot(config)
+    write_json(config / 'remote-hosts.json', {'version': 1, 'hosts': kept})
+    if host in cache:
+        del cache[host]
+        write_json(config / 'remote-repositories.json', {'version': 1, 'hosts': cache})
+
+
 def scan(host, root, interactive=False):
     # SSH runs the remote command through a shell; quote its one variable argument.
     # The scanner itself goes over stdin and requires only POSIX sh and find remotely.
@@ -127,6 +140,17 @@ def scan(host, root, interactive=False):
             if valid_path(path):
                 paths.append(path)
     return sorted(set(paths)), result.returncode == 3
+
+
+def listing(config):
+    """Configured hosts with the number of repositories found last time (no SSH connection)."""
+    cache = snapshot(config)
+    result = []
+    for entry in hosts(config):
+        known = cache.get(entry['host'], {})
+        count = len(known.get('paths', [])) if known.get('root') == entry['root'] else 0
+        result.append({'host': entry['host'], 'root': entry['root'], 'repos': count})
+    return result
 
 
 def discover(config, cached=False, interactive=False, output=sys.stderr):
@@ -173,6 +197,11 @@ def main():
     add.add_argument('config', type=Path)
     add.add_argument('host')
     add.add_argument('root', nargs='?', default='~')
+    removed = commands.add_parser('remove')
+    removed.add_argument('config', type=Path)
+    removed.add_argument('host')
+    listed = commands.add_parser('list')
+    listed.add_argument('config', type=Path)
     find = commands.add_parser('discover')
     find.add_argument('config', type=Path)
     find.add_argument('--cached', action='store_true')
@@ -180,6 +209,10 @@ def main():
     args = parser.parse_args()
     if args.command == 'add':
         add_host(args.config, args.host, args.root)
+    elif args.command == 'remove':
+        remove_host(args.config, args.host)
+    elif args.command == 'list':
+        print(json.dumps(listing(args.config), ensure_ascii=False))
     else:
         for name, uri in discover(args.config, args.cached, args.interactive):
             print(f'{name}\t{uri}')

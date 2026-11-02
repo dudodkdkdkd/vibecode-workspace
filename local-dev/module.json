@@ -1,6 +1,7 @@
 {
   "entries": [
-    {"id": "local", "title": "Local Dev: MLX/Ollama mit Agent starten",
-     "run": ["/bin/zsh", "{module}/launcher.zsh"], "menu": true}
+    {"id": "local", "order": 40, "title": "Local Dev: MLX/Ollama mit Agent starten",
+     "run": ["/bin/zsh", "{module}/launcher.zsh"], "menu": true,
+     "status": ["python3", "{module}/summary.py"]}
   ]
 }

@@ -1,6 +1,6 @@
 # Local Dev – konfigurationsbasierter KI-Launcher
 
-Ein Doppelklick auf `Local Dev.command` zeigt zuerst einen Baum der konfigurierten Hostings, lokal erkannten Modelle und installierten/kompatiblen CLIs. Danach waehlt man Repository, Hosting, Modell und CLI. Die drei aktiven Werte aus der Konfiguration sind Vorauswahlen:
+Die VibeCode-App (Übersicht → **Local Dev**) oder `./VibeCode\ Workspace.command local` zeigt zuerst einen Baum der konfigurierten Hostings, lokal erkannten Modelle und installierten/kompatiblen CLIs. Danach waehlt man Repository, Hosting, Modell und CLI. Die drei aktiven Werte aus der Konfiguration sind Vorauswahlen:
 
 ```text
 provider → model → framework
@@ -18,7 +18,7 @@ Vor dem Start kann der Launcher speicherintensive Apps kontrolliert beenden. Im 
 
 ## Schnellstart
 
-1. Im Finder auf `Local Dev.command` rechtsklicken, **Alias erzeugen** wählen und den Alias auf den Schreibtisch ziehen.
+1. In der Übersicht bei **Local Dev** auf **Öffnen** klicken, oder `./VibeCode\ Workspace.command local` im Terminal ausführen.
 2. Den Alias doppelklicken.
 3. Im Startdialog das Repository, Hosting, Modell und eine installierte kompatible CLI wählen. Bei nur einer Option wird automatisch gewählt.
 4. Der Launcher startet den Provider, prüft den Health-Endpunkt und öffnet die CLI im Repository.
@@ -30,7 +30,7 @@ Beim ersten Start wird automatisch `local-dev/local-ai.json` aus der Vorlage erz
 Provider, Modell und Framework interaktiv auswählen:
 
 ```zsh
-./Local\ Dev.command --setup
+./VibeCode\ Workspace.command local --setup
 ```
 
 Alle Details können in `local-dev/local-ai.json` angepasst werden. Oben stehen die drei aktiven Werte gut sichtbar:
@@ -104,7 +104,7 @@ Das aktive Hardwareprofil wird ebenfalls nur über die JSON-Datei gewählt:
 
 Damit sind die Hardwarewerte nicht im Launcher fest eingebaut. Für einen anderen Mac wird ein weiteres Objekt unter `hardware_profiles` angelegt und nur `hardware_profile` auf dessen Namen gesetzt. `--check` vergleicht den eingetragenen gemeinsamen Speicher auf macOS mit dem tatsächlich erkannten Wert. Providerspezifische `server_args` und `model_limits` im Hardwareprofil werden automatisch übernommen; direkte Werte im Provider bleiben als Fallback möglich. Fuer gecachte Hugging-Face-Modelle berechnet `--memory-plan` den KV-Cache pro Token aus der Modellarchitektur. Das zusaetzliche Kontextbudget wird auf 1024 Tokens abgerundet und durch `max_position_embeddings` begrenzt. Es ist eine Schaetzung, keine Garantie fuer stabilen Betrieb.
 
-Mit `./Local\ Dev.command --tune-memory` kann man den bei typischer Last beobachteten zusaetzlichen RAM-Spielraum in GiB, eine unangetastete Reserve und den beobachteten Speicherdruck eingeben. Nur bei gruenem Speicherdruck wird `Spielraum - Reserve` ins persoenliche Hardwareprofil geschrieben; standardmaessig nutzt die Rechnung davon 75 %. Alternativ: `--tune-memory 4 1 gruen`. Die Prompt-Cache-Grenze wird dabei bewusst nicht zusaetzlich erhoeht, um denselben RAM-Spielraum nicht doppelt einzuplanen. Nach dem naechsten Start Speicherdruck und Stabilitaet erneut pruefen.
+Mit `./VibeCode\ Workspace.command local --tune-memory` kann man den bei typischer Last beobachteten zusaetzlichen RAM-Spielraum in GiB, eine unangetastete Reserve und den beobachteten Speicherdruck eingeben. Nur bei gruenem Speicherdruck wird `Spielraum - Reserve` ins persoenliche Hardwareprofil geschrieben; standardmaessig nutzt die Rechnung davon 75 %. Alternativ: `--tune-memory 4 1 gruen`. Die Prompt-Cache-Grenze wird dabei bewusst nicht zusaetzlich erhoeht, um denselben RAM-Spielraum nicht doppelt einzuplanen. Nach dem naechsten Start Speicherdruck und Stabilitaet erneut pruefen.
 
 Die vollständige Vorlage liegt in `local-ai.example.json`; `local-ai.schema.json` beschreibt die gültigen Felder.
 
@@ -154,16 +154,16 @@ Konfigurationen aus der ersten Version mit `active_source`, `active_framework` u
 
 | Befehl | Funktion |
 |---|---|
-| `./Local\ Dev.command` | Toggle: starten und konfigurierte Apps schließen; erneut ausführen zum Stoppen und Wiederöffnen |
-| `./Local\ Dev.command --setup` | Profile, Modell und automatisch geschlossene Apps auswählen |
-| `./Local\ Dev.command --status` | Auswahl und API-Status anzeigen |
-| `./Local\ Dev.command --capabilities` | Baum mit Hostings, Modellen und CLI-Status anzeigen |
-| `./Local\ Dev.command --memory-plan` | KV-Cache und geplantes Kontextlimit anzeigen |
-| `./Local\ Dev.command --tune-memory` | Beobachteten RAM-Spielraum mit Sicherheitsreserve eintragen |
-| `./Local\ Dev.command --check` | Konfiguration, Programme und Kompatibilität prüfen |
-| `./Local\ Dev.command --start-only` | Nur den aktiven Provider starten |
-| `./Local\ Dev.command --stop` | Server stoppen und vom Launcher geschlossene Apps wieder öffnen |
-| `./Local\ Dev.command --config-path` | Pfad der lokalen Konfiguration anzeigen |
+| `./VibeCode\ Workspace.command local` | Toggle: starten und konfigurierte Apps schließen; erneut ausführen zum Stoppen und Wiederöffnen |
+| `./VibeCode\ Workspace.command local --setup` | Profile, Modell und automatisch geschlossene Apps auswählen |
+| `./VibeCode\ Workspace.command local --status` | Auswahl und API-Status anzeigen |
+| `./VibeCode\ Workspace.command local --capabilities` | Baum mit Hostings, Modellen und CLI-Status anzeigen |
+| `./VibeCode\ Workspace.command local --memory-plan` | KV-Cache und geplantes Kontextlimit anzeigen |
+| `./VibeCode\ Workspace.command local --tune-memory` | Beobachteten RAM-Spielraum mit Sicherheitsreserve eintragen |
+| `./VibeCode\ Workspace.command local --check` | Konfiguration, Programme und Kompatibilität prüfen |
+| `./VibeCode\ Workspace.command local --start-only` | Nur den aktiven Provider starten |
+| `./VibeCode\ Workspace.command local --stop` | Server stoppen und vom Launcher geschlossene Apps wieder öffnen |
+| `./VibeCode\ Workspace.command local --config-path` | Pfad der lokalen Konfiguration anzeigen |
 
 Ein Server, der außerhalb des Launchers gestartet wurde, wird von `--stop` absichtlich nicht beendet.
 
@@ -177,7 +177,7 @@ Ein Server, der außerhalb des Launchers gestartet wurde, wird von `--stop` absi
 Prüfen:
 
 ```zsh
-./Local\ Dev.command --check
+./VibeCode\ Workspace.command local --check
 ```
 
 Logs des Launchers und der von ihm gestarteten Server stehen in `local-dev/local-ai.log`.

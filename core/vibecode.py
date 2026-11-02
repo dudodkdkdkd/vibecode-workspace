@@ -5,6 +5,7 @@ Nur Standardbibliothek (das Python der Xcode-Befehlszeilentools, 3.9, genügt).
 Die Module (workspaces/, remote/, local-dev/) melden sich über eine module.json an.
 """
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import os
@@ -21,7 +22,9 @@ LAUNCHER = REPO / 'workspaces' / 'VibeCode Workspace.command'
 NAME_MAX = 60
 ENTRY_ID = re.compile(r'[a-z][a-z0-9-]*')
 RESERVED = {'run', 'start', 'list', 'save', 'delete', 'open', 'shortcuts', 'projects',
-            'window', 'help', '_state'}
+            'window', 'help', '_state', '_ssh', 'ssh-open', 'folders', 'presets'}
+# Everything the window may trigger over SSH. Fixed on purpose: no arbitrary commands.
+SSH_ACTIONS = ('share', 'share-wake', 'join', 'allow-check', 'allow')
 
 
 def config_dir():
@@ -297,7 +300,11 @@ def module_entries():
                 ok = (isinstance(entry.get('id'), str) and ENTRY_ID.fullmatch(entry['id'])
                       and entry['id'] not in RESERVED and isinstance(entry.get('title'), str)
                       and isinstance(entry.get('run'), list) and entry['run']
-                      and all(isinstance(part, str) for part in entry['run']))
+                      and all(isinstance(part, str) for part in entry['run'])
+                      and (entry.get('order') is None or type(entry['order']) is int)
+                      and (entry.get('status') is None
+                           or (isinstance(entry['status'], list) and entry['status']
+                               and all(isinstance(part, str) for part in entry['status']))))
                 if not ok:
                     raise ValueError(f'Eintrag {entry!r}')
                 entries.append(dict(entry, module=manifest.parent.name, dir=str(manifest.parent)))
@@ -306,7 +313,8 @@ def module_entries():
     ids = [entry['id'] for entry in entries]
     if len(ids) != len(set(ids)):
         raise ValueError('Zwei Module melden denselben Befehl an.')
-    return entries
+    # Reihenfolge im Fenster: optionales "order" (kleiner = weiter oben), sonst alphabetisch nach id.
+    return sorted(entries, key=lambda entry: (entry.get('order', 100), entry['id']))
 
 
 def entry_argv(entry, extra=()):
@@ -320,14 +328,299 @@ def open_in_terminal(argv):
                     '-e', 'end run', 'exec ' + shlex.join(argv)], check=True, timeout=30)
 
 
+def module_env():
+    env = dict(os.environ)
+    env.setdefault('VIBECODE_REMOTE_DIR', str(config_dir() / 'remote'))
+    return env
+
+
+def entry_status(entry):
+    """What a module says about itself: {"text", "level"} (level ok | warn | off), or None if it says nothing."""
+    if not entry.get('status'):
+        return None
+    argv = [part.replace('{module}', entry['dir']) for part in entry['status']]
+    if argv[0] == 'python3':
+        argv[0] = sys.executable
+    try:
+        result = subprocess.run(argv, capture_output=True, text=True, timeout=15,
+                                stdin=subprocess.DEVNULL, env=module_env())
+        data = json.loads(result.stdout)
+        if (result.returncode or not isinstance(data.get('text'), str)
+                or data.get('level') not in ('ok', 'warn', 'off')):
+            raise ValueError
+        return {'text': data['text'], 'level': data['level']}
+    except (ValueError, AttributeError, OSError, subprocess.SubprocessError):
+        # Ein kaputter Status darf das Fenster nie verhindern: er wird sichtbar als Warnung gezeigt.
+        return {'text': 'Status nicht lesbar', 'level': 'warn'}
+
+
+def call_module(entry_id, args, timeout=60):
+    """Run a module entry without a terminal and return {'code', 'out', 'err'} (never raises on exit codes)."""
+    entries = {e['id']: e for e in module_entries()}
+    if entry_id not in entries:
+        raise ValueError(f'Das Modul „{entry_id}“ ist nicht installiert.')
+    argv = entry_argv(entries[entry_id], args)
+    if argv[0] == 'python3':
+        argv[0] = sys.executable
+    result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout,
+                            stdin=subprocess.DEVNULL, env=module_env())
+    return {'code': result.returncode, 'out': result.stdout.strip(), 'err': result.stderr.strip()}
+
+
+def ssh_state():
+    """SSH overview for the window: configured hosts, the saved Mac target, what is available."""
+    present = {e['id'] for e in module_entries()}
+    info = {'hosts': [], 'mac': None, 'guided': 'setup' in present, 'share': 'remote' in present, 'errors': []}
+    for entry_id, args, key in (('hosts', ['list', str(config_dir())], 'hosts'),
+                                ('remote', ['ssh', 'show'], 'mac')):
+        if entry_id not in present:
+            continue
+        try:
+            result = call_module(entry_id, args, timeout=20)
+            if result['code']:
+                raise ValueError(result['err'] or result['out'] or f'Status {result["code"]}')
+            data = json.loads(result['out'])
+            info[key] = data['target'] if key == 'mac' else data
+        except (ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
+            info['errors'].append(f'{entry_id}: {exc}')
+    info['available'] = info['guided'] or info['share'] or bool(info['hosts'])
+    return info
+
+
+def modules_error(text):
+    """The reason without the module's own prefix ("Suchordner: ", "Remote-Repository-Suche: ")."""
+    return re.sub(r'^(Suchordner|Remote-Repository-Suche): ', '', (text or '').strip())
+
+
+def folder_state(hosts):
+    """Search folders for the window: local ones with a fresh repository count, remote ones from the host list."""
+    present = {e['id'] for e in module_entries()}
+    info = {'local': [], 'remote': [dict(host) for host in hosts],
+            'canAddLocal': 'search-folders' in present, 'canAddRemote': 'hosts' in present, 'errors': []}
+    if 'search-folders' in present:
+        try:
+            result = call_module('search-folders', ['list', str(config_dir())], timeout=30)
+            if result['code']:
+                raise ValueError(modules_error(result['err'] or result['out']))
+            info['local'] = json.loads(result['out'])
+        except (ValueError, TypeError, subprocess.SubprocessError) as exc:
+            info['errors'].append(f'Suchordner: {exc}')
+    return info
+
+
+def folder_action(action, path=None, host=None, root=None):
+    """Add or remove a search folder. Returns {'message', 'warning'}; raises ValueError with a readable reason."""
+    config = str(config_dir())
+
+    def checked(entry_id, args, timeout=60):
+        result = call_module(entry_id, args, timeout=timeout)
+        if result['code']:
+            raise ValueError(modules_error(result['err'] or result['out']) or f'Status {result["code"]}')
+        return result
+
+    def plural(count):
+        return f'{count} {"Repository" if count == 1 else "Repositories"}'
+
+    if action == 'add':
+        found = json.loads(checked('search-folders', ['add', config, path or ''])['out'])
+        warning = None
+        if found['truncated']:
+            warning = 'Der Ordner ist sehr groß, die Suche wurde abgebrochen. Wähle einen kleineren Ordner.'
+        elif not found['repos']:
+            warning = 'Darin wurden keine Git-Repositories gefunden (bis zu 4 Ebenen tief).'
+        return {'message': f'Ordner hinzugefügt: {found["path"]} ({plural(found["repos"])})', 'warning': warning}
+    if action == 'remove':
+        checked('search-folders', ['remove', config, path or ''])
+        return {'message': f'Suchordner entfernt: {path}. Die Repositories selbst bleiben unberührt.', 'warning': None}
+    if action == 'add-remote':
+        host, root = (host or '').strip(), (root or '').strip() or '~'
+        known = any(entry['host'] == host for entry in ssh_state()['hosts'])
+        checked('hosts', ['add', config, host, root])
+        # Ohne Terminal und ohne Passwortabfrage suchen: klappt die Anmeldung nicht, bleibt der Host trotzdem gespeichert.
+        search = call_module('hosts', ['discover', config], timeout=90)
+        warning = None
+        if search['code']:
+            warning = modules_error(search['err'] or search['out'])
+        elif f'Remote {host}: ' in search['err']:
+            warning = search['err'].split(f'Remote {host}: ', 1)[1].splitlines()[0]
+        count = next((entry['repos'] for entry in json.loads(checked('hosts', ['list', config])['out'])
+                      if entry['host'] == host), 0)
+        verb = 'geändert' if known else 'hinzugefügt'
+        message = f'Remote-Ordner {verb}: {host}:{root} ({plural(count)})'
+        if warning:
+            message += '. Gespeichert, aber die Suche ist fehlgeschlagen'
+        return {'message': message, 'warning': warning}
+    if action == 'remove-remote':
+        checked('hosts', ['remove', config, host or ''])
+        return {'message': f'Remote-Ordner entfernt: {host}. Auf dem Server bleibt alles unberührt.', 'warning': None}
+    raise ValueError(f'Unbekannte Aktion „{action}“.')
+
+
+def osa_error(text):
+    """A readable reason from osascript's `execution error: Error: … (-2700)`."""
+    text = (text or '').strip().splitlines()[-1] if (text or '').strip() else ''
+    text = re.sub(r'^.*?execution error: (?:Error: )?', '', text)
+    return re.sub(r'\s*\(-?\d+\)$', '', text).strip()
+
+
+def list_project_paths():
+    """(name, path) of every project, exactly as the launcher looks them up. Presets are stored per path."""
+    result = subprocess.run([str(LAUNCHER), '--list-paths'], capture_output=True, text=True, timeout=30)
+    if result.returncode:
+        raise ValueError('Projektpfade nicht lesbar: ' + (result.stderr.strip() or result.stdout.strip()))
+    return [tuple(line.split('\t', 1)) for line in result.stdout.splitlines() if '\t' in line]
+
+
+def presets_state(projects=None):
+    """Presets for the window: repos, their custom presets, presets of repos that moved, the defaults."""
+    present = {e['id'] for e in module_entries()}
+    info = {'available': 'preset-store' in present, 'repos': [], 'items': [], 'orphans': [],
+            'defaults': {'local': [], 'remote': []}, 'errors': []}
+    if not info['available']:
+        return info
+    try:
+        config = str(config_dir())
+        known = projects if projects is not None else list_project_paths()
+        defaults, stored = (call_module('preset-store', args, timeout=30) for args in (['defaults'], ['list', config]))
+        for reply in (defaults, stored):
+            if reply['code']:
+                raise ValueError(osa_error(reply['err'] or reply['out']))
+        info['defaults'] = json.loads(defaults['out'])
+        custom = {entry['path']: entry for entry in json.loads(stored['out'])}
+    except (ValueError, TypeError, KeyError, subprocess.SubprocessError) as exc:
+        info['errors'].append(f'Presets: {exc}')
+        return info
+    paths = {path for _name, path in known}
+    for name, path in known:
+        info['repos'].append({'name': name, 'path': path, 'remote': path.startswith('vscode-remote://'),
+                              'custom': path in custom})
+        if path in custom:
+            info['items'].append(dict(custom[path], name=name, remote=path.startswith('vscode-remote://')))
+    by_name = {}
+    for name, path in known:
+        by_name.setdefault(Path(path).name, []).append((name, path))
+    for path, entry in custom.items():
+        if path not in paths:
+            label = Path(path).name or path
+            same = [match for match in by_name.get(label, []) if match[1] not in custom]
+            # Nur ein eindeutiger, noch freier Treffer wird vorgeschlagen.
+            info['orphans'].append(dict(entry, name=label, suggestion=(
+                {'name': same[0][0], 'path': same[0][1]} if len(same) == 1 else None)))
+    return info
+
+
+def preset_action(action, path, preset=None, to=None):
+    """Save, reset or move one repository's preset. Returns {'message'}; raises ValueError with a readable reason."""
+    config = str(config_dir())
+
+    def checked(args):
+        result = call_module('preset-store', args, timeout=60)
+        if result['code']:
+            raise ValueError(osa_error(result['err'] or result['out']) or f'Status {result["code"]}')
+        return result
+
+    def save(target, content):
+        if not isinstance(content, dict):
+            raise ValueError('Das Preset fehlt.')
+        with tempfile.NamedTemporaryFile('w', suffix='.json', delete=False, encoding='utf-8') as handle:
+            json.dump(content, handle, ensure_ascii=False)
+        try:
+            return checked(['save', config, target, handle.name])
+        finally:
+            os.unlink(handle.name)
+
+    if action == 'save':
+        saved = json.loads(save(path, preset)['out'])
+        return {'message': f'Preset gespeichert ({len(saved["terminals"])} Terminals, {len(saved["urls"])} Browser-Tabs).'}
+    if action == 'reset':
+        checked(['reset', config, path])
+        return {'message': 'Preset zurückgesetzt: es gelten wieder die Standard-Terminals.'}
+    if action == 'move':
+        if not to or to == path:
+            raise ValueError('Bitte ein anderes Repository als Ziel wählen.')
+        stored = json.loads(checked(['list', config])['out'])
+        entry = next((item for item in stored if item['path'] == path), None)
+        if entry is None:
+            raise ValueError('Dieses Preset gibt es nicht mehr.')
+        if any(item['path'] == to for item in stored):
+            raise ValueError('Das Ziel-Repository hat schon ein eigenes Preset.')
+        save(to, {'terminals': entry['terminals'], 'urls': entry['urls']})
+        checked(['reset', config, path])        # erst nach erfolgreichem Kopieren löschen
+        return {'message': 'Preset übernommen.'}
+    raise ValueError(f'Unbekannte Aktion „{action}“.')
+
+
+def line_tokens(line, keyword):
+    """Words of a pasted line such as `workspace remote ssh join user@host SHA256:…`, after `keyword`."""
+    if not isinstance(line, str) or not line.strip():
+        raise ValueError('Bitte die Zeile vom anderen Mac einfügen.')
+    if '\n' in line.strip() or len(line) > 2000:
+        raise ValueError('Bitte genau eine Zeile einfügen.')
+    try:
+        tokens = shlex.split(line)
+    except ValueError:
+        raise ValueError('Die Zeile ist unvollständig: Anführungszeichen fehlen. Bitte komplett kopieren.') from None
+    if keyword in tokens:
+        tokens = tokens[tokens.index(keyword) + 1:]
+    # Optionen aus eingefügtem Text werden nie übernommen.
+    return [token for token in tokens if not token.startswith('--')]
+
+
+def ssh_action(action, line=''):
+    if action not in SSH_ACTIONS:
+        raise ValueError(f'Unbekannte SSH-Aktion „{action}“.')
+    if action in ('share', 'share-wake'):
+        args = ['ssh', 'share'] + (['--wake'] if action == 'share-wake' else [])
+    elif action == 'join':
+        tokens = line_tokens(line, 'join')
+        if not tokens:
+            raise ValueError('In der Zeile fehlt benutzer@host.')
+        args = ['ssh', 'join'] + tokens
+    else:
+        tokens = line_tokens(line, 'allow')
+        if not tokens:
+            raise ValueError('In der Zeile fehlt der Schlüssel.')
+        args = ['ssh', 'allow', '--check' if action == 'allow-check' else '--yes'] + tokens
+    return call_module('remote', args, timeout=90)
+
+
+def open_ssh(kind, name=None):
+    """Open an interactive SSH session (or the guided setup) in Terminal."""
+    entries = {e['id']: e for e in module_entries()}
+    if kind == 'guided':
+        if 'setup' not in entries:
+            raise ValueError('Das Workspaces-Modul mit dem Setup fehlt.')
+        open_in_terminal(entry_argv(entries['setup'], ['--connect-remote']))
+    elif kind == 'mac':
+        if 'remote' not in entries:
+            raise ValueError('Das Remote-Modul fehlt.')
+        open_in_terminal(entry_argv(entries['remote'], ['ssh']))
+    elif kind == 'host':
+        # Nur Hosts aus der eigenen Liste: der Name kommt aus dem Fenster, nie ungeprüft in den Befehl.
+        if name not in [entry['host'] for entry in ssh_state()['hosts']]:
+            raise ValueError(f'„{name}“ ist kein eingerichteter SSH-Host.')
+        open_in_terminal(['/usr/bin/ssh', '--', name])
+    else:
+        raise ValueError(f'Unbekannte Verbindungsart „{kind}“.')
+
+
 def state():
-    store, projects = read_store(), list_projects()
+    store, paths = read_store(), list_project_paths()
+    projects = [name for name, _path in paths]           # dieselbe Liste wie --list-projects, ohne zweiten Launcher-Aufruf
     known = set(projects)
+    menu = [e for e in module_entries() if e.get('menu')]
+    with ThreadPoolExecutor(max_workers=4) as pool:      # Modulstatus parallel: das Fenster soll zügig öffnen
+        statuses = list(pool.map(entry_status, menu))
+    ssh = ssh_state()
     return {
         'workspaces': [dict(ws, missing=[p for p in ws['projects'] if p not in known])
                        for ws in store['workspaces']],
         'projects': projects,
-        'entries': [{'id': e['id'], 'title': e['title']} for e in module_entries() if e.get('menu')],
+        'entries': [{'id': e['id'], 'title': e['title'], 'status': status}
+                    for e, status in zip(menu, statuses)],
+        'ssh': ssh,
+        'folders': folder_state(ssh['hosts']),
+        'presets': presets_state(paths),
     }
 
 
@@ -341,7 +634,8 @@ def window():
 
 
 def usage(entries):
-    lines = ['VibeCode', '',
+    lines = ['VibeCode Workspace', '',
+             '  Aufruf: ./VibeCode\\ Workspace.command <Befehl>   (unten kurz: vibecode)', '',
              '  vibecode                      Hauptfenster öffnen',
              '  vibecode list                 gespeicherte Workspaces',
              '  vibecode run NAME             Workspace starten',
@@ -370,6 +664,66 @@ def main(argv):
         return 0
     if command == '_state':
         print(json.dumps(state(), ensure_ascii=False))
+        return 0
+    if command == '_ssh':
+        parser = argparse.ArgumentParser(prog='vibecode _ssh', add_help=False)
+        parser.add_argument('action')
+        parser.add_argument('--line', default='')
+        options = parser.parse_args(rest)
+        print(json.dumps(ssh_action(options.action, options.line), ensure_ascii=False))
+        return 0
+    if command == 'folders':
+        parser = argparse.ArgumentParser(prog='vibecode folders', add_help=False)
+        parser.add_argument('action', choices=['list', 'add', 'remove', 'add-remote', 'remove-remote'])
+        parser.add_argument('positional', nargs='*')
+        for option in ('--path', '--host', '--root'):
+            parser.add_argument(option)
+        parser.add_argument('--json', action='store_true')
+        options = parser.parse_args(rest)
+        if options.action == 'list':
+            info = folder_state(ssh_state()['hosts'])
+            for entry in info['local']:
+                print(f'lokal\t{entry["path"]}\t{entry["repos"] if entry["exists"] else "Ordner fehlt"}')
+            for entry in info['remote']:
+                print(f'remote\t{entry["host"]}:{entry["root"]}\t{entry["repos"]}')
+            return 0
+        words = options.positional
+        result = folder_action(options.action, path=options.path or (words[0] if words else None),
+                               host=options.host or (words[0] if words else None),
+                               root=options.root or (words[1] if len(words) > 1 else None))
+        if options.json:
+            print(json.dumps(result, ensure_ascii=False))
+        else:
+            print(result['message'] + (f'\nHinweis: {result["warning"]}' if result['warning'] else ''))
+        return 0
+    if command == 'presets':
+        parser = argparse.ArgumentParser(prog='vibecode presets', add_help=False)
+        parser.add_argument('action', choices=['list', 'save', 'reset', 'move'])
+        parser.add_argument('positional', nargs='*')
+        for option in ('--path', '--to', '--data'):
+            parser.add_argument(option)
+        parser.add_argument('--json', action='store_true')
+        options = parser.parse_args(rest)
+        if options.action == 'list':
+            info = presets_state()
+            for item in info['items']:
+                print(f'{item["name"]}\t{", ".join(t["name"] for t in item["terminals"]) or "keine Terminals"}\t{len(item["urls"])} Browser-Tabs')
+            for orphan in info['orphans']:
+                print(f'{orphan["name"]}\tRepository nicht mehr gefunden' +
+                      (f' -> {orphan["suggestion"]["path"]}' if orphan['suggestion'] else ''))
+            return 0
+        words = options.positional
+        data = json.loads(options.data) if options.data else None
+        result = preset_action(options.action, options.path or (words[0] if words else ''), preset=data,
+                               to=options.to or (words[1] if len(words) > 1 else None))
+        print(json.dumps(result, ensure_ascii=False) if options.json else result['message'])
+        return 0
+    if command == 'ssh-open':
+        parser = argparse.ArgumentParser(prog='vibecode ssh-open', add_help=False)
+        parser.add_argument('--kind', required=True)
+        parser.add_argument('--name')
+        options = parser.parse_args(rest)
+        open_ssh(options.kind, options.name)
         return 0
     if command in ('run', 'start', 'delete'):
         parser = argparse.ArgumentParser(prog=f'vibecode {command}', add_help=False)
