@@ -159,3 +159,86 @@ test('auf einem frischen Mac wird der Konfigurationsordner beim ersten Speichern
     assert.equal(result.status, 0, result.err);
     assert.deepEqual(Object.keys(JSON.parse(fs.readFileSync(path.join(fresh, 'terminals.json'), 'utf8')).projects), ['/repo/a']);
 });
+
+// ------------------------------------------------------------------ Allgemeiner Standard
+
+const saveGeneral = (files, preset) => {
+    fs.writeFileSync(files.preset, JSON.stringify(preset));
+    return presets('save-general', files.dir, files.preset);
+};
+
+test('allgemeiner Standard: ohne Datei und ohne Eintrag ist es null, gespeichert gilt er mit abgeleiteten Befehlen', (t) => {
+    const files = fixture(t);
+    assert.equal(presets('general', files.dir).out, 'null');
+    assert.ok(!fs.existsSync(files.file));                                                  // Lesen schreibt nie
+    const result = saveGeneral(files, { terminals: TERMINALS, urls: [' http://localhost:3000 '] });
+    assert.equal(result.status, 0, result.err);
+    const data = stored(files);
+    assert.deepEqual(Object.keys(data), ['version', 'default', 'projects']);
+    assert.deepEqual(data.projects, {});
+    assert.deepEqual(data.default.urls, ['http://localhost:3000']);
+    // Lokal (zsh) gespeichert: der Launcher ersetzt es auf SSH-Hosts durch bash.
+    assert.equal(data.default.terminals[3].command, wizard('terminalCommand("Shell", "", false)'));
+    assert.equal(data.default.terminals[1].command,
+        wizard(`terminalCommand("Claude Code", ${JSON.stringify(TERMINALS[1].prompt)}, false)`));
+    const general = JSON.parse(presets('general', files.dir).out);
+    assert.deepEqual(general.terminals.map((x) => x.name), ['Frontend', 'Claude', 'Codex 1', 'Shell']);
+    assert.ok(!('command' in general.terminals[0]));
+    assert.deepEqual(JSON.parse(result.out), general);
+});
+
+test('allgemeiner Standard: Repository-Presets lassen ihn unberührt und er sie, und list zeigt ihn nicht als Repository', (t) => {
+    const files = fixture(t);
+    assert.equal(saveGeneral(files, { terminals: TERMINALS.slice(0, 1), urls: [] }).status, 0);
+    const before = stored(files).default;
+    assert.equal(save(files, '/repo/a', { terminals: TERMINALS.slice(1, 2), urls: [] }).status, 0);
+    assert.equal(presets('reset', files.dir, '/repo/a').status, 0);
+    assert.equal(save(files, '/repo/b', { terminals: TERMINALS.slice(2, 3), urls: [] }).status, 0);
+    assert.deepEqual(stored(files).default, before);
+    assert.deepEqual(JSON.parse(presets('list', files.dir).out).map((p) => p.path), ['/repo/b']);
+    assert.equal(saveGeneral(files, { terminals: TERMINALS.slice(1, 2), urls: [] }).status, 0);    // überschreibt nur den Standard
+    assert.deepEqual(Object.keys(stored(files).projects), ['/repo/b']);
+});
+
+test('allgemeiner Standard: Zurücksetzen entfernt nur ihn und ist wiederholbar', (t) => {
+    const files = fixture(t);
+    save(files, '/repo/a', { terminals: TERMINALS.slice(0, 1), urls: [] });
+    saveGeneral(files, { terminals: TERMINALS.slice(0, 1), urls: [] });
+    assert.equal(presets('reset-general', files.dir).out, 'ok');
+    assert.deepEqual(Object.keys(stored(files)), ['version', 'projects']);
+    assert.deepEqual(Object.keys(stored(files).projects), ['/repo/a']);
+    assert.equal(presets('general', files.dir).out, 'null');
+    const before = fs.readFileSync(files.file, 'utf8');
+    assert.equal(presets('reset-general', files.dir).status, 0);                           // gibt es nicht mehr: kein Fehler
+    assert.equal(fs.readFileSync(files.file, 'utf8'), before);                              // und nichts geschrieben
+    assert.equal(presets('reset-general', fixture(t).dir).status, 0);                       // ohne Datei auch nicht
+});
+
+test('allgemeiner Standard: ungültige Eingaben werden abgelehnt und schreiben nichts', (t) => {
+    const files = fixture(t);
+    const one = (overrides) => ({ terminals: [Object.assign({ name: 'T', type: 'Shell', prompt: '', cwd: '' }, overrides)], urls: [] });
+    for (const [preset, expected] of [[one({ cwd: '../x' }), /relativen Unterordner/], [one({ type: 'Hacker' }), /unbekannter Typ/],
+        [{ terminals: [], urls: ['javascript:1'] }, /http:\/\/ oder https:\/\//], [null, /braucht terminals und urls/]]) {
+        const result = saveGeneral(files, preset);
+        assert.notEqual(result.status, 0, JSON.stringify(preset));
+        assert.match(result.err, expected);
+    }
+    assert.ok(!fs.existsSync(files.file));
+    assert.notEqual(presets('save-general', files.dir, path.join(files.dir, 'fehlt.json')).status, 0);   // Datei fehlt
+});
+
+test('allgemeiner Standard: eine beschädigte Angabe wird nie ersetzt, auch nicht durch Speichern oder Zurücksetzen', (t) => {
+    const files = fixture(t);
+    const valid = { terminals: TERMINALS.slice(0, 1), urls: [] };
+    for (const bad of [null, [], 5, 'nein', { terminals: [{ name: 'x', type: 'Nix', prompt: '', command: '', cwd: '' }], urls: [] },
+        { terminals: [], urls: [''] }]) {
+        const content = JSON.stringify({ version: 2, default: bad, projects: {} });
+        fs.writeFileSync(files.file, content);
+        for (const attempt of [() => saveGeneral(files, valid), () => save(files, '/repo/a', valid),
+            () => presets('reset-general', files.dir), () => presets('general', files.dir), () => presets('list', files.dir)]) {
+            assert.notEqual(attempt().status, 0, content);
+        }
+        assert.equal(fs.readFileSync(files.file, 'utf8'), content);
+    }
+});
+

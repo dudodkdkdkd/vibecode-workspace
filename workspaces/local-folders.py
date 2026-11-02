@@ -43,20 +43,34 @@ def clean_path(value):
     return Path(os.path.normpath(path))
 
 
-def folders(config):
+def entries(config):
+    """Search folders as {'path', 'quickOpen'}. quickOpen (default false) switches the window's "open repos of this folder" dialog on."""
     raw = read_json(config / 'search-folders.json', {'version': 1, 'folders': []})
     if not isinstance(raw, dict) or raw.get('version') != 1 or not isinstance(raw.get('folders'), list):
         raise ValueError('Ungültige search-folders.json. Die Datei wurde nicht verändert.')
-    entries, seen = [], set()
+    result, seen = [], set()
     for entry in raw['folders']:
         if not isinstance(entry, dict):
             raise ValueError('Ungültiger Suchordner-Eintrag.')
         path = clean_path(entry.get('path'))
+        # Kein stillschweigendes "aus" bei Unsinn: ein beschädigter Wert wird abgelehnt (wie der Rest der Datei).
+        if not isinstance(entry.get('quickOpen', False), bool):
+            raise ValueError(f'Ungültiger Suchordner-Eintrag: quickOpen muss true oder false sein ({path}).')
         if str(path) in seen:
             raise ValueError(f'Suchordner doppelt konfiguriert: {path}')
         seen.add(str(path))
-        entries.append(path)
-    return entries
+        result.append({'path': path, 'quickOpen': entry.get('quickOpen', False)})
+    return result
+
+
+def folders(config):
+    return [entry['path'] for entry in entries(config)]
+
+
+def write_entries(config, items):
+    """quickOpen is only written when on, so a file without the option stays exactly as it was."""
+    write_json(config / 'search-folders.json', {'version': 1, 'folders': [
+        dict({'path': str(item['path'])}, **({'quickOpen': True} if item['quickOpen'] else {})) for item in items]})
 
 
 def same_folder(first, second):
@@ -96,10 +110,12 @@ def find_repos(root):
 def listing(config):
     """Every folder with how many repositories it holds right now (a fresh scan, no cache)."""
     result = []
+    quick = {str(entry['path']): entry['quickOpen'] for entry in entries(config)}
     for path in folders(config):
         exists = path.is_dir()
         repos, truncated = find_repos(path) if exists else ([], False)
-        result.append({'path': str(path), 'exists': exists, 'repos': len(repos), 'truncated': truncated})
+        result.append({'path': str(path), 'exists': exists, 'repos': len(repos), 'truncated': truncated,
+                       'quickOpen': quick[str(path)]})
     return result
 
 
@@ -107,22 +123,34 @@ def add_folder(config, value):
     path = clean_path(value)
     if not path.is_dir():
         raise ValueError(f'Das ist kein Ordner: {path}')
-    entries = folders(config)
-    if any(same_folder(path, known) for known in entries):
+    known = entries(config)
+    if any(same_folder(path, item['path']) for item in known):
         raise ValueError(f'Dieser Ordner wird schon durchsucht: {path}')
-    write_json(config / 'search-folders.json',
-               {'version': 1, 'folders': [{'path': str(known)} for known in entries + [path]]})
+    write_entries(config, known + [{'path': path, 'quickOpen': False}])
     repos, truncated = find_repos(path)
     return {'path': str(path), 'repos': len(repos), 'truncated': truncated}
 
 
 def remove_folder(config, value):
     path = clean_path(value)
-    entries = folders(config)
-    kept = [known for known in entries if not same_folder(path, known)]
-    if len(kept) == len(entries):
+    known = entries(config)
+    kept = [item for item in known if not same_folder(path, item['path'])]
+    if len(kept) == len(known):
         raise ValueError(f'Dieser Ordner ist kein Suchordner: {path}')
-    write_json(config / 'search-folders.json', {'version': 1, 'folders': [{'path': str(known)} for known in kept]})
+    write_entries(config, kept)
+
+
+def set_quick_open(config, value, enabled):
+    """Switch "open the repositories of this folder" on or off for one search folder. Other folders stay as they are."""
+    path = clean_path(value)
+    known = entries(config)
+    match = [item for item in known if same_folder(path, item['path'])]
+    if not match:
+        raise ValueError(f'Dieser Ordner ist kein Suchordner: {path}')
+    if match[0]['quickOpen'] != enabled:
+        match[0]['quickOpen'] = enabled
+        write_entries(config, known)
+    return {'path': str(match[0]['path']), 'quickOpen': enabled}
 
 
 def discover(config):
@@ -148,11 +176,17 @@ def main():
         command.add_argument('path')
     for name in ('list', 'discover'):
         commands.add_parser(name).add_argument('config', type=Path)
+    quick = commands.add_parser('quick')
+    quick.add_argument('config', type=Path)
+    quick.add_argument('path')
+    quick.add_argument('mode', choices=['on', 'off'])
     args = parser.parse_args()
     if args.command == 'add':
         print(json.dumps(add_folder(args.config, args.path), ensure_ascii=False))
     elif args.command == 'remove':
         remove_folder(args.config, args.path)
+    elif args.command == 'quick':
+        print(json.dumps(set_quick_open(args.config, args.path, args.mode == 'on'), ensure_ascii=False))
     elif args.command == 'list':
         print(json.dumps(listing(args.config), ensure_ascii=False))
     else:

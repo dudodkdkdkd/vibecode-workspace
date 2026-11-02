@@ -882,3 +882,163 @@ source "$1" "\${@:2}"
     });
     assert.equal(fs.readFileSync(notices, 'utf8'), completedNotices, 'cancellation must not announce success');
 });
+
+// ------------------------------------------------------------------ Allgemeiner Standard (terminals.json "default")
+
+const GENERAL = {
+    terminals: [
+        { name: 'Dev', type: 'Eigener Befehl', prompt: 'npm run dev', command: 'npm run dev', cwd: 'frontend' },
+        { name: 'Shell', type: 'Shell', prompt: '', command: 'exec zsh -l', cwd: '' },
+    ],
+    urls: ['http://localhost:3000'],
+};
+const labelsAndCwds = (result) => result.tasks.tasks.map(task => [task.label, task.options.cwd]);
+
+test('general default replaces the built-in terminals of repos without their own entry and adds its tabs', t => {
+    const files = fixture(t);
+    fs.mkdirSync(path.join(files.a, 'frontend'));                       // B hat keinen frontend-Ordner
+    fs.writeFileSync(files.saved, JSON.stringify({ version: 2, default: GENERAL, projects: {} }));
+    const result = workspace(files);
+    assert.deepEqual(labelsAndCwds(result), [
+        ['A · Dev', `${files.a}/frontend`], ['A · Shell', files.a],
+        ['B · Dev', files.b], ['B · Shell', files.b]]);                  // fehlender Unterordner: Start im Repository-Ordner
+    assert.deepEqual(openedUrls(files, result), ['http://localhost:3000']);
+});
+
+test('an own entry wins over the general default, including an empty list of terminals', t => {
+    const files = fixture(t);
+    const own = { terminals: [{ name: 'Mein', type: 'Shell', prompt: '', command: 'exec zsh -l', cwd: '' }], urls: ['http://own.test'] };
+    fs.writeFileSync(files.saved, JSON.stringify({ version: 2, default: GENERAL, projects: { [files.a]: own } }));
+    assert.deepEqual(labelsAndCwds(workspace(files)).map(([label]) => label), ['A · Mein', 'B · Dev', 'B · Shell']);
+    assert.deepEqual(openedUrls(files), ['http://own.test', 'http://localhost:3000']);
+    fs.writeFileSync(files.saved, JSON.stringify({ version: 2, default: GENERAL, projects: { [files.a]: { terminals: [], urls: [] } } }));
+    assert.deepEqual(labelsAndCwds(workspace(files)).map(([label]) => label), ['B · Dev', 'B · Shell']);   // leer = null Terminals
+});
+
+test('without a general default the built-in terminals still apply', t => {
+    const files = fixture(t);
+    fs.writeFileSync(files.saved, JSON.stringify({ version: 2, projects: {} }));
+    assert.deepEqual(labelsAndCwds(workspace(files)).map(([label]) => label), ['A · Shell', 'A · Extra', 'B · Shell']);
+});
+
+test('the general default uses bash on SSH hosts and keeps remote subfolders it cannot check', t => {
+    const files = fixture(t);
+    const remote = 'vscode-remote://ssh-remote+spark/home/user/R';
+    fs.appendFileSync(files.projects, `Remote\t${remote}\n`);
+    fs.writeFileSync(files.saved, JSON.stringify({ version: 2, default: GENERAL, projects: {} }));
+    const [, spark] = workspace(files, { selected: ['A', 'Remote'], all: true });
+    assert.deepEqual(spark.tasks.tasks.map(task => [task.label, task.command, task.options.cwd]), [
+        ['Remote · Dev', 'npm run dev', '/home/user/R/frontend'],
+        ['Remote · Shell', 'exec bash -l', '/home/user/R']]);
+    assert.deepEqual(spark.settings['vibecodeWorkspace.autoOpenUrls'], ['http://localhost:3000']);
+    assert.ok(spark.tasks.tasks.every(task => task.options.shell.executable === '/bin/bash'));
+});
+
+test('with USE_PROJECT_TERMINALS=false the global terminals apply but the general default still adds its tabs', t => {
+    const files = fixture(t);
+    fs.writeFileSync(files.saved, JSON.stringify({ version: 2, default: GENERAL, projects: {} }));
+    const result = workspace(files, { env: { USE_PROJECT_TERMINALS_VALUE: 'false' } });
+    assert.deepEqual(labelsAndCwds(result).map(([label]) => label), ['A · Shell', 'A · Extra', 'B · Shell']);
+    assert.deepEqual(openedUrls(files, result), ['http://localhost:3000']);
+});
+
+test('an invalid general default fails instead of silently falling back to the built-in terminals', t => {
+    const files = fixture(t);
+    for (const bad of [null, [], 5, 'nein', { terminals: 'x', urls: [] }, { terminals: [], urls: [''] },
+        { terminals: [{ name: 'x', type: 'Shell', prompt: '', command: '', cwd: '' }], urls: [] }]) {
+        fs.writeFileSync(files.saved, JSON.stringify({ version: 2, default: bad, projects: {} }));
+        assert.throws(() => workspace(files), /Ungültig/, JSON.stringify(bad));
+    }
+});
+
+test('setup keeps the general default and starts unconfigured repos from it', t => {
+    const files = fixture(t);
+    fs.writeFileSync(files.saved, JSON.stringify({ version: 2, default: GENERAL,
+        projects: { [files.b]: { terminals: [], urls: ['http://b.test'] } } }));
+    assert.equal(setup(files, [['A'], '0', '']), 'saved');
+    const saved = JSON.parse(fs.readFileSync(files.output, 'utf8'));
+    assert.deepEqual(saved.default, GENERAL);                              // bleibt beim Neuschreiben erhalten
+    assert.deepEqual(saved.projects, { [files.a]: { terminals: [], urls: [] }, [files.b]: { terminals: [], urls: ['http://b.test'] } });
+    assert.deepEqual(Object.keys(saved), ['version', 'default', 'projects']);
+
+    // Ausgangspunkt der Dialoge für ein Repository ohne eigene Auswahl: der allgemeine Standard, nicht die fünf eingebauten.
+    const asked = JSON.parse(jxa(`
+const asked = [];
+const testApp = {
+    chooseFromList: function (items, options) { return options.multipleSelectionsAllowed ? ['A'] : options.defaultItems; },
+    displayDialog: function (text, options) { asked.push(options.defaultAnswer); return { textReturned: options.defaultAnswer }; },
+    displayAlert: function () {},
+};
+${setupSource.replace('Application.currentApplication()', 'testApp').replace('function run(argv)', 'function wizardRun(argv)')}
+function run(argv) { wizardRun(argv); return JSON.stringify(asked); }`,
+        [files.projects, files.saved, path.join(files.dir, 'asked.json')]));
+    assert.equal(asked[0], '2');                                           // Anzahl der Terminals: 2 statt 5
+    assert.ok(asked.includes('npm run dev') && asked.includes('Dev'));
+    assert.ok(asked.includes('http://localhost:3000'));
+});
+
+// ------------------------------------------------------------------ Local Dev als zusätzliches Terminal
+
+const LOCAL_DEV_ENV = { LOCAL_DEV_SCRIPT_VALUE: '/repo/local-dev/launcher.zsh', LOCAL_DEV_PROVIDER_VALUE: 'ollama',
+    LOCAL_DEV_MODEL_VALUE: 'qwen:7b', LOCAL_DEV_FRAMEWORK_VALUE: 'opencode' };
+const localDevTasks = (result) => result.tasks.tasks.filter(task => task.label.endsWith('Local Dev') || / Local Dev \(\d+\)$/.test(task.label));
+
+test('Local Dev starts as an extra terminal in the group of the first selected repo with everything preset', t => {
+    const files = fixture(t);
+    const result = workspace(files, { env: LOCAL_DEV_ENV });
+    const [task] = localDevTasks(result);
+    assert.equal(localDevTasks(result).length, 1);
+    assert.equal(task.label, 'A · Local Dev');
+    assert.deepEqual([task.type, task.command, task.args], ['process', '/bin/zsh', ['/repo/local-dev/launcher.zsh', 'start']]);
+    assert.equal(task.options.cwd, files.a);
+    // Anbieter, Modell, CLI und Repository stehen fest: Local Dev fragt nichts mehr.
+    assert.deepEqual(task.options.env, { LOCAL_DEV_PROVIDER: 'ollama', LOCAL_DEV_MODEL: 'qwen:7b',
+        LOCAL_DEV_FRAMEWORK: 'opencode', LOCAL_DEV_REPOSITORY_PATH: files.a });
+    assert.equal(task.presentation.group, 'A');
+    // Es steht hinter allen Projekt-Terminals im Start, gehört aber zur Gruppe von A: die Erweiterung hängt jeden Eintrag an das
+    // letzte Terminal seiner Gruppe, also entsteht es als letzter Split neben den Terminals von A (Terminals je Gruppe in Reihenfolge).
+    const started = result.settings['vibecodeWorkspace.autoStartTerminals'];
+    assert.deepEqual(started.map(terminal => [terminal.name, terminal.group]),
+        [['A · Shell', 'A'], ['A · Extra', 'A'], ['B · Shell', 'B'], ['A · Local Dev', 'A']]);
+    const group = (name) => started.filter(terminal => terminal.group === name).map(terminal => terminal.name);
+    assert.deepEqual(group('A'), ['A · Shell', 'A · Extra', 'A · Local Dev']);
+    assert.deepEqual([started.at(-1).type, started.at(-1).env.LOCAL_DEV_REPOSITORY_PATH], ['process', files.a]);
+});
+
+test('Local Dev works in the first selected local repo and is created once per workspace', t => {
+    const files = fixture(t);
+    const result = workspace(files, { selected: ['B', 'A'], env: LOCAL_DEV_ENV });
+    assert.deepEqual(localDevTasks(result).map(task => [task.label, task.options.cwd]), [['B · Local Dev', files.b]]);
+    assert.equal(localDevTasks(workspace(files, { selected: ['A'], env: LOCAL_DEV_ENV })).length, 1);
+});
+
+test('Local Dev needs script and all three values, otherwise no terminal appears', t => {
+    const files = fixture(t);
+    assert.equal(localDevTasks(workspace(files)).length, 0);
+    for (const missing of Object.keys(LOCAL_DEV_ENV)) {
+        const env = { ...LOCAL_DEV_ENV, [missing]: '' };
+        assert.equal(localDevTasks(workspace(files, { env })).length, 0, missing);
+    }
+});
+
+test('Local Dev is not started on SSH hosts and a remote-only selection simply has none', t => {
+    const files = fixture(t);
+    const remote = 'vscode-remote://ssh-remote+spark/home/user/R';
+    fs.appendFileSync(files.projects, `Remote\t${remote}\n`);
+    const results = workspace(files, { selected: ['A', 'Remote'], all: true, env: LOCAL_DEV_ENV });
+    assert.deepEqual(results.map(result => localDevTasks(result).length), [1, 0]);               // lokal: eins, SSH: keins
+    const remoteOnly = workspace(files, { selected: ['Remote'], all: true, env: LOCAL_DEV_ENV });
+    assert.deepEqual(remoteOnly.map(result => localDevTasks(result).length), [0]);
+});
+
+test('Local Dev follows the autostart switch and never takes over an existing label', t => {
+    const files = fixture(t);
+    const off = workspace(files, { autoStart: 'false', env: LOCAL_DEV_ENV });
+    assert.equal(localDevTasks(off).length, 1);                                                  // als Task da, aber nicht automatisch
+    assert.equal(off.settings['vibecodeWorkspace.autoStartTerminals'], undefined);
+    fs.writeFileSync(files.saved, JSON.stringify({ version: 2, projects: { [files.a]: {
+        terminals: [{ name: 'Local Dev', type: 'Shell', prompt: '', command: 'exec zsh -l', cwd: '' }], urls: [] } } }));
+    const clash = workspace(files, { selected: ['A'], env: LOCAL_DEV_ENV });
+    assert.deepEqual(clash.tasks.tasks.map(task => task.label), ['A · Local Dev', 'A · Local Dev (2)']);   // beide bleiben, keiner verschwindet
+});
+

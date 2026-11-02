@@ -16,6 +16,26 @@ Vor dem Start wird ein Repository aus der bereits eingerichteten VibeCode-Worksp
 
 Vor dem Start kann der Launcher speicherintensive Apps kontrolliert beenden. Im Standardprofil wird Google Chrome geschlossen und nur dann in einer Statusdatei vermerkt, wenn es zuvor wirklich lief. Beim nächsten Doppelklick (Toggle-Stopp) oder bei `--stop` wird Chrome mit seiner letzten Sitzung wieder geöffnet. Chrome stellt dadurch seine normalen Fenster und Tabs wieder her. Sobald ein Inkognito-Fenster offen ist, bleibt Chrome zum Schutz dieser nicht wiederherstellbaren Tabs vollständig geöffnet.
 
+## Im Workspace
+
+Ein gespeicherter Workspace kann Anbieter, Modell und CLI mitbringen (Fenster → **Workspace anlegen…** → Auswahlmenü **Local Dev**).
+Beim Start öffnet er dann zusätzlich ein Terminal, das `launcher.zsh start` mit diesen Werten ausführt, im ersten lokalen Repository
+der Auswahl. Dafür setzt VibeCode `LOCAL_DEV_PROVIDER`, `LOCAL_DEV_MODEL`, `LOCAL_DEV_FRAMEWORK` und `LOCAL_DEV_REPOSITORY_PATH`;
+mit allen vier fragt der Starter nichts mehr. Die Auswahlliste kommt von `launcher.zsh --options` (eine Zeile je startbarer
+Kombination, mit Tabs getrennt: Anbieter-ID, Anbietername, Modell, lokal 1/0, CLI-ID, CLI-Name, eingestellt 1/0); es erscheinen nur
+installierte, erreichbare und zueinander passende Paare. Läuft schon ein anderes MLX-Modell, startet der Starter es mit dem
+gewählten neu (wie bei jedem Start). Die Speicherfreigabe (z. B. Chrome schließen) gilt auch hier.
+
+## Einstellen im Fenster
+
+Statt `--setup` im Terminal: **Übersicht → App-Einstellungen → Local Dev → Einstellen…**. Ein Auswahlmenü zeigt jede konfigurierte,
+zueinander passende Kombination aus Anbieter, Modell und CLI (auch nicht installierte, mit dem Hinweis „Anbieter fehlt“ oder
+„CLI fehlt“); die gespeicherte ist vorgewählt. Gespeichert wird mit `launcher.zsh --set-default ANBIETER MODELL CLI`: dieselben
+Prüfungen und derselbe Schreibweg wie `--setup` (`provider`, `model`, `framework` und `providers.<anbieter>.default_model`), nur ohne
+Rückfragen. Weder Anbieter noch CLI müssen installiert sein, wohl aber konfiguriert und zueinander kompatibel; sonst bleibt die Datei
+unverändert. Das Menü kommt von `--options-all` (neun Felder mit Tabs, die letzten beiden: Anbieter bereit, CLI installiert),
+die Vorauswahl von `--current`.
+
 ## Schnellstart
 
 1. In der Übersicht bei **Local Dev** auf **Öffnen** klicken, oder `./VibeCode\ Workspace.command local` im Terminal ausführen.

@@ -108,6 +108,4 @@ AUTO_START_TERMINALS=true
 # integrierten Terminal des VS-Code-Workspaces.
 OPEN_CONTROL_TERMINAL=true
 
-# true schließt den macOS-Terminal-Tab des Starters nach erfolgreichem Start.
-# Bei einem Fehler bleibt er zur Diagnose geöffnet.
-CLOSE_LAUNCHER_TERMINAL=true
+# macOS-Hilfsterminals schließen nach Erfolg automatisch; bei Fehlern bleibt die Diagnose sichtbar.

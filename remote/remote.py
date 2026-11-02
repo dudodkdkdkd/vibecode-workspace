@@ -248,7 +248,7 @@ def close_terminal_tab(tty_path):
         '-e', 'repeat with terminalWindow in windows',
         '-e', 'repeat with terminalTab in tabs of terminalWindow',
         '-e', 'if (tty of terminalTab) is targetTTY then',
-        '-e', 'close terminalTab',
+        '-e', 'if (count of tabs of terminalWindow) is 1 then close terminalWindow saving no',
         '-e', 'return',
         '-e', 'end if',
         '-e', 'end repeat',
@@ -465,6 +465,20 @@ def summary():
                       'level': 'ok' if active else 'off'}, ensure_ascii=False))
 
 
+def wake_state():
+    """Requested mode separately from controller health, so a failed start can still be switched off."""
+    c = config()
+    enabled = bool(window(c, read('request.json', {}), time.time()))
+    active = wake_active()
+    apps = ', '.join(c['apps']) or 'keine Apps gewählt'
+    text = f'Wachhalten {"AN" if enabled else "AUS"} · Apps: {apps}'
+    if enabled and not active:
+        text += ' · Controller startet oder ist nicht erreichbar'
+    print(json.dumps({'enabled': enabled, 'active': active, 'text': text,
+                      'level': 'warn' if enabled and not active else 'ok' if enabled else 'off'},
+                     ensure_ascii=False))
+
+
 def ssh_show():
     """The saved target as JSON ({"target": null} if none), for the VibeCode window."""
     target = saved_ssh_target() if read(SSH_FILE) is not None else None
@@ -493,11 +507,24 @@ def host_fingerprint():
     return found.group(0) if found else ''
 
 
-def ssh_info(output=print, waking=False):
-    """Status of THIS Mac as an SSH target (run on the remote Mac). Returns the join line or ''."""
+def ssh_facts(waking=False):
+    """What the other Mac needs to know about THIS Mac as an SSH target.
+
+    {'listening': Remote Login on, 'awake': keep-awake on, 'fingerprint': sshd host key ('' if unreadable),
+     'line': the join line for the other Mac ('' while Remote Login is off)}"""
     name = run('/usr/sbin/scutil', '--get', 'LocalHostName', check=False).stdout.strip()
     host = (name or socket.gethostname().split('.')[0]) + '.local'
     listening, awake = ssh_listening(), waking or wake_active()
+    fingerprint = host_fingerprint() if listening else ''
+    line = ' '.join(['workspace remote ssh join', f'{getpass.getuser()}@{host}'] +
+                    ([fingerprint] if fingerprint else [])) if listening else ''
+    return {'listening': listening, 'awake': awake, 'fingerprint': fingerprint, 'line': line}
+
+
+def ssh_info(output=print, waking=False):
+    """Status of THIS Mac as an SSH target (run on the remote Mac), as text. Returns the join line or ''."""
+    facts = ssh_facts(waking)
+    listening, awake = facts['listening'], facts['awake']
     output('SSH-ZUGANG DIESES MACS')
     output(f'Entfernte Anmeldung  {"AN (Port 22)" if listening else "AUS"}')
     output(f'Wachhalten           {"AN" if awake else "AUS (Mac kann einschlafen, dann ist SSH nicht erreichbar)"}')
@@ -508,14 +535,11 @@ def ssh_info(output=print, waking=False):
         output('Wachhalten:  workspace remote ssh share --wake   (oder: workspace remote on)')
     if not listening:
         return ''
-    fingerprint = host_fingerprint()
-    if not fingerprint:
+    if not facts['fingerprint']:
         output('Host-Schlüssel nicht lesbar: der andere Mac kann den Fingerprint nicht prüfen.')
-    line = ' '.join(['workspace remote ssh join', f'{getpass.getuser()}@{host}'] +
-                    ([fingerprint] if fingerprint else []))
     output('Auf dem anderen Mac ausführen:')
-    output('  ' + line)
-    return line
+    output('  ' + facts['line'])
+    return facts['line']
 
 
 def clipboard(text):
@@ -528,17 +552,35 @@ def clipboard(text):
 
 
 def ssh_share(args):
-    """Prepare THIS Mac to be reached over SSH and print the one line the other Mac needs."""
-    if any(arg != '--wake' for arg in args):
-        raise ValueError('Aufruf: workspace remote ssh share [--wake]')
-    waking = bool(args)
+    """Prepare THIS Mac to be reached over SSH and print the one line the other Mac needs.
+
+    --wake keeps the Mac awake (like `workspace remote on`). --json prints the state as JSON for the VibeCode window instead of
+    text. --no-open does not open System Settings again (the window's "check again")."""
+    flags = set(args)
+    if flags - {'--wake', '--json', '--no-open'} or len(flags) != len(args):
+        raise ValueError('Aufruf: workspace remote ssh share [--wake] [--json] [--no-open]')
+    waking = '--wake' in flags
     if waking:
         # Same switch as `workspace remote on`: it also starts the configured apps.
         activate()
+    if '--json' in flags:
+        facts = ssh_facts(waking)
+        opened = copied = False
+        if not facts['listening']:
+            if '--no-open' not in flags:
+                run('/usr/bin/open', SHARING_PANE, check=False)
+                opened = True
+        else:
+            copied = clipboard(facts['line'])
+        print(json.dumps({'remoteLogin': facts['listening'], 'awake': facts['awake'], 'line': facts['line'],
+                          'fingerprint': bool(facts['fingerprint']), 'copied': copied, 'settingsOpened': opened},
+                         ensure_ascii=False))
+        return
     line = ssh_info(print, waking)
     if not line:
-        run('/usr/bin/open', SHARING_PANE, check=False)
-        print('Systemeinstellungen geöffnet. „Entfernte Anmeldung“ einschalten, dann diesen Befehl wiederholen.')
+        if '--no-open' not in flags:
+            run('/usr/bin/open', SHARING_PANE, check=False)
+            print('Systemeinstellungen geöffnet. „Entfernte Anmeldung“ einschalten, dann diesen Befehl wiederholen.')
     elif clipboard(line):
         print('(in die Zwischenablage kopiert)')
 
@@ -678,7 +720,7 @@ def control_running():
 def terminal():
     if control_running():
         return
-    command = shlex.join([str(ROOT / 'workspace'), 'remote', 'control'])
+    command = 'exec ' + shlex.join([sys.executable, str(ROOT / 'remote.py'), 'control'])
     run('/usr/bin/osascript', '-e', 'on run argv', '-e',
         'tell application "Terminal" to do script (item 1 of argv)', '-e',
         'end run', command)
@@ -1035,10 +1077,8 @@ def main(args):
         if (len(args) != 3 or re.fullmatch(r'[0-9a-f]{32}', args[1]) is None or
                 not Path(args[2]).is_file() or not os.access(args[2], os.X_OK)):
             raise ValueError('Ungültiger interner CLI-Start.')
-        subprocess.call([args[2]])
-        # A clean wrapper exit lets Terminal close the tab even if the CLI itself
-        # returned a non-zero status after being stopped.
-        raise SystemExit(0)
+        # Preserve failures so the shared terminal wrapper can keep their diagnosis visible.
+        raise SystemExit(subprocess.call([args[2]]))
     elif cmd == 'controller':
         controller()
     elif cmd == 'status':
@@ -1083,6 +1123,8 @@ def main(args):
                              'ssh set benutzer@host [port] | ssh info')
     elif cmd == 'summary':
         summary()
+    elif cmd == 'wake-state':
+        wake_state()
     elif cmd == 'off':
         deactivate()
         print('AUS: Wachhaltesperre gelöst; ausgewählte Apps werden vollständig beendet.')
@@ -1098,6 +1140,11 @@ def main(args):
 
 
 if __name__ == '__main__':
+    helper_dir = ROOT.parent / 'core'
+    if (helper_dir / 'terminal_session.py').is_file():
+        sys.path.insert(0, str(helper_dir))
+        from terminal_session import wrap_if_needed
+        wrap_if_needed([sys.executable, str(ROOT / 'remote.py')] + sys.argv[1:])
     try:
         main(sys.argv[1:])
     except (ValueError, OSError, subprocess.SubprocessError) as exc:

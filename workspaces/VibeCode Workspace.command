@@ -70,17 +70,33 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PA
 SCRIPT_FILE="${0:A}"
 SCRIPT_DIR="${SCRIPT_FILE:h}"
 
+# Gemeinsamer Abschluss: Erfolg schließt das eigene fertige Terminal-Fenster, Fehler bleiben sichtbar.
+VIBECODE_TERMINAL_HELPER="${0:A:h}/../core/terminal_session.py"
+if [[ -f "$VIBECODE_TERMINAL_HELPER" && "${TERM_PROGRAM:-}" == "Apple_Terminal" && -t 0 \
+      && "${VIBECODE_TERMINAL_SESSION_TTY:-}" != "$(tty)" ]]; then
+  exec python3 "$VIBECODE_TERMINAL_HELPER" /bin/zsh "${0:A}" "$@"
+fi
+
 if [[ "${1:-}" == "remote" ]]; then
   exec "$SCRIPT_DIR/workspace" "$@"
 fi
 
 # Projekte ohne Auswahldialog öffnen: --project NAME (mehrfach möglich). So starten
 # gespeicherte Workspaces und ihre Schreibtisch-Shortcuts direkt.
+# --local-dev ANBIETER MODELL CLI startet zusätzlich Local Dev (lokaler Modellserver mit Agent) als Terminal im
+# ersten lokalen Repository der Auswahl. Ein Workspace speichert diese drei Werte.
 PRESELECTED_PROJECTS=()
-while [[ "${1:-}" == "--project" ]]; do
-  [[ -n "${2:-}" ]] || { print -u2 'Fehler: --project braucht einen Projektnamen.'; exit 2; }
-  PRESELECTED_PROJECTS+=("$2")
-  shift 2
+LOCAL_DEV_REQUEST=()
+while [[ "${1:-}" == "--project" || "${1:-}" == "--local-dev" ]]; do
+  if [[ "$1" == "--project" ]]; then
+    [[ -n "${2:-}" ]] || { print -u2 'Fehler: --project braucht einen Projektnamen.'; exit 2; }
+    PRESELECTED_PROJECTS+=("$2")
+    shift 2
+  else
+    [[ -n "${2:-}" && -n "${3:-}" && -n "${4:-}" ]] || { print -u2 'Fehler: --local-dev braucht Anbieter, Modell und CLI.'; exit 2; }
+    LOCAL_DEV_REQUEST=("$2" "$3" "$4")
+    shift 4
+  fi
 done
 
 # ============================================================
@@ -157,9 +173,6 @@ USE_PROJECT_TERMINALS=true
 # integrierten Terminal des geöffneten VS-Code-Workspaces starten.
 OPEN_CONTROL_TERMINAL=true
 
-# true = den Apple-Terminal-Tab des Starters nach erfolgreichem Start schließen.
-# Bei Fehlern bleibt das Terminal offen und zeigt die Diagnose an.
-CLOSE_LAUNCHER_TERMINAL=true
 # ---------------------------------------------------------------
 
 # Persönliche Konfiguration neben dem Starter laden. Diese Datei ist absichtlich
@@ -171,7 +184,6 @@ fi
 
 if [[ "${1:-}" == "--remote-workspace" ]]; then
   AUTO_START_TERMINALS="${VIBE_REMOTE_TERMINALS:-false}"
-  CLOSE_LAUNCHER_TERMINAL=false
   OPEN_CONTROL_TERMINAL=false
 fi
 
@@ -206,10 +218,8 @@ TMP_TERMINALS="$(mktemp)"
 TMP_DEFAULTS="$(mktemp)"
 TMP_WORKSPACES="$(mktemp)"
 TMP_REMOTE_PROJECTS="$(mktemp)"
-LAUNCHER_TTY="$(tty 2>/dev/null || true)"
 # true = der Fehler wurde dem Benutzer schon erklärt; kein zweiter, allgemeiner Alarm.
 HANDLED_ERROR=false
-LAUNCH_COMPLETED=false
 
 finish_launcher() {
   local exit_code=$?
@@ -226,26 +236,6 @@ on run argv
 end run
 ERROR_APPLESCRIPT
     fi
-  elif [[ "$LAUNCH_COMPLETED" == "true" \
-       && "$CLOSE_LAUNCHER_TERMINAL" == "true" \
-       && "${TERM_PROGRAM:-}" == "Apple_Terminal" \
-       && "$LAUNCHER_TTY" == /dev/tty* ]]; then
-    /usr/bin/nohup /usr/bin/osascript \
-      -e 'on run argv' \
-      -e 'set targetTTY to item 1 of argv' \
-      -e 'delay 0.7' \
-      -e 'tell application "Terminal"' \
-      -e 'repeat with terminalWindow in windows' \
-      -e 'repeat with terminalTab in tabs of terminalWindow' \
-      -e 'if (tty of terminalTab) is targetTTY then' \
-      -e 'if (count of tabs of terminalWindow) is 1 then close terminalWindow' \
-      -e 'return' \
-      -e 'end if' \
-      -e 'end repeat' \
-      -e 'end repeat' \
-      -e 'end tell' \
-      -e 'end run' \
-      "$LAUNCHER_TTY" </dev/null >> "$CONFIG_DIR/terminal-close.log" 2>&1 &!
   fi
 
   return "$exit_code"
@@ -410,7 +400,6 @@ if [[ ! -s "$TMP_NAMES" ]]; then
     exit 1
   fi
   osascript -e 'display alert "Keine Repositories verfügbar" message "Öffne die App „VibeCode Workspace“, öffne in der Übersicht die Einrichtung und füge lokale Ordner, Remote-Repositories oder einen Remote-Host hinzu. Bei bereits eingerichteten Hosts: SSH-Verbindung und Suchordner prüfen; Details stehen im Terminal." as informational'
-  LAUNCH_COMPLETED=true
   exit 0
 fi
 
@@ -505,11 +494,25 @@ if [[ "$OPEN_CONTROL_TERMINAL" == "true" && -f "$CONTROL_SCRIPT" ]]; then
   CONTROL_TERMINAL_ENABLED=true
 fi
 
+# Local Dev ist ein eigenes Modul: fehlt es, startet der Workspace ohne und sagt es.
+LOCAL_DEV_SCRIPT=""
+if (( ${#LOCAL_DEV_REQUEST[@]} )); then
+  if [[ -f "$SCRIPT_DIR/../local-dev/launcher.zsh" ]]; then
+    LOCAL_DEV_SCRIPT="$(cd "$SCRIPT_DIR/../local-dev" && pwd -P)/launcher.zsh"
+  else
+    print -u2 'Hinweis: Local Dev ist nicht installiert (Ordner local-dev/ fehlt). Der Workspace startet ohne.'
+  fi
+fi
+
 AUTO_START_VALUE="$AUTO_START_TERMINALS" \
 USE_PROJECT_TERMINALS_VALUE="$USE_PROJECT_TERMINALS" \
 CONTROL_TERMINAL_ENABLED_VALUE="$CONTROL_TERMINAL_ENABLED" \
 CONTROL_SCRIPT_VALUE="$CONTROL_SCRIPT" \
 CONTROL_CONFIG_DIR_VALUE="$CONFIG_DIR/remote" \
+LOCAL_DEV_SCRIPT_VALUE="$LOCAL_DEV_SCRIPT" \
+LOCAL_DEV_PROVIDER_VALUE="${LOCAL_DEV_REQUEST[1]:-}" \
+LOCAL_DEV_MODEL_VALUE="${LOCAL_DEV_REQUEST[2]:-}" \
+LOCAL_DEV_FRAMEWORK_VALUE="${LOCAL_DEV_REQUEST[3]:-}" \
 osascript -l JavaScript - "$TMP_SELECTED" "$TMP_CONFIG" "$TMP_TERMINALS" "$WORKSPACE_PATH" "$CONFIG_DIR/terminals.json" "$TMP_WORKSPACES" <<'JXA'
 ObjC.import("Foundation");
 
@@ -591,14 +594,27 @@ function run(argv) {
     const controlConfigDir = ObjC.unwrap(
         environment.objectForKey("CONTROL_CONFIG_DIR_VALUE") || $("")
     );
+    // Local Dev: nur mit Skript und allen drei Werten. Die Werte kommen unverändert in die Umgebung des Terminals.
+    const localDev = Object.fromEntries(["SCRIPT", "PROVIDER", "MODEL", "FRAMEWORK"].map((name) =>
+        [name.toLowerCase(), ObjC.unwrap(environment.objectForKey(`LOCAL_DEV_${name}_VALUE`) || $(""))]));
+    const localDevEnabled = Object.values(localDev).every((value) => value);
 
     let savedTerminals = {};
+    let generalDefault = null;
     if ($.NSFileManager.defaultManager.fileExistsAtPath($(savedTerminalsFile))) {
         const saved = JSON.parse(readText(savedTerminalsFile));
         if (!saved || ![1, 2].includes(saved.version) || !saved.projects || typeof saved.projects !== "object" || Array.isArray(saved.projects)) {
             throw new Error("Ungültige Terminal-Konfiguration aus dem Setup.");
         }
         savedTerminals = saved.projects;
+        if (saved.default !== undefined) {
+            // Allgemeiner Standard für Projekte ohne eigenen Eintrag. Ungültiges wird abgelehnt, nie als "leer" gelesen
+            // (auch "default": null nicht: das hieße stillschweigend wieder die eingebauten Terminals).
+            if (!saved.default || typeof saved.default !== "object" || Array.isArray(saved.default)) {
+                throw new Error("Ungültiger allgemeiner Standard in der Terminal-Konfiguration. Bitte das Setup erneut ausführen.");
+            }
+            generalDefault = saved.default;
+        }
     }
 
     // Version 1 speicherte pro Projekt direkt eine Terminal-Liste ohne Browser-Tabs.
@@ -617,24 +633,29 @@ function run(argv) {
         while (parts.length < 4) parts.push("");
         const [project, terminalName, command, relativeCwd] = parts;
         if (!selected.includes(project)) continue;
-        if (useProjectTerminals && Object.prototype.hasOwnProperty.call(savedTerminals, projects[project])) continue;
+        const hasOwnEntry = Object.prototype.hasOwnProperty.call(savedTerminals, projects[project]);
+        if (useProjectTerminals && (hasOwnEntry || generalDefault !== null)) continue;
         terminalDefinitions.push({ project, terminalName, command, relativeCwd });
     }
     const projectUrls = new Map();
     for (const project of selected) {
-        if (!Object.prototype.hasOwnProperty.call(savedTerminals, projects[project])) continue;
-        const { terminals: entries, urls } = normalizeSavedEntry(savedTerminals[projects[project]]);
+        // Eigenes Preset, sonst der allgemeine Standard, sonst die eingebauten Terminals (AUTO_TERMINALS oben).
+        const hasOwnEntry = Object.prototype.hasOwnProperty.call(savedTerminals, projects[project]);
+        if (!hasOwnEntry && generalDefault === null) continue;
+        const label = hasOwnEntry ? project : "den allgemeinen Standard";
+        const { terminals: entries, urls } = normalizeSavedEntry(hasOwnEntry ? savedTerminals[projects[project]] : generalDefault);
         if (!Array.isArray(entries) || entries.some((entry) => !entry ||
             typeof entry.name !== "string" || !entry.name.trim() ||
             typeof entry.command !== "string" || !entry.command.trim() ||
             typeof entry.cwd !== "string")) {
-            throw new Error(`Ungültige Terminals für ${project}. Bitte das Setup erneut ausführen.`);
+            throw new Error(`Ungültige Terminals für ${label}. Bitte das Setup erneut ausführen.`);
         }
         if (!Array.isArray(urls) || urls.some((url) => typeof url !== "string" || !url.trim())) {
-            throw new Error(`Ungültige Browser-Tabs für ${project}. Bitte das Setup erneut ausführen.`);
+            throw new Error(`Ungültige Browser-Tabs für ${label}. Bitte das Setup erneut ausführen.`);
         }
         projectUrls.set(project, urls);
         if (!useProjectTerminals) continue;
+        const remoteProject = locations.get(project).authority !== "";
         for (const entry of entries) {
             // Auch früher gespeicherte Codex-Vorlagen verwenden den neuen Standard.
             // Nur den erzeugten Start ersetzen; eigene Befehle und Prompts bleiben erhalten.
@@ -643,7 +664,23 @@ function run(argv) {
                     /^(if command -v codex >\/dev\/null 2>&1; then (?:CODEX_HOME="?\$HOME\/\.codex(?:-account2)?"? )?exec codex )(?:--yolo|--sandbox workspace-write --ask-for-approval never)(?=;| -- )/,
                     "$1--dangerously-bypass-approvals-and-sandbox")
                 : entry.command;
-            terminalDefinitions.push({ project, terminalName: entry.name, command, relativeCwd: entry.cwd });
+            if (hasOwnEntry) {
+                terminalDefinitions.push({ project, terminalName: entry.name, command, relativeCwd: entry.cwd });
+                continue;
+            }
+            // Der allgemeine Standard gilt für viele Repositories und speichert lokale Befehle (zsh): auf SSH-Hosts
+            // gibt es bash. Ein Unterordner, den dieses Repository nicht hat, fällt auf den Repository-Ordner zurück
+            // (wie "frontend" bei den eingebauten Terminals); remote lässt sich das nicht prüfen.
+            let relativeCwd = entry.cwd;
+            if (remoteProject) {
+                terminalDefinitions.push({ project, terminalName: entry.name,
+                    command: command.split("exec zsh -l").join("exec bash -l"), relativeCwd });
+                continue;
+            }
+            if (relativeCwd && !$.NSFileManager.defaultManager.fileExistsAtPath($(`${locations.get(project).path.replace(/\/$/, "")}/${relativeCwd}`))) {
+                relativeCwd = "";
+            }
+            terminalDefinitions.push({ project, terminalName: entry.name, command, relativeCwd });
         }
     }
 
@@ -695,6 +732,38 @@ function run(argv) {
             };
 
             tasks.push(task);
+        }
+
+        // Local Dev läuft auf dem Mac (lokaler Modellserver), nie auf einem SSH-Host. Es arbeitet im ersten Repository
+        // der Auswahl und hängt als letztes Terminal in dessen Gruppe, neben Claude und Codex.
+        if (localDevEnabled && !authority && group.length) {
+            const project = group[0];
+            const repoPath = locations.get(project).path.replace(/\/$/, "") || "/";
+            const baseLabel = `${project} · Local Dev`;
+            let label = baseLabel;
+            let suffix = 2;
+            while (usedLabels.has(label)) label = `${baseLabel} (${suffix++})`;
+            usedLabels.add(label);
+            tasks.push({
+                label,
+                type: "process",
+                command: "/bin/zsh",
+                args: [localDev.script, "start"],
+                options: {
+                    cwd: repoPath,
+                    // Mit allen vier Werten fragt Local Dev nichts mehr: Anbieter, Modell, CLI und Repository stehen fest.
+                    env: {
+                        LOCAL_DEV_PROVIDER: localDev.provider, LOCAL_DEV_MODEL: localDev.model,
+                        LOCAL_DEV_FRAMEWORK: localDev.framework, LOCAL_DEV_REPOSITORY_PATH: repoPath,
+                    },
+                },
+                icon: { id: "terminal", color: projectColors.get(project) },
+                problemMatcher: [],
+                presentation: {
+                    echo: true, reveal: "always", focus: false, panel: "dedicated",
+                    showReuseMessage: false, clear: false, group: project,
+                },
+            });
         }
 
         // Wachhalten/App-Steuerung gehört zum Mac, nie als Prozess auf den SSH-Host.
@@ -840,6 +909,5 @@ if [[ "$AUTO_START_TERMINALS" == "true" || "$CONTROL_TERMINAL_ENABLED" == "true"
   osascript -e 'display notification "Falls VS Code fragt: automatische Tasks für diesen Workspace erlauben." with title "Vibe Workspace gestartet"'
 fi
 
-# Das Kontrollterminal läuft als eigener VS-Code-Task. Der Starter ist damit
-# fertig und sein Apple-Terminal-Tab darf jetzt geschlossen werden.
-LAUNCH_COMPLETED=true
+# Das Kontrollterminal läuft als eigener VS-Code-Task. Den fertigen Starter
+# schließt die gemeinsame Terminal-Verwaltung.

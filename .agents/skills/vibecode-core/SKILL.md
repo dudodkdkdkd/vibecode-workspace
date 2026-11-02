@@ -14,6 +14,7 @@ enough: no `match`, no `X | Y` types).
 |-------|------|
 | Logic + CLI | `core/vibecode.py` |
 | Overview window (JXA/AppKit) | `core/window.js` |
+| macOS Terminal lifetime | `core/terminal_session.py` |
 | Module registry | `*/module.json` (`entries`: `id`, `title`, `run`, `menu`, optional `order` and `status`; `{module}` = module dir) |
 | Saved workspaces (user data) | `~/.config/vibecode-workspace/workspaces.json` |
 | Generated starters / repo path | `~/.config/vibecode-workspace/shortcuts/`, `.../home` |
@@ -32,12 +33,38 @@ enough: no `match`, no `X | Y` types).
 `--list-projects` exists so the window shows exactly the list the launcher shows, including
 auto-discovered sibling repos. Do not re-implement discovery in Python.
 
+## Terminal lifetime
+
+`core/terminal_session.py` runs a command with its real exit code. Owned Apple Terminal windows close on success,
+including cancelled dialogs (exit 0); failures keep a process and the diagnosis alive until Enter, independently
+of Terminal's profile preferences. The delayed closer matches the exact TTY and waits for its process list to
+be empty. Terminal only implements scripted close for windows: it closes the window only if it has one tab.
+Shared windows with multiple tabs, a manual caller's shell and other commands remain open. VS Code terminals and non-interactive pipes are not managed.
+
+`vibecode.py` wraps its CLI before dispatch, so existing generated workspace/folder starters work without
+regeneration and `execv` routes still retain their status. `open_in_terminal()` starts the wrapper with `exec`;
+the remote script wraps itself (also its automatic control terminal), and direct shell scripts bootstrap it
+before their work begins. `VIBECODE_TERMINAL_SESSION_TTY` prevents nested wrappers on the same TTY; a new tab
+gets its own wrapper. Don't add per-script delayed closers or discard the exit status in `_cli_host`.
+
+Test with `python3 -m unittest tests.test_terminal_session`: real child processes, a pseudo-terminal failure
+that waits for Enter, direct script bootstraps, and the actual AppleScript against isolated window/tab records.
+These tests never inspect or close the user's real Terminal windows.
+
 ## The overview window
 
 One real `NSWindow` (not an `NSAlert`) with sections **Workspaces**, **Repository-Suche**, **Presets pro Repository**, **SSH**,
-**Projekte & Module** (a section only appears if its module offers it). Every row shows
+**App-Einstellungen** (module-specific controls only appear if their module is present). Every row shows
 its status (a coloured dot: green ok, orange warn, grey off) and has its own buttons, so nothing is hidden behind a menu.
 The dialogs for editing a workspace, entering a pasted line and confirming a key are still `NSAlert`s.
+
+- **No duplicate module entry points.** `launch` is offered as **Einmaliger Workspace…** (a one-off selection, nothing saved) in the Workspaces footer next to **Workspace anlegen…** (a saved, named selection);
+  `setup` stays available through the CLI, while folders/presets/SSH have their own sections. Only extras such as
+  Local Dev use `menu: true`. The bottom section has a direct control for **Wachhalten & Apps**. (A Desktop alias for the app itself was a setting here once and
+  was removed on purpose: whoever wants one makes a Finder alias of the root `VibeCode Workspace.command` by hand, never a copy.)
+- **Wake switch.** `settings keep-awake on|off` calls the remote module's existing on/off commands without closing the
+  overview. `remote wake-state` returns the requested `enabled` mode separately from controller health, so a failed
+  controller start still offers **Ausschalten**. Config/status errors remain visible. This mode also starts/stops selected apps.
 
 - **Model and rendering are separate.** `dashboardModel(state)` returns plain rows (`title`, `section`, `item`, `note`,
   `footer`) and is tested as data; `buildDashboard(rows)` makes the views. `perform()` / `flow()` turn the chosen action
@@ -67,6 +94,47 @@ and symlinked folders skipped, a found repo is not searched further, `MAX_DIRS` 
 never re-implements the scan: `folder_state()` asks the module, `folder_action()` wraps add/remove/add-remote/remove-remote.
 Adding a remote folder runs `discover` **without** `--interactive` and keeps the host even if the search fails.
 
+**Quick open (a Desktop shortcut per local search folder).** The checkbox next to Entfernen creates a Finder alias named
+`<folder> öffnen` (`folder_shortcut_name`), same mechanics as workspace shortcuts: alias -> starter in `shortcuts/` -> `vibecode.py
+open-folder PATH`. The shared `STARTER` template takes a `{command}`. The folder starter is keyed by the **folder path**
+(`folder_starter_path`), not the name, so two folders both called "Github" never share a starter; the second one is refused as
+"foreign" instead of stealing the alias. Store: `"quickOpen": true` in `search-folders.json` (written only when on, a non-boolean raises and
+the file is never rewritten; `local-folders.py quick CONFIG PATH on|off`; `add`/`remove` go through `entries()`/`write_entries()` so
+they keep other folders' flags). **Shortcut first, store second**: if the alias fails (foreign file) the flag stays off; if the store step
+fails the new shortcut is taken back. Removing a search folder removes its shortcut first, and `sync_shortcuts()` recreates
+workspace and folder shortcuts (it reads the folder list before changing anything, so a corrupt `search-folders.json` stops it early).
+`open_folder()` finds the folder's launcher projects (`projects_in`: real-path prefix, never remote), shows the launcher's own
+`project-selection.js` dialog through `pick_projects()` (nothing preselected; the single hook tests replace) and then `execv`s the
+launcher with `--project`, like a workspace shortcut; no workspace is saved. APFS lists `ö` decomposed, so tests compare names NFC.
+The window row carries `shortcut` (the name) and shows it in the detail; it never opens a dialog itself.
+
+**Quick open for workspaces** is a *second* alias `<workspace> öffnen` next to the normal direct one, same helpers
+(`install_quick_shortcut` / `remove_quick_shortcut`, `quick_shortcut_name`, `quick_starter_path`), starter command `open-workspace NAME`
+(`open_workspace()`: the workspace's projects the launcher still knows, in stored order, through `pick_projects()`, then `execv`).
+Store: optional `"quickOpen": true` in `workspaces.json` (non-boolean raises). `save_workspace(..., quick=None)` **keeps** the flag when
+`quick` is not given (the window's edit dialog does not know it: rebuilding the entry from name/projects/shortcut would silently drop
+it) and moves/removes the alias on rename; quick is handled before the normal shortcut so a foreign file stops the save before
+anything changed. `set_workspace_quick()` is the checkbox (`workspace-quick --name N on|off`; the window passes `--name=` so `-x` is no option).
+A workspace and a search folder with the same name both want `<name> öffnen`: the second is refused as foreign, never overwritten.
+
+**Local Dev per workspace.** Optional `"localDev": {provider, model, framework}` in `workspaces.json` (all three non-empty strings, no
+control characters; anything else raises, `clean_local_dev`). `save_workspace(..., local_dev=None)` **keeps** it (the CLI `save` without
+`--local-dev-*` and every other switch must not drop it), `False` removes it, a dict sets it. `launcher_argv()` appends
+`--local-dev P M F`, so **every** start path carries it: window Starten, Desktop shortcut (`run`) and quick open. The window's dialog gets
+its choices lazily from `local_dev_options()` (`vibecode.py local-options`, only when the dialog opens, never in `state()`), which only
+reads `local-dev/launcher.zsh --options`: one tab-separated row per startable combination, so detection of installed/reachable
+providers, models and compatible CLIs exists once, in the module. One popup lists the combinations (no dependent lists, no invalid
+pairs); an unavailable saved value is kept as its own item and a missing/failed module hides the popup, in which case `localDev` is
+left out of the save so it stays as it was (`undefined` = untouched, `null` = remove).
+
+**Local Dev setting (the global preselection).** The Local Dev row in App-Einstellungen has **Einstellen…** (`localSetup`): a popup of
+`local-settings` = `launcher.zsh --options-all` (every *configured, compatible* provider x model x CLI, **including not installed**,
+each row carries `providerReady`/`frameworkReady`; the workspace dialog uses `--options`, startable only, same nine fields) plus
+`--current`. Saving calls `local-default` -> `launcher.zsh --set-default P M F`, which validates (configured, compatible, no control
+characters) and writes `provider`, `model`, `framework`, `providers.<p>.default_model` exactly like `--setup`; the model goes
+through argv positionally, so a leading `-` is fine. Nothing is re-detected in Python or JS; the module's `fail` text (`× …`) is
+shown without the `×`. The status line comes from `summary.py` and reads the new values on the next redraw.
+
 **Presets.** `workspaces/presets.js` reads and writes `terminals.json` (the wizard's file, v1 read / v2 written). It loads
 `terminalCommand`, `defaultTerminals`, `validateTerminals`, `validateUrls`, `normalizeEntry` **from `terminal-setup.js`'s own
 source** (`new Function`), so the command building and its shell quoting exist once. The window sends only type, name, prompt
@@ -74,6 +142,16 @@ and cwd; the `command` is derived. Presets are keyed by the project **path as th
 which is why a moved repo orphans its preset; `presets_state()` surfaces those with a unique same-name suggestion and
 `move` copies first, deletes second. `presets.js` is stricter than the wizard on purpose (http/https tabs, unique names,
 at most 12 terminals) and creates the config directory on a fresh Mac.
+
+**General default.** `terminals.json` may carry a top-level `"default": {terminals, urls}` next to `projects`. It applies to every
+selected repo **without its own `projects` entry** (an own entry, even with zero terminals, always wins) and replaces the built-in
+`AUTO_TERMINALS`; unset, the built-ins apply as before. Commands are stored local (zsh): the launcher swaps `exec zsh -l` for
+`exec bash -l` on SSH repos and falls back to the repo root when a local `cwd` subfolder does not exist (remote cannot be checked).
+Three writers must keep it: `presets.js` (`general | save-general | reset-general`, invalid or `null` is rejected, never replaced),
+the wizard (`terminal-setup.js` rewrites the whole file, so it has to carry `default` over and starts unconfigured repos from it) and
+the launcher JXA (`generalDefault`). `"default": null` must throw, not read as "unset" (pitfall 9 of the launcher skill).
+In the window it is the first row of the section (`GENERAL_REPO`, actions `editGeneralPreset` / `resetGeneralPreset`; the scope hint
+is its own note row because a long detail text is cut next to the buttons).
 
 Pitfall that bit once: in `state()` a second variable called `projects` silently replaced the names list with tuples. Names are
 now derived from `list_project_paths()`, one launcher call instead of two.
@@ -84,9 +162,15 @@ now derived from `list_project_paths()`, one launcher call instead of two.
 connection) and `remote ssh show` (the saved Mac target). `available` is true if any of the hosts, remote or setup
 modules is present, so a removed module only hides what it provided.
 
-- The window may trigger **only** `SSH_ACTIONS` (`share`, `share-wake`, `join`, `allow-check`, `allow`) through
+- The window may trigger **only** `SSH_ACTIONS` (`share`, `share-wake`, `share-recheck`, `join`, `allow-check`, `allow`) through
   `vibecode.py _ssh ACTION --line=…`. It always answers `{code, out, err}` and never raises on exit codes:
   **`join` exit 2 means "not authorized yet" and is not an error.** Do not add a generic "run any command" path.
+- **The share mask shows state, not terminal text.** `share*` call `remote ssh share --json` (`--wake`, `--no-open`), which prints
+  `{remoteLogin, awake, line, fingerprint, copied, settingsOpened}` from `ssh_facts()`; the plain `ssh share` text for the terminal is
+  unchanged and uses the same facts. `buildShare` shows only what is missing while Remote Login is off (**Erneut prüfen** =
+  `share-recheck` = `--no-open`, so System Settings is not opened again on every check) and, when it is on, the status, the join line
+  in its own selectable field and the two steps. No terminal commands (`sudo systemsetup`, `--wake`) in the mask. A reply that is not
+  JSON is reported, never rendered.
 - Pasted lines are parsed in Python (`line_tokens`: `shlex`, then every `--option` is dropped) and validated again
   by `remote.py`. `allow` goes through `allow --check` (name + fingerprint as JSON, writes nothing) and an explicit
   confirmation in the window before `allow --yes`.
@@ -131,7 +215,7 @@ modules is present, so a removed module only hides what it provided.
 
 ```bash
 node --test tests/*.test.js
-python3 -m unittest tests.test_remote tests.test_core
+python3 -m unittest tests.test_remote tests.test_core tests.test_terminal_session
 ```
 
 `tests/test_local_dev.py` has 3 failing tests on a clean checkout; they are unrelated.
@@ -150,5 +234,5 @@ scripted answers; the real `doShellScript` round trip with umlauts, quotes and `
 **Not verified** (needs a person at the screen): light mode, a real mouse click, clicking through every SSH dialog,
 opening the Sharing settings pane, a real SSH session started from the window's Terminal, the
 first-time macOS prompt for Desktop access, and that a Desktop double-click starts the launcher.
-Closing the window leaves the Terminal tab that `VibeCode Workspace.command` opened (the launcher closes its own;
-the app does not yet). A `.app` wrapper would avoid the Terminal altogether.
+Automatic closing of real Terminal tabs has not been tested through computer use: access to Terminal is blocked
+by that tool. The closer compiles against Terminal's dictionary and runs against isolated tab/window records.

@@ -86,7 +86,8 @@ class LocalFolderTests(unittest.TestCase):
         result = f.add_folder(self.config, str(self.root))
         self.assertEqual(result, {'path': str(self.root), 'repos': 2, 'truncated': False})
         self.assertEqual(self.stored(), {'version': 1, 'folders': [{'path': str(self.root)}]})
-        self.assertEqual(f.listing(self.config), [{'path': str(self.root), 'exists': True, 'repos': 2, 'truncated': False}])
+        self.assertEqual(f.listing(self.config), [{'path': str(self.root), 'exists': True, 'repos': 2, 'truncated': False,
+                                                   'quickOpen': False}])                  # ohne Angabe: aus
 
     def test_add_rejects_bad_paths_and_duplicates_without_writing(self):
         file = self.base / 'datei.txt'
@@ -115,6 +116,43 @@ class LocalFolderTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'kein Suchordner'):
             f.remove_folder(self.config, str(self.root))
         self.assertTrue(self.root.is_dir())                                  # der Ordner selbst bleibt unberührt
+
+    def test_quick_open_is_switched_per_folder_and_survives_adding_and_removing_others(self):
+        other, third = self.base / 'Other', self.base / 'Third'
+        other.mkdir()
+        third.mkdir()
+        f.add_folder(self.config, str(self.root))
+        f.add_folder(self.config, str(other))
+        self.assertEqual(f.set_quick_open(self.config, str(self.root) + '/', True), {'path': str(self.root), 'quickOpen': True})
+        self.assertEqual(self.stored()['folders'], [{'path': str(self.root), 'quickOpen': True}, {'path': str(other)}])
+        self.assertEqual([e['quickOpen'] for e in f.listing(self.config)], [True, False])
+        f.add_folder(self.config, str(third))                                # Hinzufügen und Entfernen behalten das Flag
+        f.remove_folder(self.config, str(other))
+        self.assertEqual(self.stored()['folders'], [{'path': str(self.root), 'quickOpen': True}, {'path': str(third)}])
+        f.set_quick_open(self.config, str(self.root), False)
+        self.assertEqual(self.stored()['folders'], [{'path': str(self.root)}, {'path': str(third)}])   # aus = Schlüssel fehlt wieder
+
+    def test_quick_open_rejects_unknown_folders_and_writes_nothing_when_nothing_changes(self):
+        f.add_folder(self.config, str(self.root))
+        stored = self.config / 'search-folders.json'
+        before = stored.read_text()
+        with self.assertRaisesRegex(ValueError, 'kein Suchordner'):
+            f.set_quick_open(self.config, str(self.base / 'Other'), True)
+        os.utime(stored, (1, 1))
+        f.set_quick_open(self.config, str(self.root), False)                 # schon aus: nichts schreiben
+        self.assertEqual((stored.read_text(), stored.stat().st_mtime), (before, 1))
+
+    def test_a_corrupt_quick_open_value_is_rejected_and_never_overwritten(self):
+        self.config.mkdir()
+        path = self.config / 'search-folders.json'
+        for bad in ['"ja"', '1', 'null', '[]']:
+            content = f'{{"version": 1, "folders": [{{"path": "{self.root}", "quickOpen": {bad}}}]}}'
+            path.write_text(content)
+            for attempt in (lambda: f.listing(self.config), lambda: f.set_quick_open(self.config, str(self.root), True),
+                            lambda: f.add_folder(self.config, str(self.base))):
+                with self.assertRaisesRegex(ValueError, 'quickOpen'):
+                    attempt()
+            self.assertEqual(path.read_text(), content)
 
     def test_corrupt_store_is_rejected_and_never_overwritten(self):
         self.config.mkdir()
@@ -155,6 +193,10 @@ class LocalFolderTests(unittest.TestCase):
         duplicate = run('add', str(self.config), str(self.root))
         self.assertEqual(duplicate.returncode, 1)
         self.assertIn('Suchordner: Dieser Ordner wird schon durchsucht', duplicate.stderr)
+        quick = run('quick', str(self.config), str(self.root), 'on')
+        self.assertEqual((quick.returncode, json.loads(quick.stdout)['quickOpen']), (0, True))
+        self.assertTrue(json.loads(run('list', str(self.config)).stdout)[0]['quickOpen'])
+        self.assertEqual(run('quick', str(self.config), str(self.root), 'vielleicht').returncode, 2)   # nur on/off
         self.assertEqual(run('remove', str(self.config), str(self.root)).returncode, 0)
         self.assertEqual(run('discover', str(self.config)).stdout, '')       # nichts: keine leere Zeile
 

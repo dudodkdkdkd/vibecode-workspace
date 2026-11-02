@@ -6,6 +6,13 @@
 # =============================================
 
 SCRIPT_DIR="$(cd "$(dirname "${0}")" && pwd)"
+
+# Gemeinsamer Abschluss: Erfolg schließt das eigene fertige Terminal-Fenster, Fehler bleiben sichtbar.
+VIBECODE_TERMINAL_HELPER="${0:A:h}/../core/terminal_session.py"
+if [[ -f "$VIBECODE_TERMINAL_HELPER" && "${TERM_PROGRAM:-}" == "Apple_Terminal" && -t 0 \
+      && "${VIBECODE_TERMINAL_SESSION_TTY:-}" != "$(tty)" ]]; then
+  exec python3 "$VIBECODE_TERMINAL_HELPER" /bin/zsh "${0:A}" "$@"
+fi
 CONFIG_FILE="${SCRIPT_DIR}/ollama-config.json"
 LOG_FILE="${SCRIPT_DIR}/reset-ollama.log"
 

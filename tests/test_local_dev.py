@@ -141,6 +141,161 @@ class LocalDevLauncherTests(unittest.TestCase):
             self.assertNotEqual(oversized.returncode, 0)
             self.assertEqual(config.read_text(), before)
 
+    def options_fixture(self, directory: Path):
+        config = self.write_config(directory)
+        cache = directory / "huggingface" / "hub" / "models--XHToken--Spark-X2.5-4B" / "snapshots" / "revision"
+        cache.mkdir(parents=True)
+        (cache / "config.json").write_text(json.dumps({"num_hidden_layers": 36, "num_key_value_heads": 4, "head_dim": 256}))
+        manifest = directory / "ollama" / "manifests" / "registry.ollama.ai" / "library" / "qwen" / "7b"
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text("{}")
+        data = json.loads(config.read_text())
+        data["providers"]["mlx"]["server_command"] = "/usr/bin/true"
+        data["providers"]["ollama"]["server_command"] = "/usr/bin/true"
+        data["frameworks"]["opencode"]["command"] = "/usr/bin/true"
+        data["frameworks"]["codex"]["command"] = "/usr/bin/true"
+        data["frameworks"]["claude"]["command"] = "definitely-missing-local-ai-client"
+        config.write_text(json.dumps(data))
+        return config, {"HF_HOME": str(directory / "huggingface"), "OLLAMA_MODELS": str(directory / "ollama")}
+
+    def test_options_lists_every_startable_combination_with_tabs_and_marks_the_configured_one(self):
+        with tempfile.TemporaryDirectory() as temp:
+            config, environment = self.options_fixture(Path(temp))
+            before = config.read_text()
+
+            result = self.run_launcher(config, "--options", extra_environment=environment)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            rows = [line.split("\t") for line in result.stdout.splitlines()]
+            self.assertTrue(all(len(row) == 9 for row in rows), result.stdout)
+            self.assertEqual(rows, [
+                # Anbieter, Name, Modell, lokal, CLI, CLI-Name, eingestellt, Anbieter bereit, CLI installiert
+                ["mlx", "MLX (lokal)", "XHToken/Spark-X2.5-4B", "1", "opencode", "OpenCode", "1", "1", "1"],   # Codex: mlx spricht nicht Responses
+                ["ollama", "Ollama (lokal)", "deepseek-coder:6.7b", "0", "codex", "Codex CLI", "0", "1", "1"],     # konfiguriert, nicht lokal
+                ["ollama", "Ollama (lokal)", "deepseek-coder:6.7b", "0", "opencode", "OpenCode", "0", "1", "1"],
+                ["ollama", "Ollama (lokal)", "qwen:7b", "1", "codex", "Codex CLI", "0", "1", "1"],
+                ["ollama", "Ollama (lokal)", "qwen:7b", "1", "opencode", "OpenCode", "0", "1", "1"],
+            ])
+            self.assertFalse(any("claude" in row for row in rows))                              # nicht installiert: nie angeboten
+            self.assertEqual(config.read_text(), before)                                       # Lesen ändert die Konfiguration nicht
+
+    def test_options_skips_unavailable_providers_and_providers_without_a_usable_cli(self):
+        with tempfile.TemporaryDirectory() as temp:
+            config, environment = self.options_fixture(Path(temp))
+            data = json.loads(config.read_text())
+            data["providers"]["mlx"]["server_command"] = "definitely-missing-server"
+            data["frameworks"]["opencode"]["command"] = "definitely-missing-local-ai-client"
+            data["frameworks"]["codex"]["command"] = "definitely-missing-local-ai-client"
+            config.write_text(json.dumps(data))
+
+            result = self.run_launcher(config, "--options", extra_environment=environment)
+
+            self.assertEqual((result.returncode, result.stdout), (0, ""))                      # nichts startbar: leere Liste, kein Fehler
+
+    def test_options_all_also_lists_what_is_not_installed_but_never_an_incompatible_pair(self):
+        with tempfile.TemporaryDirectory() as temp:
+            config, environment = self.options_fixture(Path(temp))
+            data = json.loads(config.read_text())
+            data["providers"]["mlx"]["server_command"] = "definitely-missing-server"          # MLX nicht installiert
+            data["frameworks"]["claude"]["command"] = "definitely-missing-local-ai-client"    # Claude nicht installiert
+            config.write_text(json.dumps(data))
+
+            startable = self.run_launcher(config, "--options", extra_environment=environment)
+            everything = self.run_launcher(config, "--options-all", extra_environment=environment)
+
+            self.assertEqual((startable.returncode, everything.returncode), (0, 0), everything.stderr)
+            rows = [line.split("\t") for line in everything.stdout.splitlines()]
+            self.assertTrue(all(len(row) == 9 for row in rows))
+            summary = {(row[0], row[2], row[4]): (row[7], row[8], row[6]) for row in rows}
+            # MLX fehlt nur im Startbaren; zum Einstellen ist es da, mit "Anbieter nicht bereit". Codex passt nicht zu MLX.
+            self.assertEqual(summary[("mlx", "XHToken/Spark-X2.5-4B", "opencode")], ("0", "1", "1"))
+            self.assertNotIn(("mlx", "XHToken/Spark-X2.5-4B", "codex"), summary)
+            self.assertNotIn(("mlx", "XHToken/Spark-X2.5-4B", "claude"), summary)              # Claude braucht eine Anthropic-API
+            self.assertEqual(summary[("ollama", "qwen:7b", "codex")], ("1", "1", "0"))
+            self.assertFalse(any(row[0] == "mlx" for row in (line.split("\t") for line in startable.stdout.splitlines())))
+            self.assertEqual(len(summary), len(rows))                                          # keine doppelten Zeilen
+
+    def test_current_prints_the_saved_selection(self):
+        with tempfile.TemporaryDirectory() as temp:
+            config, environment = self.options_fixture(Path(temp))
+            result = self.run_launcher(config, "--current", extra_environment=environment)
+            self.assertEqual(result.stdout, "mlx\tXHToken/Spark-X2.5-4B\topencode\n")
+
+    def test_set_default_saves_like_setup_keeps_the_rest_and_accepts_what_is_not_installed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            config, environment = self.options_fixture(Path(temp))
+            before = json.loads(config.read_text())
+            before["providers"]["ollama"]["server_command"] = "definitely-missing-server"      # Ollama nicht installiert: trotzdem einstellbar
+            config.write_text(json.dumps(before))
+            before = json.loads(config.read_text())
+
+            result = self.run_launcher(config, "--set-default", "ollama", "-odd:model", "codex", extra_environment=environment)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Gespeichert: Ollama (lokal) → -odd:model → Codex CLI", result.stdout)    # Modell mit führendem Minus
+            after = json.loads(config.read_text())
+            self.assertEqual((after["provider"], after["model"], after["framework"]), ("ollama", "-odd:model", "codex"))
+            self.assertEqual(after["providers"]["ollama"]["default_model"], "-odd:model")             # wie --setup
+            expected = json.loads(json.dumps(before))
+            expected.update(provider="ollama", model="-odd:model", framework="codex")
+            expected["providers"]["ollama"]["default_model"] = "-odd:model"
+            self.assertEqual(after, expected)                                                         # alles andere unverändert
+            current = self.run_launcher(config, "--current", extra_environment=environment)
+            self.assertEqual(current.stdout, "ollama\t-odd:model\tcodex\n")
+            self.assertEqual(list(config.parent.glob("local-ai.json.*")), [])                         # keine Temp-Reste
+
+    def test_set_default_rejects_bad_input_and_leaves_the_configuration_untouched(self):
+        with tempfile.TemporaryDirectory() as temp:
+            config, environment = self.options_fixture(Path(temp))
+            before = config.read_text()
+            cases = [
+                (("nope", "m", "opencode"), "Unbekannter Provider"),
+                (("mlx", "m", "nope"), "Unbekannte CLI"),
+                (("mlx", "m", "codex"), "nicht direkt kompatibel"),                             # Codex braucht Ollama/Responses
+                (("mlx", "m", "claude"), "nicht direkt kompatibel"),
+                (("mlx", "a\x07b", "opencode"), "Steuerzeichen"),
+                (("mlx", "a\tb", "opencode"), "Steuerzeichen"),
+                (("mlx", "", "opencode"), "Anbieter, Modell und CLI"),
+                (("", "m", "opencode"), "Anbieter, Modell und CLI"),
+            ]
+            for arguments, message in cases:
+                result = self.run_launcher(config, "--set-default", *arguments, extra_environment=environment)
+                self.assertNotEqual(result.returncode, 0, arguments)
+                self.assertIn(message, result.stderr, arguments)
+                self.assertEqual(config.read_text(), before, arguments)
+
+    def test_a_start_with_provider_model_cli_and_repository_given_asks_nothing(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            config, environment = self.options_fixture(directory)
+            repo = directory / "repo"
+            repo.mkdir()
+            data = json.loads(config.read_text())
+            fake = directory / "agent"
+            fake.write_text('#!/bin/sh\nprintf "%s|%s|%s\\n" "$PWD" "$*" "$LOCAL_AI_MODEL"\n')
+            fake.chmod(0o755)
+            data["frameworks"]["opencode"]["command"] = str(fake)
+            config.write_text(json.dumps(data))
+            environment.update({
+                "LOCAL_DEV_PROVIDER": "ollama", "LOCAL_DEV_MODEL": "qwen:7b", "LOCAL_DEV_FRAMEWORK": "opencode",
+                "LOCAL_DEV_REPOSITORY_PATH": str(repo), "LOCAL_DEV_OSASCRIPT_BIN": "/definitely/missing/osascript",
+            })
+            # Der Server gilt als schon bereit; es geht nur darum, dass keine Auswahl mehr erscheint und der Agent im Repository startet.
+            server = ThreadingHTTPServer(("127.0.0.1", 0), type("Ready", (BaseHTTPRequestHandler,), {
+                "do_GET": lambda self: (self.send_response(200), self.end_headers(), self.wfile.write(b"{}")),
+                "log_message": lambda *args: None}))
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            self.addCleanup(server.server_close)
+            self.addCleanup(server.shutdown)                      # läuft vor server_close: erst stoppen, dann Socket schließen
+            data["providers"]["ollama"]["port"] = server.server_address[1]
+            config.write_text(json.dumps(data))
+
+            result = self.run_launcher(config, "start", extra_environment=environment)
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn(f"{repo.resolve()}|", result.stdout)
+            self.assertIn("|qwen:7b", result.stdout)
+
     @unittest.skipUnless(shutil.which("lsof"), "lsof required")
     def test_mlx_readiness_rejects_wrong_server_runtime(self):
         class ModelHandler(BaseHTTPRequestHandler):

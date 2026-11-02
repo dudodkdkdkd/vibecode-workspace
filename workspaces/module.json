@@ -1,9 +1,9 @@
 {
   "entries": [
-    {"id": "launch", "order": 10, "title": "Projekte auswählen und starten",
-     "run": ["{module}/VibeCode Workspace.command"], "menu": true},
+    {"id": "launch", "order": 10, "title": "Einmaliger Workspace: Projekte auswählen und starten",
+     "run": ["{module}/VibeCode Workspace.command"]},
     {"id": "setup", "order": 20, "title": "Repository-Ordner, Terminals und URLs einrichten",
-     "run": ["{module}/Setup VibeCode Workspace.command"], "menu": true,
+     "run": ["{module}/Setup VibeCode Workspace.command"],
      "status": ["{module}/VibeCode Workspace.command", "--summary"]},
     {"id": "preset-store", "title": "Presets pro Repository (Terminals und Browser-Tabs)",
      "run": ["/usr/bin/osascript", "-l", "JavaScript", "{module}/presets.js", "{module}"]},

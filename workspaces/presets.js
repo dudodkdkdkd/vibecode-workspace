@@ -1,9 +1,12 @@
 // macOS JXA: Presets pro Repository (Terminals und Browser-Tabs) in terminals.json lesen und schreiben.
 // Aufruf: osascript -l JavaScript presets.js <modulordner> <befehl> …
 //   list <config>                    alle Presets als JSON
-//   defaults                         die Standard-Terminals (lokal und remote) als JSON
+//   defaults                         die eingebauten Standard-Terminals (lokal und remote) als JSON
 //   save <config> <pfad> <datei>     Preset aus {terminals, urls} (JSON-Datei) speichern
-//   reset <config> <pfad>            Preset entfernen: es gelten wieder die Standard-Terminals
+//   reset <config> <pfad>            Preset entfernen: es gilt wieder der allgemeine Standard
+//   general <config>                 der allgemeine Standard {terminals, urls} oder null (= eingebaute Terminals)
+//   save-general <config> <datei>    allgemeinen Standard speichern: gilt für Repositories ohne eigenes Preset
+//   reset-general <config>           allgemeinen Standard entfernen: es gelten wieder die eingebauten Terminals
 // Befehle und Prüfungen kommen aus terminal-setup.js selbst, nichts davon ist nachgebaut.
 ObjC.import("Foundation");
 
@@ -31,6 +34,8 @@ function isRemote(path) {
     return path.startsWith("vscode-remote://");
 }
 
+// terminals.json: { version, default?: {terminals, urls}, projects: { <pfad>: {terminals, urls} } }
+// "default" ist der allgemeine Standard für Repositories ohne eigenen Eintrag in "projects".
 function readStore(wizard, file) {
     if (!exists(file)) return { version: 2, projects: {} };
     const saved = JSON.parse(readText(file));
@@ -45,14 +50,25 @@ function readStore(wizard, file) {
         wizard.validateUrls(urls, path);
         projects[path] = { terminals, urls };
     });
-    return { version: 2, projects };
+    const store = { version: 2, projects };
+    if (saved.default !== undefined) {
+        // Wie bei den Projekten: Ungültiges wird abgelehnt, nie stillschweigend durch "nichts" ersetzt.
+        check(saved.default && typeof saved.default === "object" && !Array.isArray(saved.default),
+            "Ungültiger allgemeiner Standard. Die vorhandene Datei wurde nicht verändert.");
+        const { terminals, urls } = wizard.normalizeEntry(saved.default);
+        wizard.validateTerminals(terminals, "den allgemeinen Standard");
+        wizard.validateUrls(urls, "den allgemeinen Standard");
+        store.default = { terminals, urls };
+    }
+    return store;
 }
 
 function writeStore(file, store) {
     // Auf einem frischen Mac gibt es ~/.config/vibecode-workspace noch nicht.
     $.NSFileManager.defaultManager.createDirectoryAtPathWithIntermediateDirectoriesAttributesError(
         $(file.slice(0, file.lastIndexOf("/"))), true, $(), null);
-    const written = $(JSON.stringify(store, null, 2) + "\n").writeToFileAtomicallyEncodingError(
+    const ordered = { version: store.version, ...(store.default ? { default: store.default } : {}), projects: store.projects };
+    const written = $(JSON.stringify(ordered, null, 2) + "\n").writeToFileAtomicallyEncodingError(
         $(file), true, $.NSUTF8StringEncoding, null);
     if (!written) throw new Error(`Terminal-Konfiguration konnte nicht geschrieben werden: ${file}`);
 }
@@ -113,6 +129,30 @@ function run(argv) {
             path: key, terminals: store.projects[key].terminals.map(visible), urls: store.projects[key].urls,
         })));
     }
+    if (command === "general") {
+        const store = readStore(wizard, terminalsFile);
+        return JSON.stringify(store.default ? {
+            terminals: store.default.terminals.map(visible), urls: store.default.urls } : null);
+    }
+    if (command === "save-general") {
+        const source = path;                                      // dritter Parameter: die Preset-Datei
+        check(source && exists(source), "Preset-Datei fehlt.");
+        // Der Standard gilt auch für Remote-Repositories: gespeichert wird der lokale Befehl (zsh), der Launcher
+        // ersetzt ihn dort durch bash, genau wie bei den eingebauten Standard-Terminals.
+        const built = buildPreset(wizard, "", JSON.parse(readText(source)));
+        const store = readStore(wizard, terminalsFile);
+        store.default = built;
+        writeStore(terminalsFile, store);
+        return JSON.stringify({ terminals: built.terminals.map(visible), urls: built.urls });
+    }
+    if (command === "reset-general") {
+        const store = readStore(wizard, terminalsFile);
+        if (store.default) {
+            delete store.default;
+            writeStore(terminalsFile, store);
+        }
+        return "ok";
+    }
     checkPath(path);
     if (command === "save") {
         check(file && exists(file), "Preset-Datei fehlt.");
@@ -130,5 +170,5 @@ function run(argv) {
         }
         return "ok";
     }
-    throw new Error("Befehle: list | defaults | save | reset");
+    throw new Error("Befehle: list | defaults | save | reset | general | save-general | reset-general");
 }

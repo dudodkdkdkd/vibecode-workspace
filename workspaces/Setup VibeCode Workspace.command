@@ -18,15 +18,19 @@ CONFIG_DIR="$HOME/.config/vibecode-workspace"
 PROJECTS_FILE="$CONFIG_DIR/projects.tsv"
 TERMINALS_FILE="$CONFIG_DIR/terminals.json"
 SCRIPT_DIR="${0:A:h}"
-CLOSE_SETUP_TERMINAL=true
+
+# Gemeinsamer Abschluss: Erfolg schließt das eigene fertige Terminal-Fenster, Fehler bleiben sichtbar.
+VIBECODE_TERMINAL_HELPER="${0:A:h}/../core/terminal_session.py"
+if [[ -f "$VIBECODE_TERMINAL_HELPER" && "${TERM_PROGRAM:-}" == "Apple_Terminal" && -t 0 \
+      && "${VIBECODE_TERMINAL_SESSION_TTY:-}" != "$(tty)" ]]; then
+  exec python3 "$VIBECODE_TERMINAL_HELPER" /bin/zsh "${0:A}" "$@"
+fi
 
 TMP_PROJECTS="$(mktemp)"
 TMP_CHOSEN_PATHS="$(mktemp)"
 TMP_TERMINAL_CONFIG="$(mktemp)"
 TMP_SETUP_PROJECTS="$(mktemp)"
 TMP_REMOTE_PROJECTS="$(mktemp)"
-SETUP_TTY="$(tty 2>/dev/null || true)"
-SETUP_COMPLETED=false
 
 finish_setup() {
   local exit_code=$?
@@ -41,26 +45,6 @@ on run argv
     display alert "VibeCode Workspace Setup fehlgeschlagen" message "Fehlercode: " & errorCode & return & return & "Das Terminal bleibt geöffnet. Dort stehen die technischen Details." as critical
 end run
 ERROR_APPLESCRIPT
-  elif [[ "$SETUP_COMPLETED" == "true" \
-       && "$CLOSE_SETUP_TERMINAL" == "true" \
-       && "${TERM_PROGRAM:-}" == "Apple_Terminal" \
-       && "$SETUP_TTY" == /dev/tty* ]]; then
-    /usr/bin/nohup /usr/bin/osascript \
-      -e 'on run argv' \
-      -e 'set targetTTY to item 1 of argv' \
-      -e 'delay 0.7' \
-      -e 'tell application "Terminal"' \
-      -e 'repeat with terminalWindow in windows' \
-      -e 'repeat with terminalTab in tabs of terminalWindow' \
-      -e 'if (tty of terminalTab) is targetTTY then' \
-      -e 'if (count of tabs of terminalWindow) is 1 then close terminalWindow' \
-      -e 'return' \
-      -e 'end if' \
-      -e 'end repeat' \
-      -e 'end repeat' \
-      -e 'end tell' \
-      -e 'end run' \
-      "$SETUP_TTY" </dev/null >> "$CONFIG_DIR/terminal-close.log" 2>&1 &!
   fi
 
   return "$exit_code"
@@ -92,7 +76,6 @@ REMOTE_PROJECT_NAME=""
 
 if [[ "${1:-}" == "--remote" ]]; then
   "$SCRIPT_DIR/workspace" remote menu
-  SETUP_COMPLETED=true
   exit 0
 elif [[ "${1:-}" == "--terminals" ]]; then
   setup_mode="Terminals ändern"
@@ -104,7 +87,6 @@ elif [[ "${1:-}" == "--add-remote-host" ]]; then
   if (( $# > 0 )); then
     remote_entry="$(osascript -l JavaScript "$SCRIPT_DIR/remote-project.js" --host "$@")"
     SETUP_NONINTERACTIVE=true
-    CLOSE_SETUP_TERMINAL=false
   fi
 elif [[ "${1:-}" == "--add-remote" ]]; then
   setup_mode="Remote-Repository hinzufügen"
@@ -112,7 +94,6 @@ elif [[ "${1:-}" == "--add-remote" ]]; then
   if (( $# > 0 )); then
     remote_entry="$(osascript -l JavaScript "$SCRIPT_DIR/remote-project.js" "$@")"
     SETUP_NONINTERACTIVE=true
-    CLOSE_SETUP_TERMINAL=false
   fi
 elif [[ "${1:-}" == "--add" || "${1:-}" == "--replace" ]]; then
   if [[ "$1" == "--add" ]]; then
@@ -127,7 +108,6 @@ elif [[ "${1:-}" == "--add" || "${1:-}" == "--replace" ]]; then
   }
   printf '%s\n' "$@" > "$TMP_CHOSEN_PATHS"
   SETUP_NONINTERACTIVE=true
-  CLOSE_SETUP_TERMINAL=false
 else
   if ! setup_mode="$(osascript - "$existing_count" <<'MODE_APPLESCRIPT'
 on run argv
@@ -139,7 +119,6 @@ on run argv
 end run
 MODE_APPLESCRIPT
 )"; then
-    SETUP_COMPLETED=true
     exit 0
   fi
 
@@ -147,12 +126,10 @@ fi
 
 if [[ "$setup_mode" == "Wachhalten & Apps" ]]; then
   "$SCRIPT_DIR/workspace" remote menu
-  SETUP_COMPLETED=true
   exit 0
 fi
 
 [[ -n "$setup_mode" ]] || {
-  SETUP_COMPLETED=true
   exit 0
 }
 
@@ -163,7 +140,6 @@ if [[ "$setup_mode" == "Remote-Verbindung einrichten" ]]; then
     setup_exit_code=$?
     [[ "$setup_exit_code" == "130" ]] || exit "$setup_exit_code"
   fi
-  SETUP_COMPLETED=true
   exit 0
 fi
 
@@ -171,7 +147,7 @@ if [[ "$setup_mode" == "Remote-Host hinzufügen" ]]; then
   if [[ "$SETUP_NONINTERACTIVE" == "false" ]]; then
     remote_entry="$(osascript -l JavaScript "$SCRIPT_DIR/remote-project.js" --host)"
   fi
-  [[ -n "$remote_entry" ]] || { SETUP_COMPLETED=true; exit 0; }
+  [[ -n "$remote_entry" ]] || { exit 0; }
   remote_host="${remote_entry%%$'\t'*}"
   remote_root="${remote_entry#*$'\t'}"
   python3 "$SCRIPT_DIR/remote-hosts.py" add "$CONFIG_DIR" "$remote_host" "$remote_root"
@@ -190,7 +166,6 @@ on run argv
 end run
 HOST_APPLESCRIPT
   fi
-  SETUP_COMPLETED=true
   exit 0
 fi
 
@@ -198,7 +173,7 @@ if [[ "$setup_mode" == "Remote-Repository hinzufügen" ]]; then
   if [[ "$SETUP_NONINTERACTIVE" == "false" ]]; then
     remote_entry="$(osascript -l JavaScript "$SCRIPT_DIR/remote-project.js")"
   fi
-  [[ -n "$remote_entry" ]] || { SETUP_COMPLETED=true; exit 0; }
+  [[ -n "$remote_entry" ]] || { exit 0; }
   REMOTE_PROJECT_NAME="${remote_entry%%$'\t'*}"
   printf '%s\n' "${remote_entry#*$'\t'}" > "$TMP_CHOSEN_PATHS"
 elif [[ "$SETUP_NONINTERACTIVE" == "false" && "$setup_mode" != "Terminals ändern" ]]; then
@@ -215,13 +190,11 @@ set AppleScript's text item delimiters to oldDelims
 return outputText
 FOLDER_APPLESCRIPT
   then
-    SETUP_COMPLETED=true
     exit 0
   fi
 fi
 
 [[ "$setup_mode" == "Terminals ändern" || -s "$TMP_CHOSEN_PATHS" ]] || {
-  SETUP_COMPLETED=true
   exit 0
 }
 
@@ -297,7 +270,6 @@ if [[ "$SETUP_NONINTERACTIVE" == "false" ]]; then
   setup_result="$(osascript -l JavaScript "$SCRIPT_DIR/terminal-setup.js" \
     "$TMP_SETUP_PROJECTS" "$TERMINALS_FILE" "$TMP_TERMINAL_CONFIG")"
   if [[ "$setup_result" == "cancelled" ]]; then
-    SETUP_COMPLETED=true
     exit 0
   fi
   [[ "$setup_result" == "saved" && -s "$TMP_TERMINAL_CONFIG" ]] || exit 1
@@ -316,4 +288,3 @@ SUCCESS_APPLESCRIPT
 fi
 
 printf 'Setup abgeschlossen: %s Ordner eingerichtet.\n' "$configured_count"
-SETUP_COMPLETED=true

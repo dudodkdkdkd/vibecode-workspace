@@ -24,6 +24,10 @@ changing behaviour — several of these look like obvious one-liners and are not
 
 ## Rules that always apply
 
+- **Terminal cleanup is shared.** Direct shell starters bootstrap `core/terminal_session.py` on an Apple Terminal
+  TTY; the core CLI and module launches also use it. It closes the matching single-tab window after exit 0, including
+  cancellation, and keeps failures visible until Enter. Shared multi-tab windows are preserved. Don't reintroduce success-only flags or per-script closers;
+  `VIBECODE_TERMINAL_SESSION_TTY` prevents nested cleanup. Non-interactive invocations and VS Code terminals stay untouched.
 - **Never duplicate a starter.** `VibeCode Workspace.command` is the only root starter and a short
   forwarder (`exec python3 "${0:A:h}/core/vibecode.py" "$@"`) so the logic exists exactly once.
   Older root starters (`Launch Workspace.command`, `Setup Workspace.command`, `Local Dev.command`)
@@ -77,6 +81,12 @@ changing behaviour — several of these look like obvious one-liners and are not
   remote scan, or opening the app window waits on every unreachable SSH host.
 - Local search folders (`search-folders.json`, found by `local-folders.py discover`) are added before the sibling scan and
   on every flag, including the read-only ones: a local scan is fast and does not touch the network.
+- `--local-dev PROVIDER MODEL CLI` (after the `--project`s, exactly three values, else exit 2) adds a **Local Dev terminal**: a
+  `process` task `/bin/zsh local-dev/launcher.zsh start` in the group of the **first selected local project**, with
+  `LOCAL_DEV_PROVIDER/MODEL/FRAMEWORK/REPOSITORY_PATH` in its env so Local Dev asks nothing. It sits last in the task array but
+  shares that project's `group`, which is what puts it as the last split beside the agents (the extension appends to the last terminal
+  of a group). Never created for SSH groups; a missing `local-dev/` prints a hint and the workspace starts without. It is **not** a
+  preset terminal: preset rows are skipped for repos with their own preset, so it is added separately like the control terminal.
 - `--project NAME` (repeatable) opens exactly those projects **without the dialog** and does not touch
   `last-selection.txt`. Unknown names: partial → notification and continue; none → alert, exit 1.
 - The EXIT trap shows a generic "konnte nicht gestartet werden" alert on every non-zero exit. A failure

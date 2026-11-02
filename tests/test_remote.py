@@ -6,10 +6,12 @@ import importlib.util
 import io
 import json
 import os
+import shlex
 from pathlib import Path
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch, Mock, call
@@ -220,6 +222,20 @@ class RemoteTests(unittest.TestCase):
             r.close_cli_platform(handle)
         kill.assert_not_called()
         close_tab.assert_not_called()
+
+    def test_cli_host_preserves_errors_for_the_terminal_wrapper(self):
+        executable = self.ssh_dir.parent / 'test-agent'
+        executable.write_text('#!/bin/sh\nexit 7\n')
+        executable.chmod(0o755)
+        with self.assertRaises(SystemExit) as result:
+            r.main(['_cli_host', 'a' * 32, str(executable)])
+        self.assertEqual(result.exception.code, 7)
+
+    def test_automatic_control_terminal_uses_the_real_remote_entrypoint(self):
+        with patch.object(r, 'control_running', return_value=False), patch.object(r, 'run') as run:
+            r.terminal()
+        self.assertEqual(shlex.split(run.call_args.args[-1]),
+                         ['exec', sys.executable, str(r.ROOT / 'remote.py'), 'control'])
 
     def test_complete_app_quit_escalates_from_quit_to_term_and_kill(self):
         with patch.object(r, 'run') as run, \
@@ -547,6 +563,56 @@ class RemoteTests(unittest.TestCase):
                 self.out(r.ssh_share, ['--wirklich'])
             activate.assert_called_once_with()
 
+    def share_json(self, args, listening=True, awake=True, fingerprint=FP, copied=True):
+        with patch.object(r, 'ssh_listening', return_value=listening), patch.object(r, 'wake_active', return_value=awake), \
+             patch.object(r, 'host_fingerprint', return_value=fingerprint), \
+             patch.object(r, 'run', return_value=Mock(stdout='Remote-Mac\n')) as run, \
+             patch.object(r, 'clipboard', return_value=copied) as clip, patch.object(r, 'activate') as activate:
+            shown = self.out(r.ssh_share, args)
+        return json.loads(shown), run, clip, activate
+
+    def test_share_json_gives_the_window_the_state_instead_of_terminal_text(self):
+        data, run, clip, _ = self.share_json(['--json'])
+        line = f'workspace remote ssh join {getpass.getuser()}@Remote-Mac.local {FP}'
+        self.assertEqual(data, {'remoteLogin': True, 'awake': True, 'line': line, 'fingerprint': True, 'copied': True,
+                                'settingsOpened': False})
+        clip.assert_called_once_with(line)
+        self.assertNotIn(call('/usr/bin/open', r.SHARING_PANE, check=False), run.call_args_list)
+
+    def test_share_json_reports_a_failed_copy_and_an_unreadable_host_key(self):
+        data, _, _, _ = self.share_json(['--json'], fingerprint='', copied=False)
+        self.assertEqual((data['copied'], data['fingerprint']), (False, False))
+        self.assertTrue(data['line'].endswith('@Remote-Mac.local'))                          # ohne Fingerprint, aber die Zeile gibt es
+
+    def test_share_json_opens_settings_while_login_is_off_unless_told_not_to(self):
+        data, run, clip, _ = self.share_json(['--json'], listening=False, awake=False)
+        self.assertEqual((data['remoteLogin'], data['line'], data['copied'], data['settingsOpened']), (False, '', False, True))
+        run.assert_any_call('/usr/bin/open', r.SHARING_PANE, check=False)
+        clip.assert_not_called()
+        data, run, clip, _ = self.share_json(['--json', '--no-open'], listening=False)         # „Erneut prüfen“
+        self.assertEqual((data['remoteLogin'], data['settingsOpened']), (False, False))
+        self.assertNotIn(call('/usr/bin/open', r.SHARING_PANE, check=False), run.call_args_list)
+        data, _, clip, _ = self.share_json(['--json', '--no-open'])                            # jetzt an: Zeile wird kopiert
+        self.assertEqual((data['remoteLogin'], data['copied']), (True, True))
+        clip.assert_called_once()
+
+    def test_share_json_with_wake_turns_keep_awake_on_and_reports_it(self):
+        data, _, _, activate = self.share_json(['--json', '--wake'], awake=False)
+        activate.assert_called_once_with()
+        self.assertTrue(data['awake'])                                                          # --wake gilt sofort als an
+
+    def test_share_flags_are_checked_and_the_terminal_text_is_unchanged(self):
+        for bad in (['--json', '--json'], ['--wake', '--wirklich'], ['--json', 'x']):
+            with patch.object(r, 'activate') as activate, self.assertRaises(ValueError, msg=repr(bad)):
+                self.out(r.ssh_share, bad)
+            activate.assert_not_called()                                                         # nichts geschieht bei falschem Aufruf
+        with patch.object(r, 'ssh_listening', return_value=False), patch.object(r, 'wake_active', return_value=True), \
+             patch.object(r, 'run', return_value=Mock(stdout='Remote-Mac\n')) as run:
+            text = self.out(r.ssh_share, ['--no-open'])
+        self.assertNotIn(call('/usr/bin/open', r.SHARING_PANE, check=False), run.call_args_list)
+        self.assertIn('Entfernte Anmeldung  AUS', text)
+        self.assertNotIn('Systemeinstellungen geöffnet', text)
+
     def test_summary_is_one_json_line_for_the_window(self):
         self.c.update(apps=['Codex', 'Claude'])
         r.write('config.json', self.c)
@@ -559,6 +625,24 @@ class RemoteTests(unittest.TestCase):
         r.write('config.json', self.c)
         with patch.object(r, 'wake_active', return_value=False):
             self.assertIn('keine Apps gewählt', json.loads(self.out(r.summary))['text'])
+
+    def test_window_switch_reflects_requested_mode_even_if_controller_is_down(self):
+        r.write('config.json', {'keep_awake': True, 'apps': ['Codex']})
+        with patch.object(r, 'wake_active', return_value=False):
+            pending = json.loads(self.out(r.main, ['wake-state']))
+        self.assertTrue(pending['enabled'])
+        self.assertFalse(pending['active'])
+        self.assertEqual(pending['level'], 'warn')
+        self.assertIn('Controller', pending['text'])
+        self.assertIn('Apps: Codex', pending['text'])
+        with patch.object(r, 'wake_active', return_value=True):
+            active = json.loads(self.out(r.wake_state))
+        self.assertEqual(active['level'], 'ok')
+        r.deactivate()
+        with patch.object(r, 'wake_active', return_value=True):
+            stopped = json.loads(self.out(r.wake_state))
+        self.assertFalse(stopped['enabled'])
+        self.assertEqual(stopped['level'], 'off')
 
     def test_app_error_does_not_block_control_terminal(self):
         self.c.update(apps=['Codex', 'Claude'], open_control_terminal=True)

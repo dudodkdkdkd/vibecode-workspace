@@ -29,9 +29,9 @@ const STATE = (overrides = {}) => Object.assign({
         { name: 'Solo', projects: ['B'], shortcut: false, missing: [] },
     ],
     projects: ['A', 'B', 'C'],
-    entries: [{ id: 'setup', title: 'Einrichten', status: { text: '3 Projekte eingerichtet', level: 'ok' } },
-        { id: 'remote', title: 'Remote', status: { text: 'Wachhalten AUS', level: 'off' } },
-        { id: 'launch', title: 'Auswählen', status: null }],
+    canLaunch: true,
+    entries: [{ id: 'local', title: 'Local Dev', status: null }],
+    settings: { wake: { enabled: false, text: 'Wachhalten AUS · Apps: Codex', level: 'off' } },
 }, overrides);
 
 const SSH = {
@@ -46,6 +46,10 @@ const REMOTE_MAC = { kind: 'mac', name: 'remote-mac.local', title: 'user@remote-
 const SSH_JSON = JSON.stringify(SSH);
 const ssh = (overrides = {}) => STATE({ ssh: Object.assign({}, SSH, overrides) });
 const result = (code, out, err = '') => ({ code, out, err });
+// Antwort des Remote-Moduls auf „share“: der Zustand als JSON.
+const SHARE = (extra = {}) => Object.assign({ remoteLogin: true, awake: false, line: 'workspace remote ssh join t@h.local SHA256:abc',
+    fingerprint: true, copied: true, settingsOpened: false }, extra);
+const shareResult = (extra) => result(0, JSON.stringify(SHARE(extra)));
 const FOLDERS = {
     canAddLocal: true, canAddRemote: true, errors: [],
     local: [{ path: '/Users/example/Github', exists: true, repos: 14, truncated: false },
@@ -83,7 +87,7 @@ const next = (key) => {
 };
 const ui = {
     dashboard: (state) => { calls.push(['dashboard']); return next('dashboard'); },
-    edit: (state, draft, existing, message) => { calls.push(['edit', draft, existing && existing.name, message]); return next('edit'); },
+    edit: (state, draft, existing, message, local) => { calls.push(['edit', draft, existing && existing.name, message, local]); return next('edit'); },
     confirmDelete: (name) => { calls.push(['confirmDelete', name]); return next('confirmDelete'); },
     info: (text) => calls.push(['info', text]),
     error: (text) => calls.push(['error', text]),
@@ -96,16 +100,30 @@ const ui = {
     confirmRemoveFolder: (label) => { calls.push(['confirmRemoveFolder', label]); return next('confirmRemoveFolder'); },
     editPreset: (repo, draft, custom, note) => { calls.push(['editPreset', repo.name, draft, custom, note]); return next('editPreset'); },
     pickRepo: (repos) => { calls.push(['pickRepo', repos.map((repo) => repo.name)]); return next('pickRepo'); },
-    confirmResetPreset: (label) => { calls.push(['confirmResetPreset', label]); return next('confirmResetPreset'); },
+    pickLocalDev: (choices) => { calls.push(['pickLocalDev', choices]); return next('pickLocalDev'); },
+    confirmResetPreset: (label, effect) => { calls.push(['confirmResetPreset', label, effect]); return next('confirmResetPreset'); },
     confirmMovePreset: (label, target) => { calls.push(['confirmMovePreset', label, target]); return next('confirmMovePreset'); },
 };
 const backend = {
     state: () => { calls.push(['state']); return script.state; },
     save: (workspace) => { calls.push(['save', workspace]); const failure = (script.saveErrors || []).shift(); if (failure) throw new Error(failure); },
     remove: (name) => calls.push(['remove', name]),
+    localSettings: () => {
+        calls.push(['localSettings']);
+        if (script.localSettingsError) throw new Error(script.localSettingsError);
+        return script.localSettings;
+    },
+    setLocalDefault: (value) => { calls.push(['setLocalDefault', value]); if (script.setDefaultError) throw new Error(script.setDefaultError); },
+    localDevOptions: () => {
+        calls.push(['localDevOptions']);
+        if (script.localOptionsError) throw new Error(script.localOptionsError);
+        return script.localOptions || { available: false, options: [], error: null };
+    },
+    quickWorkspace: (name, enabled) => { calls.push(['quickWorkspace', name, enabled]); if (script.quickWorkspaceError) throw new Error(script.quickWorkspaceError); },
     start: (name) => { calls.push(['start', name]); if (script.startError) throw new Error(script.startError); },
     open: (id) => { calls.push(['open', id]); if (script.openError) throw new Error(script.openError); },
     syncShortcuts: () => { calls.push(['sync']); return '2 Shortcuts erneuert.'; },
+    setting: (name, enabled) => { calls.push(['setting', name, enabled]); if (script.settingError) throw new Error(script.settingError); },
     folder: (action, options) => {
         calls.push(['folder', action, options]);
         const answer = next('folderResults');
@@ -132,7 +150,7 @@ test('Starten startet den gewählten Workspace und schließt das Fenster', () =>
     assert.deepEqual(calls.filter((c) => c[0] !== 'state'), [['dashboard'], ['start', 'Solo']]);
 });
 
-test('Neuer Workspace: Namenskonflikt zeigt die Meldung und behält alle Eingaben', () => {
+test('Workspace anlegen: Namenskonflikt zeigt die Meldung und behält alle Eingaben', () => {
     const draft = { name: 'Demo', projects: ['A'], shortcut: true };
     const calls = flowRun({
         state: STATE(),
@@ -184,7 +202,7 @@ test('ohne bekannte Projekte erklärt das Fenster, was zu tun ist, statt einen l
         state: STATE({ projects: [] }), dashboard: [{ action: 'new' }, { action: 'close' }],
     });
     assert.ok(!kinds(calls).includes('edit'));
-    assert.match(calls.find((c) => c[0] === 'error')[1], /Repository-Ordner/);
+    assert.match(calls.find((c) => c[0] === 'error')[1], /Repository-Suche/);
 });
 
 test('Öffnen startet das Modul im Terminal und schließt das Fenster', () => {
@@ -221,7 +239,7 @@ test('SSH: Verbinden öffnet die gewählte Verbindung im Terminal und schließt 
 });
 
 test('SSH: der Zustand wird bei jedem Durchlauf frisch gelesen', () => {
-    const calls = flowRun({ state: ssh(), dashboard: [sshShare, back], sshResults: [result(0, 'Wachhalten           AN')],
+    const calls = flowRun({ state: ssh(), dashboard: [sshShare, back], sshResults: [shareResult({ awake: true })],
         share: ['done'] });
     assert.equal(kinds(calls).filter((k) => k === 'state').length, kinds(calls).filter((k) => k === 'dashboard').length);
 });
@@ -277,34 +295,55 @@ test('SSH: Fehler bei der Verbindung, Abbruch und Auswahl "Zurück" ändern nich
 });
 
 test('SSH: Diesen Mac freigeben – Status, Wach halten, dann Schlüssel mit Bestätigung eintragen', () => {
-    const status = 'Entfernte Anmeldung  AN (Port 22)\nWachhalten           AUS\n  workspace remote ssh join t@h SHA256:abc';
-    const awake = status.replace('AUS', 'AN');
+    const asleep = SHARE({ awake: false });
+    const awake = SHARE({ awake: true });
     const key = JSON.stringify({ name: 'user@client', fingerprint: 'SHA256:xyz', known: false });
     const calls = flowRun({
         state: ssh(), dashboard: [sshShare, back],
-        sshResults: [result(0, status), result(0, awake), result(0, key), result(0, 'Freigegeben.')],
+        sshResults: [result(0, JSON.stringify(asleep)), result(0, JSON.stringify(awake)), result(0, key), result(0, 'Freigegeben.')],
         share: ['wake', 'allow'], askLine: ["workspace remote ssh allow 'ssh-ed25519 AAAA user@client'"],
         confirmAllow: [true],
     });
     const backend = calls.filter((c) => c[0] === 'ssh' && typeof c[1] === 'string' && c.length === 3);
     assert.deepEqual(backend.map((c) => c[1]), ['share', 'share-wake', 'allow-check', 'allow']);
-    assert.deepEqual(calls.filter((c) => c[0] === 'share').map((c) => c[1]), [status, awake]);
+    assert.deepEqual(calls.filter((c) => c[0] === 'share').map((c) => c[1]), [asleep, awake]);      // die Maske bekommt den Zustand, keinen Text
     assert.deepEqual(calls.find((c) => c[0] === 'confirmAllow'), ['confirmAllow', 'user@client', 'SHA256:xyz']);
     assert.match(calls.find((c) => c[0] === 'info')[1], /^Freigegeben: user@client\./);
+});
+
+test('SSH: Entfernte Anmeldung aus: „Erneut prüfen“ fragt nach, ohne die Systemeinstellungen wieder zu öffnen', () => {
+    const off = SHARE({ remoteLogin: false, line: '', fingerprint: false, copied: false, settingsOpened: true });
+    const calls = flowRun({
+        state: ssh(), dashboard: [sshShare, back],
+        sshResults: [result(0, JSON.stringify(off)), result(0, JSON.stringify(off)), shareResult({ awake: true })],
+        share: ['recheck', 'recheck', 'done'],
+    });
+    const backend = calls.filter((c) => c[0] === 'ssh' && c.length === 3);
+    assert.deepEqual(backend.map((c) => c[1]), ['share', 'share-recheck', 'share-recheck']);   // nur das erste Mal öffnet es die Einstellungen
+    assert.equal(calls.filter((c) => c[0] === 'share').length, 3);
+    assert.equal(calls.filter((c) => c[0] === 'share').at(-1)[1].remoteLogin, true);            // nach dem Einschalten geht es weiter
+});
+
+test('SSH: eine unlesbare Antwort des Moduls wird gesagt, statt eine leere Maske zu zeigen', () => {
+    for (const out of ['', 'Entfernte Anmeldung  AN', '[]x']) {
+        const calls = flowRun({ state: ssh(), dashboard: [sshShare, back], sshResults: [result(0, out)], share: [] });
+        assert.deepEqual(calls.find((c) => c[0] === 'error'), ['error', 'Die Antwort des Remote-Moduls war nicht lesbar.']);
+        assert.ok(!kinds(calls).includes('share'));
+    }
 });
 
 test('SSH: ein abgelehnter oder schon bekannter Schlüssel wird nicht geschrieben', () => {
     const line = "workspace remote ssh allow 'ssh-ed25519 AAAA n'";
     const declined = flowRun({
         state: ssh(), dashboard: [sshShare, back],
-        sshResults: [result(0, 'x'), result(0, JSON.stringify({ name: 'n', fingerprint: 'SHA256:f', known: false }))],
+        sshResults: [shareResult(), result(0, JSON.stringify({ name: 'n', fingerprint: 'SHA256:f', known: false }))],
         share: ['allow'], askLine: [line], confirmAllow: [false],
     });
     assert.ok(!declined.some((c) => c[0] === 'ssh' && c[1] === 'allow'));
 
     const known = flowRun({
         state: ssh(), dashboard: [sshShare, back],
-        sshResults: [result(0, 'x'), result(0, JSON.stringify({ name: 'n', fingerprint: 'SHA256:f', known: true }))],
+        sshResults: [shareResult(), result(0, JSON.stringify({ name: 'n', fingerprint: 'SHA256:f', known: true }))],
         share: ['allow'], askLine: [line],
     });
     assert.ok(!known.some((c) => c[0] === 'confirmAllow' || (c[0] === 'ssh' && c[1] === 'allow')));
@@ -312,7 +351,7 @@ test('SSH: ein abgelehnter oder schon bekannter Schlüssel wird nicht geschriebe
 
     const invalid = flowRun({
         state: ssh(), dashboard: [sshShare, back],
-        sshResults: [result(0, 'x'), result(1, '', 'Erwartet wird genau eine Zeile')],
+        sshResults: [shareResult(), result(1, '', 'Erwartet wird genau eine Zeile')],
         share: ['allow'], askLine: ['kaputt'],
     });
     assert.deepEqual(invalid.find((c) => c[0] === 'error'), ['error', 'Erwartet wird genau eine Zeile']);
@@ -483,6 +522,73 @@ test('Presets: Übernehmen überträgt das Preset auf das neue Repository, nur n
     assert.deepEqual(calls.filter((c) => c[0] === 'preset'), [['preset', 'move', { path: '/alt/moved', to: '/neu/moved' }]]);
 });
 
+const GENERAL = { terminals: [TERM('Shell'), TERM('Agent', 'Claude Code', 'Hallo')], urls: ['http://localhost:3000'] };
+
+test('Allgemeiner Standard: Festlegen startet mit den eingebauten Terminals und speichert ohne Pfad', () => {
+    const calls = flowRun({
+        state: withPresets(), dashboard: [{ action: 'editGeneralPreset' }, back],
+        editPreset: [{ terminals: [TERM('Neu')], urls: ['http://localhost:1'] }], presetResults: [ok('Allgemeiner Standard gespeichert')],
+    });
+    const edit = calls.find((c) => c[0] === 'editPreset');
+    assert.equal(edit[1], 'Allgemeiner Standard');
+    assert.deepEqual(edit[2].terminals.map((t) => t.name), ['Frontend', 'Claude']);       // eingebaut, solange nichts festgelegt ist
+    assert.equal(edit[3], false);                                                         // noch kein eigener Standard: kein Zurücksetzen-Knopf
+    assert.deepEqual(calls.find((c) => c[0] === 'preset'),
+        ['preset', 'save-general', { data: { terminals: [TERM('Neu')], urls: ['http://localhost:1'] } }]);
+});
+
+test('Allgemeiner Standard: Bearbeiten beginnt mit dem gespeicherten Standard, Zurücksetzen fragt nach und sagt, was dann gilt', () => {
+    const calls = flowRun({
+        state: withPresets({ general: GENERAL }), dashboard: [{ action: 'editGeneralPreset' }, back],
+        editPreset: [{ reset: true }, { reset: true }], confirmResetPreset: [false, true], presetResults: [ok('zurückgesetzt')],
+    });
+    const edits = calls.filter((c) => c[0] === 'editPreset');
+    assert.deepEqual(edits[0][2], { terminals: GENERAL.terminals, urls: GENERAL.urls });
+    assert.equal(edits[0][3], true);                                                      // eigener Standard: Zurücksetzen möglich
+    assert.equal(edits.length, 2);                                                        // bei "Nein" geht der Editor weiter
+    assert.deepEqual(calls.filter((c) => c[0] === 'confirmResetPreset').map((c) => [c[1], c[2]]),
+        Array(2).fill(['Allgemeiner Standard', 'Danach gelten wieder die eingebauten Standard-Terminals ohne Browser-Tabs.']));
+    assert.deepEqual(calls.filter((c) => c[0] === 'preset'), [['preset', 'reset-general', null]]);
+});
+
+test('Allgemeiner Standard: die Übersicht setzt ihn zurück, nur nach Rückfrage', () => {
+    const row = { action: 'resetGeneralPreset' };
+    const calls = flowRun({
+        state: withPresets({ general: GENERAL }), dashboard: [row, row, back], confirmResetPreset: [true, false], presetResults: [ok('x')],
+    });
+    assert.deepEqual(calls.filter((c) => c[0] === 'preset'), [['preset', 'reset-general', null]]);
+    assert.equal(calls.filter((c) => c[0] === 'confirmResetPreset').length, 2);
+});
+
+test('Allgemeiner Standard: ein neues Repository-Preset beginnt mit ihm, auch remote, und die Rückfrage nennt ihn', () => {
+    for (const repo of [PRESETS.repos[1], PRESETS.repos[2]]) {
+        const calls = flowRun({
+            state: withPresets({ general: GENERAL }), dashboard: [{ action: 'newPreset' }, { action: 'resetPreset', path: '/alt/lost', label: 'lost' }, back],
+            pickRepo: [repo], editPreset: [null], confirmResetPreset: [false],
+        });
+        assert.deepEqual(calls.find((c) => c[0] === 'editPreset')[2], { terminals: GENERAL.terminals, urls: GENERAL.urls });
+        assert.equal(calls.find((c) => c[0] === 'confirmResetPreset')[2],
+            'Danach gilt wieder der allgemeine Standard. Das Repository selbst bleibt unberührt.');
+    }
+    // Ohne allgemeinen Standard bleibt es bei den eingebauten Terminals.
+    const plain = flowRun({ state: withPresets(), dashboard: [{ action: 'resetPreset', path: '/alt/lost', label: 'lost' }, back], confirmResetPreset: [false] });
+    assert.equal(plain.find((c) => c[0] === 'confirmResetPreset')[2],
+        'Danach starten wieder die Standard-Terminals. Das Repository selbst bleibt unberührt.');
+});
+
+test('Allgemeiner Standard: ein abgelehnter Standard zeigt den Grund und behält alle Eingaben', () => {
+    const wrong = { terminals: [TERM('A', 'Shell', '', '../x')], urls: [] };
+    const fixed = { terminals: [TERM('A')], urls: [] };
+    const calls = flowRun({
+        state: withPresets(), dashboard: [{ action: 'editGeneralPreset' }, back], editPreset: [wrong, fixed],
+        presetResults: [{ throw: 'execution error: VibeCode: Terminal 1 („A“): Bitte einen relativen Unterordner ohne „..“ angeben. (1)' }, ok('ok')],
+    });
+    const edits = calls.filter((c) => c[0] === 'editPreset');
+    assert.deepEqual(edits[1][2], wrong);
+    assert.match(edits[1][4], /relativen Unterordner/);
+    assert.deepEqual(calls.filter((c) => c[0] === 'preset').map((c) => c[1]), ['save-general', 'save-general']);
+});
+
 test('Presets: ohne Auswahl in der Repository-Liste passiert nichts', () => {
     const calls = flowRun({ state: withPresets(), dashboard: [{ action: 'newPreset' }, back], pickRepo: [null] });
     assert.deepEqual(calls.find((c) => c[0] === 'pickRepo'), ['pickRepo', ['alpha', 'beta', 'r [SSH: spark]']]);
@@ -490,6 +596,52 @@ test('Presets: ohne Auswahl in der Repository-Liste passiert nichts', () => {
 });
 
 // ------------------------------------------------------------------ Widgets
+
+test('App-Einstellungen: Schalter bleiben im Fenster, lesen den Zustand neu und zeigen Fehler', () => {
+    const changes = [
+        { action: 'setting', name: 'keep-awake', enabled: true },
+        { action: 'setting', name: 'keep-awake', enabled: false },
+    ];
+    const calls = flowRun({ state: STATE(), dashboard: [...changes, { action: 'close' }] });
+    assert.deepEqual(calls.filter((c) => c[0] === 'setting'), changes.map((c) => ['setting', c.name, c.enabled]));
+    assert.equal(calls.filter((c) => c[0] === 'state').length, 3);
+    assert.ok(!kinds(calls).includes('open'));
+    const failed = flowRun({ state: STATE(), dashboard: [changes[0], { action: 'close' }],
+        settingError: 'VibeCode: Wachhalten konnte nicht geändert werden.' });
+    assert.deepEqual(failed.find((c) => c[0] === 'error'), ['error', 'Wachhalten konnte nicht geändert werden.']);
+});
+
+test('App-Einstellungen: ein aktiver Schalter bietet Aus an, ein Statusfehler keinen geratenen Schalter', () => {
+    const model = (wake) => JSON.parse(widgets(`return JSON.stringify(dashboardModel(Object.assign({}, STATE,
+        { settings: { wake: ${JSON.stringify(wake)} } })));`));
+    const on = { enabled: true, text: 'AN', level: 'ok' };
+    const rows = model(on);
+    const settings = rows.slice(rows.findIndex((r) => r.text === 'App-Einstellungen'));
+    const actions = settings.flatMap((r) => r.buttons || []).map((b) => b.action);
+    assert.deepEqual(actions.filter((a) => a.action === 'setting'), [{ action: 'setting', name: 'keep-awake', enabled: false }]);
+    assert.ok(!actions.some((a) => ['launch', 'setup'].includes(a.id)));
+    assert.ok(!actions.some((a) => a.action === 'connect'));
+    const unknown = { enabled: null, text: 'Status nicht lesbar', level: 'warn' };
+    assert.ok(!model(unknown).flatMap((r) => r.buttons || []).some((b) => b.action.action === 'setting'));
+    assert.ok(!model(null).some((r) => r.title === 'Wachhalten & Apps'));
+    // Ohne Wachhalten und ohne Modul-Einträge gibt es den Bereich gar nicht (früher stand dort immer der App-Shortcut).
+    const bare = JSON.parse(widgets(`return JSON.stringify(dashboardModel({ workspaces: [], projects: [], entries: [], settings: { wake: null } })
+        .filter((row) => row.type === 'section').map((row) => row.text));`));
+    assert.deepEqual(bare, ['Workspaces']);
+});
+
+test('App-Einstellungen: Backend setzt gezielt ein oder aus', () => {
+    const out = JSON.parse(jxa(`${library}
+function run() {
+    const commands = [];
+    const backend = makeBackend({ doShellScript: (command) => { commands.push(command); return ''; } }, '/usr/bin/python3', '/c/vibecode.py');
+    backend.setting('keep-awake', true);
+    backend.setting('keep-awake', false);
+    return JSON.stringify(commands);
+}`));
+    assert.deepEqual(out, ["'/usr/bin/python3' '/c/vibecode.py' 'settings' 'keep-awake' 'on'",
+        "'/usr/bin/python3' '/c/vibecode.py' 'settings' 'keep-awake' 'off'"]);
+});
 
 function widgets(body, prelude = '') {
     return jxa(`${library.replace(PRESENT, 'function present(alert, widgets) { return scriptedPresent(alert, widgets); }')
@@ -513,23 +665,25 @@ const MODEL_STATE = Object.assign(ssh(), {
 test('Übersicht: alles Eingerichtete steht direkt da, nichts hinter "Mehr…"', () => {
     const rows = JSON.parse(widgets(`return JSON.stringify(dashboardModel(${JSON.stringify(MODEL_STATE)}));`));
     const sections = rows.filter((row) => row.type === 'section').map((row) => row.text);
-    assert.deepEqual(sections, ['Workspaces', 'SSH', 'Projekte & Module']);
+    assert.deepEqual(sections, ['Workspaces', 'SSH', 'App-Einstellungen']);
     const items = rows.filter((row) => row.type === 'item');
     assert.deepEqual(items.map((row) => row.title), [
-        'Demo', 'Alt', 'spark', 'user@remote-mac.local', 'Einrichten', 'Remote', 'Auswählen']);
+        'Demo', 'Alt', 'spark', 'user@remote-mac.local', 'Wachhalten & Apps', 'Local Dev']);
     // Shortcut und Warnung stehen vor der (langen) Projektliste: dort wird gekürzt.
     assert.equal(items[0].detail, 'Schreibtisch ✓ · A, B');
     assert.equal(items[1].detail, 'kein Shortcut · ⚠︎ nicht gefunden: weg · A, weg');
-    assert.deepEqual(items.map((row) => row.level), ['ok', 'warn', 'ok', 'ok', 'ok', 'off', 'none']);
+    assert.deepEqual(items.map((row) => row.level), ['ok', 'warn', 'ok', 'ok', 'off', 'none']);
     assert.deepEqual(items[2].detail, '~/projects · 12 Repositories');
-    assert.equal(items[4].detail, '3 Projekte eingerichtet');
-    assert.equal(items[6].detail, '');                                            // Modul ohne Status
-    assert.deepEqual(items[0].buttons.map((b) => b.label), ['Starten', 'Bearbeiten…']);
-    assert.deepEqual(items[0].buttons[0].action, { action: 'start', name: 'Demo' });
+    assert.equal(items[4].detail, 'Wachhalten AUS · Apps: Codex');
+    assert.equal(items[5].detail, '');                                            // Modul ohne Status
+    assert.deepEqual(items[0].buttons.map((b) => b.label), ['Quick-Öffnen', 'Starten', 'Bearbeiten…']);
+    assert.deepEqual(items[0].buttons[0].action, { action: 'quickWorkspace', name: 'Demo', enabled: true });   // aus: anklicken schaltet ein
+    assert.deepEqual(items[0].buttons[1].action, { action: 'start', name: 'Demo' });
     assert.deepEqual(items[3].buttons[0].action, { action: 'connect', item: REMOTE_MAC });
-    assert.deepEqual(items[5].buttons[0].action, { action: 'open', id: 'remote' });
+    assert.deepEqual(items[4].buttons[0].action, { action: 'setting', name: 'keep-awake', enabled: true });
+    assert.deepEqual(items[4].buttons[1].action, { action: 'open', id: 'remote' });
     const footers = rows.filter((row) => row.type === 'footer').map((row) => row.buttons.map((b) => b.label));
-    assert.deepEqual(footers, [['Neuer Workspace…', 'Shortcuts erneuern'], ['Neue Verbindung…', 'Diesen Mac freigeben…']]);
+    assert.deepEqual(footers, [['Workspace anlegen…', 'Einmaliger Workspace…', 'Shortcuts erneuern'], ['Neue Verbindung…', 'Diesen Mac freigeben…']]);
 });
 
 test('Übersicht: leerer Zustand sagt klar, dass nichts eingerichtet ist', () => {
@@ -540,8 +694,8 @@ test('Übersicht: leerer Zustand sagt klar, dass nichts eingerichtet ist', () =>
         'Noch kein Workspace angelegt.', 'Noch keine Verbindung eingerichtet.', '⚠︎ hosts: kaputt']);
     assert.equal(notes[2].level, 'warn');
     const footers = rows.filter((row) => row.type === 'footer').map((row) => row.buttons.map((b) => b.label));
-    assert.deepEqual(footers, [['Neuer Workspace…'], ['Neue Verbindung…']]);   // ohne Freigabe-Modul kein Freigeben
-    assert.ok(!rows.some((row) => row.text === 'Projekte & Module'));            // ohne Module kein leerer Bereich
+    assert.deepEqual(footers, [['Workspace anlegen…'], ['Neue Verbindung…']]);   // ohne Freigabe-Modul kein Freigeben
+    assert.ok(!rows.some((row) => row.text === 'App-Einstellungen'));            // ohne Module kein leerer Bereich
 });
 
 test('Übersicht: der SSH-Bereich erscheint nur, wenn ein Modul SSH anbietet', () => {
@@ -565,9 +719,9 @@ test('Übersicht: echte Knöpfe lösen beim Klick genau die Aktion ihrer Zeile a
         built.window.delegate.windowWillClose(null);  // rotes Schließen-Kästchen
         return JSON.stringify({ titles: built.buttons.map((b) => b.title), clicked, escape,
             title: ObjC.unwrap(built.window.title), afterClose: dashboardAction });`));
-    assert.deepEqual(out.titles, ['Starten', 'Bearbeiten…', 'Starten', 'Bearbeiten…', 'Neuer Workspace…',
-        'Shortcuts erneuern', 'Verbinden', 'Verbinden', 'Neue Verbindung…', 'Diesen Mac freigeben…',
-        'Öffnen', 'Öffnen', 'Öffnen', 'Schließen']);
+    assert.deepEqual(out.titles, ['Quick-Öffnen', 'Starten', 'Bearbeiten…', 'Quick-Öffnen', 'Starten', 'Bearbeiten…', 'Workspace anlegen…',
+        'Einmaliger Workspace…', 'Shortcuts erneuern', 'Verbinden', 'Verbinden', 'Neue Verbindung…', 'Diesen Mac freigeben…',
+        'Einschalten', 'Apps wählen…', 'Einstellen…', 'Öffnen', 'Schließen']);
     for (const click of out.clicked) assert.deepEqual(click.action, click.expected, click.title);
     assert.deepEqual(out.clicked[out.clicked.length - 1].action, { action: 'close' });
     assert.equal(out.escape, '\u001b');                                           // Esc schließt
@@ -602,7 +756,7 @@ test('Übersicht: die native Oberfläche liefert die Aktion der angeklickten Sch
             return dashboardAction;
         }`));
     assert.deepEqual(out.chosen, { action: 'connect', item: SPARK });
-    assert.deepEqual(out.seen, [14]);
+    assert.deepEqual(out.seen, [18]);
 });
 
 test('Editor: echte Checkboxen, vorbelegt, fehlende Projekte sichtbar, Eingaben auslesbar', () => {
@@ -728,14 +882,65 @@ function run() {
 
 test('Freigabe-Dialog: Wach halten erscheint nur, solange der Mac nicht schon wach gehalten wird', () => {
     const out = JSON.parse(widgets(`
-        const asleep = buildShare('Wachhalten           AUS (Mac kann einschlafen)');
-        const awake = buildShare('Wachhalten           AN');
+        const asleep = buildShare(${JSON.stringify(SHARE({ awake: false }))});
+        const awake = buildShare(${JSON.stringify(SHARE({ awake: true }))});
         return JSON.stringify({ asleep: titles(asleep.alert), awake: titles(awake.alert),
-            actions: [asleep.actions, awake.actions], text: ObjC.unwrap(asleep.alert.informativeText) });`));
+            actions: [asleep.actions, awake.actions], text: ObjC.unwrap(asleep.alert.informativeText),
+            awakeText: ObjC.unwrap(awake.alert.informativeText) });`));
     assert.deepEqual(out.asleep, ['Schlüssel eintragen…', 'Wach halten', 'Fertig']);
     assert.deepEqual(out.awake, ['Schlüssel eintragen…', 'Fertig']);
-    assert.match(out.text, /Zwischenablage/);
-    assert.match(out.text, /Wachhalten           AUS/);
+    assert.deepEqual(out.actions, [['allow', 'wake', 'done'], ['allow', 'done']]);
+    assert.match(out.text, /Wachhalten: aus\. Der Mac kann einschlafen/);
+    assert.match(out.awakeText, /Wachhalten: an ✓/);
+});
+
+test('Freigabe-Dialog: bereit zeigt Status, zwei Schritte und die Zeile in einem eigenen markierbaren Feld, ohne Terminal-Befehle', () => {
+    const line = 'workspace remote ssh join t@h.local SHA256:abc';
+    const out = JSON.parse(widgets(`
+        const built = buildShare(${JSON.stringify(SHARE({ line }))});
+        const subviews = Array.from({ length: Number(built.alert.accessoryView.subviews.count) },
+            (_, i) => built.alert.accessoryView.subviews.objectAtIndex(i));
+        return JSON.stringify({ title: ObjC.unwrap(built.alert.messageText), text: ObjC.unwrap(built.alert.informativeText),
+            fields: subviews.map((view) => [ObjC.unwrap(view.stringValue), Boolean(view.selectable)]) });`));
+    assert.equal(out.title, 'Diesen Mac freigeben');
+    assert.match(out.text, /^Bereit: Dieser Mac nimmt SSH-Verbindungen an\. ✓/);
+    assert.match(out.text, /1\. Auf dem anderen Mac: VibeCode → SSH → Neue Verbindung… → „Mit der Zeile eines anderen Macs verbinden“/);
+    assert.match(out.text, /\(sie liegt in der Zwischenablage\):$/);
+    assert.deepEqual(out.fields[0], [line, true]);                                           // die Zeile: eigenes Feld, markierbar
+    assert.match(out.fields[1][0], /^2\. Der andere Mac zeigt dann eine Zeile\. Klicke hier auf „Schlüssel eintragen…“/);
+    // Befehle fürs Terminal gehören nicht in die Maske.
+    for (const text of [out.text, ...out.fields.slice(1).map((f) => f[0])]) assert.doesNotMatch(text, /sudo|systemsetup|--wake|workspace remote/);
+});
+
+test('Freigabe-Dialog: Kopieren fehlgeschlagen und unlesbarer Host-Schlüssel werden gesagt', () => {
+    const out = JSON.parse(widgets(`
+        const text = (share) => ObjC.unwrap(buildShare(share).alert.informativeText);
+        return JSON.stringify({ copyFailed: text(${JSON.stringify(SHARE({ copied: false }))}),
+            noKey: text(${JSON.stringify(SHARE({ fingerprint: false }))}), fine: text(${JSON.stringify(SHARE())}) });`));
+    assert.match(out.copyFailed, /das Kopieren hat nicht geklappt, markiere sie und kopiere sie selbst/);
+    assert.doesNotMatch(out.copyFailed, /liegt in der Zwischenablage/);
+    assert.match(out.noKey, /⚠︎ Der Host-Schlüssel ist nicht lesbar/);
+    assert.doesNotMatch(out.fine, /⚠︎/);
+});
+
+test('Freigabe-Dialog: Entfernte Anmeldung aus zeigt nur das Eine, was fehlt, und „Erneut prüfen“', () => {
+    const off = SHARE({ remoteLogin: false, line: '', fingerprint: false, copied: false, settingsOpened: true });
+    const out = JSON.parse(widgets(`
+        const built = buildShare(${JSON.stringify(off)});
+        const ui = nativeUi({});
+        response = FIRST; const recheck = ui.share(${JSON.stringify(off)});
+        response = FIRST + 1; const done = ui.share(${JSON.stringify(off)});
+        response = FIRST + 7; const unknown = ui.share(${JSON.stringify(off)});
+        return JSON.stringify({ buttons: titles(built.alert), actions: built.actions, text: ObjC.unwrap(built.alert.informativeText),
+            hasLine: built.line !== null, recheck, done, unknown });`, `
+        let response;
+        function scriptedPresent() { return response; }`));
+    assert.deepEqual(out.buttons, ['Erneut prüfen', 'Fertig']);
+    assert.deepEqual([out.recheck, out.done, out.unknown], ['recheck', 'done', 'done']);       // unbekannter Knopf = Fertig, nie eine Aktion
+    assert.match(out.text, /^Noch nicht bereit: „Entfernte Anmeldung“ ist ausgeschaltet\./);
+    assert.match(out.text, /Allgemein → Teilen → Entfernte Anmeldung/);
+    assert.equal(out.hasLine, false);                                                            // keine Zeile, solange sie nichts nützt
+    assert.doesNotMatch(out.text, /sudo|systemsetup|--wake|workspace remote/);
 });
 
 test('SSH-Eingaben: Abbrechen liefert null, Auswahlliste und Bestätigung sind eindeutig', () => {
@@ -803,7 +1008,7 @@ test('Übersicht: Repository-Suche zeigt jeden Ordner mit Zahl und Warnung, zwis
     const rows = JSON.parse(widgets(`return JSON.stringify(dashboardModel(${JSON.stringify(
         Object.assign(ssh(), { folders: FOLDERS }))}));`));
     assert.deepEqual(rows.filter((row) => row.type === 'section').map((row) => row.text),
-        ['Workspaces', 'Repository-Suche', 'SSH', 'Projekte & Module']);
+        ['Workspaces', 'Repository-Suche', 'SSH', 'App-Einstellungen']);
     const start = rows.findIndex((row) => row.text === 'Repository-Suche');
     const items = rows.slice(start).filter((row) => row.type === 'item').slice(0, 6);
     assert.deepEqual(items.map((row) => [row.title, row.detail, row.level]), [
@@ -814,7 +1019,10 @@ test('Übersicht: Repository-Suche zeigt jeden Ordner mit Zahl und Warnung, zwis
         ['spark:~/projects', 'SSH · 12 Repositories (zuletzt gefunden)', 'ok'],
         ['studio:/srv', 'SSH · ⚠︎ noch keine Repositories gefunden', 'warn']]);
     assert.ok(items.every((row) => row.middle));                                // Pfade werden in der Mitte gekürzt
-    assert.deepEqual(items[0].buttons[0].action,
+    assert.deepEqual(items.map((row) => row.buttons.map((b) => b.label)), [
+        ['Quick-Öffnen', 'Entfernen'], ['Entfernen'],                           // fehlender Ordner: nichts zu öffnen
+        ['Quick-Öffnen', 'Entfernen'], ['Quick-Öffnen', 'Entfernen'], ['Entfernen'], ['Entfernen']]);   // remote: kein Quick-Öffnen
+    assert.deepEqual(items[0].buttons[1].action,
         { action: 'removeFolder', kind: 'local', path: '/Users/example/Github', label: '/Users/example/Github' });
     assert.deepEqual(items[4].buttons[0].action,
         { action: 'removeFolder', kind: 'remote', host: 'spark', label: 'spark:~/projects' });
@@ -836,7 +1044,7 @@ test('Übersicht: ohne Suchordner steht ein kurzer Hinweis da, und fehlende Modu
     const sections = (folders) => model(folders).filter((row) => row.type === 'section').map((row) => row.text);
     assert.ok(!sections({ canAddLocal: false, canAddRemote: false, local: [], remote: [], errors: [] }).includes('Repository-Suche'));
     assert.deepEqual(JSON.parse(widgets(`return JSON.stringify(dashboardModel(STATE).filter((row) => row.type === 'section')
-        .map((row) => row.text));`)), ['Workspaces', 'Projekte & Module']);        // alter Zustand ohne folders
+        .map((row) => row.text));`)), ['Workspaces', 'App-Einstellungen']);        // alter Zustand ohne folders
 });
 
 test('Übersicht: die Knöpfe der Repository-Suche lösen ihre Aktion aus', () => {
@@ -852,6 +1060,357 @@ test('Übersicht: die Knöpfe der Repository-Suche lösen ihre Aktion aus', () =
     assert.equal(out.clicked.length, 6 + 2);                                       // 6 Entfernen + 2 Hinzufügen
     for (const click of out.clicked) assert.deepEqual(click.action, click.expected, click.title);
     assert.deepEqual(out.clicked.map((c) => c.action.action).slice(-2), ['addFolder', 'addRemoteFolder']);
+});
+
+const QUICK = (extra = {}) => withFolders({ local: [Object.assign({ path: '/Users/example/Github', exists: true, repos: 3, truncated: false,
+    quickOpen: true, shortcut: 'Github öffnen' }, extra), FOLDERS.local[1]] });
+
+test('Übersicht: Quick-Öffnen ist ein Kästchen neben Entfernen und nennt den Shortcut auf dem Schreibtisch', () => {
+    const model = (state) => JSON.parse(widgets(`return JSON.stringify(dashboardModel(${JSON.stringify(state)}));`));
+    const folderRow = (state, title = '/Users/example/Github') => model(state).find((row) => row.type === 'item' && row.title === title);
+    const off = folderRow(withFolders());
+    assert.deepEqual(off.buttons.map((b) => [b.label, Boolean(b.checkbox), b.checked]),
+        [['Quick-Öffnen', true, false], ['Entfernen', false, undefined]]);
+    assert.deepEqual(off.buttons[0].action, { action: 'quickOpen', path: '/Users/example/Github', enabled: true });     // anklicken = einschalten
+    assert.equal(off.detail, 'Lokal · 14 Repositories');
+    const on = folderRow(QUICK());
+    assert.deepEqual(on.buttons.map((b) => [b.label, Boolean(b.checkbox), b.checked]),
+        [['Quick-Öffnen', true, true], ['Entfernen', false, undefined]]);
+    assert.deepEqual(on.buttons[0].action, { action: 'quickOpen', path: '/Users/example/Github', enabled: false });     // anklicken = ausschalten
+    assert.equal(on.detail, 'Lokal · 3 Repositories · Schreibtisch: „Github öffnen“');
+    // Ein fehlender Ordner hat nichts zu öffnen: kein Kästchen. Eine Warnung wird nicht von dem Namen überdeckt.
+    assert.deepEqual(folderRow(QUICK(), '/Volumes/Alt').buttons.map((b) => b.label), ['Entfernen']);
+    assert.equal(folderRow(QUICK({ repos: 0 })).detail, 'Lokal · ⚠︎ keine Repositories gefunden');
+    const noName = folderRow(QUICK({ shortcut: null }));
+    assert.equal(noName.detail, 'Lokal · 3 Repositories');                              // Name nicht bestimmbar: nur das Kästchen
+});
+
+test('Übersicht: das Quick-Öffnen-Kästchen ist ein echter Schalter und löst seine Aktion aus', () => {
+    const out = JSON.parse(widgets(`
+        const result = ${JSON.stringify([withFolders(), QUICK()])}.map((state) => {
+            const page = buildDashboard(dashboardModel(state));
+            const box = page.buttons.find((b) => b.action.action === 'quickOpen');           // das Kästchen des Ordners, nicht des Workspaces
+            const before = Number(box.view.state);
+            dashboardAction = null;
+            box.view.performClick(null);
+            return { before, after: Number(box.view.state), action: dashboardAction, expected: box.action };
+        });
+        return JSON.stringify({ result, on: Number($.NSControlStateValueOn), off: Number($.NSControlStateValueOff) });`));
+    assert.deepEqual(out.result.map((r) => [r.before, r.after]), [[out.off, out.on], [out.on, out.off]]);   // zeigt den gespeicherten Zustand
+    for (const r of out.result) assert.deepEqual(r.action, r.expected);
+});
+
+test('Quick-Öffnen: das Kästchen schaltet pro Ordner an und aus, ohne das Fenster zu schließen', () => {
+    const calls = flowRun({
+        state: withFolders(),
+        dashboard: [{ action: 'quickOpen', path: '/Users/example/Github', enabled: true }, { action: 'quickOpen', path: '/Users/example/Github', enabled: false }, back],
+        folderResults: [ok('an'), ok('aus')],
+    });
+    assert.deepEqual(calls.filter((c) => c[0] === 'folder').map((c) => [c[1], c[2]]),
+        [['quick-open', { path: '/Users/example/Github', mode: 'on' }], ['quick-open', { path: '/Users/example/Github', mode: 'off' }]]);
+    assert.equal(calls.filter((c) => c[0] === 'dashboard').length, 3);                  // Übersicht wird danach neu gezeigt
+});
+
+test('Quick-Öffnen: scheitert der Shortcut (z. B. fremde Datei), zeigt das Fenster den Grund und bleibt offen', () => {
+    const calls = flowRun({
+        state: withFolders(), dashboard: [{ action: 'quickOpen', path: '/Users/example/Github', enabled: true }, back],
+        folderResults: [{ throw: 'execution error: VibeCode: Auf dem Schreibtisch liegt schon „Github öffnen“, das nicht von VibeCode stammt' }],
+    });
+    assert.match(calls.find((c) => c[0] === 'error')[1], /^Auf dem Schreibtisch liegt schon „Github öffnen“/);
+    assert.equal(calls.filter((c) => c[0] === 'dashboard').length, 2);
+});
+
+const QUICK_WS = (quickOpen) => STATE({ workspaces: [
+    { name: 'Demo', projects: ['A', 'B'], shortcut: false, quickOpen, missing: [] },
+    { name: 'Solo', projects: ['B'], shortcut: true, quickOpen: false, missing: [] }] });
+
+test('Übersicht: Quick-Öffnen bei Workspaces ist ein Kästchen vor Starten und zeigt „Quick ✓“, wenn es an ist', () => {
+    const rows = (state) => JSON.parse(widgets(`return JSON.stringify(dashboardModel(${JSON.stringify(state)}));`));
+    const item = (state, title) => rows(state).find((row) => row.type === 'item' && row.title === title);
+    const on = item(QUICK_WS(true), 'Demo');
+    assert.deepEqual(on.buttons.map((b) => [b.label, Boolean(b.checkbox), b.checked]),
+        [['Quick-Öffnen', true, true], ['Starten', false, undefined], ['Bearbeiten…', false, undefined]]);
+    assert.deepEqual(on.buttons[0].action, { action: 'quickWorkspace', name: 'Demo', enabled: false });      // an: anklicken schaltet aus
+    assert.equal(on.detail, 'kein Shortcut · Quick ✓ · A, B');
+    const off = item(QUICK_WS(false), 'Demo');
+    assert.deepEqual(off.buttons[0].action, { action: 'quickWorkspace', name: 'Demo', enabled: true });
+    assert.equal(off.detail, 'kein Shortcut · A, B');
+    assert.equal(item(QUICK_WS(true), 'Solo').detail, 'Schreibtisch ✓ · B');                                    // jeder Workspace für sich
+    // „Shortcuts erneuern“ gibt es auch, wenn nur ein Quick-Shortcut existiert (kein normaler).
+    const footer = (state) => rows(state).filter((row) => row.type === 'footer')[0].buttons.map((b) => b.label);
+    assert.ok(footer(STATE({ workspaces: [QUICK_WS(true).workspaces[0]] })).includes('Shortcuts erneuern'));
+    assert.ok(!footer(STATE({ workspaces: [QUICK_WS(false).workspaces[0]] })).includes('Shortcuts erneuern'));
+});
+
+test('Übersicht: das Quick-Öffnen-Kästchen eines Workspaces ist ein echter Schalter und löst seine Aktion aus', () => {
+    const out = JSON.parse(widgets(`
+        const result = ${JSON.stringify([QUICK_WS(false), QUICK_WS(true)])}.map((state) => {
+            const box = buildDashboard(dashboardModel(state)).buttons.find((b) => b.action.action === 'quickWorkspace');
+            const before = Number(box.view.state);
+            dashboardAction = null;
+            box.view.performClick(null);
+            return { before, after: Number(box.view.state), action: dashboardAction, expected: box.action };
+        });
+        return JSON.stringify({ result, on: Number($.NSControlStateValueOn), off: Number($.NSControlStateValueOff) });`));
+    assert.deepEqual(out.result.map((r) => [r.before, r.after]), [[out.off, out.on], [out.on, out.off]]);
+    for (const r of out.result) assert.deepEqual(r.action, r.expected);
+});
+
+test('Quick-Öffnen bei Workspaces: das Kästchen schaltet pro Workspace an und aus, ohne das Fenster zu schließen', () => {
+    const calls = flowRun({
+        state: QUICK_WS(false),
+        dashboard: [{ action: 'quickWorkspace', name: 'Demo', enabled: true }, { action: 'quickWorkspace', name: 'Demo', enabled: false }, back],
+    });
+    assert.deepEqual(calls.filter((c) => c[0] === 'quickWorkspace'), [['quickWorkspace', 'Demo', true], ['quickWorkspace', 'Demo', false]]);
+    assert.equal(calls.filter((c) => c[0] === 'dashboard').length, 3);
+});
+
+test('Quick-Öffnen bei Workspaces: scheitert der Shortcut, zeigt das Fenster den Grund und bleibt offen', () => {
+    const calls = flowRun({
+        state: QUICK_WS(false), dashboard: [{ action: 'quickWorkspace', name: 'Demo', enabled: true }, back],
+        quickWorkspaceError: 'execution error: VibeCode: Auf dem Schreibtisch liegt schon „Demo öffnen“, das nicht von VibeCode stammt',
+    });
+    assert.match(calls.find((c) => c[0] === 'error')[1], /^Auf dem Schreibtisch liegt schon „Demo öffnen“/);
+    assert.equal(calls.filter((c) => c[0] === 'dashboard').length, 2);
+});
+
+test('Quick-Öffnen-Aufruf eines Workspaces: Name als eigenes Argument, auch mit führendem Minus und Apostroph', () => {
+    const out = JSON.parse(jxa(`${library}
+const seen = [];
+const app = { doShellScript: (command) => { seen.push(command); return 'ok'; } };
+function run() {
+    const backend = makeBackend(app, '/usr/bin/python3', '/c/vibecode.py');
+    backend.quickWorkspace("-x it's", true);
+    backend.quickWorkspace('Demo', false);
+    return JSON.stringify(seen);
+}`));
+    assert.deepEqual(out, ["'/usr/bin/python3' '/c/vibecode.py' 'workspace-quick' '--name=-x it'\\''s' 'on'",
+        "'/usr/bin/python3' '/c/vibecode.py' 'workspace-quick' '--name=Demo' 'off'"]);
+});
+
+// ------------------------------------------------------------------ Local Dev im Workspace-Dialog
+
+const OPTION = (provider, model, framework, extra = {}) => Object.assign({ provider, providerName: provider === 'mlx' ? 'MLX (lokal)' : 'Ollama (lokal)',
+    model, local: true, framework, frameworkName: framework === 'codex' ? 'Codex CLI' : 'OpenCode', active: false }, extra);
+const LOCAL_OPTIONS = { available: true, error: null, options: [OPTION('mlx', 'XH/Spark', 'opencode'),
+    OPTION('ollama', 'qwen:7b', 'codex'), OPTION('ollama', 'qwen:7b', 'opencode'), OPTION('ollama', 'big:70b', 'opencode', { local: false })] };
+const SAVED = { provider: 'ollama', model: 'qwen:7b', framework: 'opencode' };
+
+test('Local Dev im Dialog: neuer Workspace startet auf „Kein Local Dev“ und speichert nur mit, was gewählt ist', () => {
+    const calls = flowRun({
+        state: STATE(), dashboard: [{ action: 'new' }, back], localOptions: LOCAL_OPTIONS,
+        edit: [{ name: 'Neu', projects: ['A'], shortcut: false, localDev: { provider: 'mlx', model: 'XH/Spark', framework: 'opencode' } }],
+    });
+    const edit = calls.find((c) => c[0] === 'edit');
+    assert.equal(edit[1].localDev, null);                                                   // aus, solange nichts gewählt ist
+    assert.deepEqual(edit[4].choices.map((c) => [c.label, c.selected]), [
+        ['Kein Local Dev', true],
+        ['MLX (lokal) · XH/Spark → OpenCode', false],
+        ['Ollama (lokal) · qwen:7b → Codex CLI', false],
+        ['Ollama (lokal) · qwen:7b → OpenCode', false],
+        ['Ollama (lokal) · big:70b (nicht lokal) → OpenCode', false]]);
+    assert.deepEqual(calls.find((c) => c[0] === 'save')[1].localDev, { provider: 'mlx', model: 'XH/Spark', framework: 'opencode' });
+});
+
+test('Local Dev im Dialog: ein gespeicherter Wert ist vorgewählt, „Kein Local Dev“ entfernt ihn', () => {
+    const state = STATE({ workspaces: [{ name: 'Demo', projects: ['A'], shortcut: false, missing: [], localDev: SAVED }] });
+    const calls = flowRun({
+        state, dashboard: [{ action: 'edit', name: 'Demo' }, { action: 'edit', name: 'Demo' }, back], localOptions: LOCAL_OPTIONS,
+        edit: [{ name: 'Demo', projects: ['A'], shortcut: false, localDev: null }, null],
+    });
+    const edits = calls.filter((c) => c[0] === 'edit');
+    assert.deepEqual(edits[0][1].localDev, SAVED);
+    assert.deepEqual(edits[0][4].choices.filter((c) => c.selected).map((c) => c.label), ['Ollama (lokal) · qwen:7b → OpenCode']);
+    assert.equal(calls.find((c) => c[0] === 'save')[1].localDev, null);                       // ausdrücklich entfernen
+});
+
+test('Local Dev im Dialog: ein nicht mehr startbarer Wert bleibt sichtbar und wird nicht stillschweigend gelöscht', () => {
+    const gone = { provider: 'mlx', model: 'alt', framework: 'claude' };
+    const state = STATE({ workspaces: [{ name: 'Demo', projects: ['A'], shortcut: false, missing: [], localDev: gone }] });
+    for (const localOptions of [LOCAL_OPTIONS, { available: true, error: null, options: [] }]) {     // auch wenn gar nichts startbar ist
+        const calls = flowRun({ state, dashboard: [{ action: 'edit', name: 'Demo' }, back], localOptions, edit: [null] });
+        const choices = calls.find((c) => c[0] === 'edit')[4].choices;
+        assert.deepEqual(choices.filter((c) => c.selected).map((c) => c.label), ['mlx · alt → claude (nicht verfügbar)']);
+        assert.deepEqual(choices.at(-1).value, gone);
+    }
+});
+
+test('Local Dev im Dialog: ohne Modul, ohne etwas Startbares oder bei einem Fehler gibt es keine Auswahl und nichts ändert sich', () => {
+    const nothing = [{ available: false, options: [], error: null }, { available: true, options: [], error: null }];
+    for (const localOptions of nothing) {
+        const calls = flowRun({ state: STATE(), dashboard: [{ action: 'new' }, back], localOptions,
+            edit: [{ name: 'Neu', projects: ['A'], shortcut: false }] });
+        const edit = calls.find((c) => c[0] === 'edit');
+        assert.equal(edit[4], null);
+        assert.ok(!('localDev' in edit[1]));
+        assert.ok(!('localDev' in calls.find((c) => c[0] === 'save')[1]));                    // Speichern lässt Local Dev unverändert
+    }
+    const failing = flowRun({ state: STATE(), dashboard: [{ action: 'new' }, back],
+        localOptions: { available: true, options: [], error: 'Local Dev: Konfiguration ungültig' }, edit: [null] });
+    assert.equal(failing.find((c) => c[0] === 'edit')[3], 'Local Dev: Konfiguration ungültig');   // der Grund steht im Dialog
+    const broken = flowRun({ state: STATE(), dashboard: [{ action: 'new' }, back], localOptionsError: 'execution error: VibeCode: kaputt', edit: [null] });
+    assert.equal(broken.find((c) => c[0] === 'edit')[4], null);
+    assert.match(broken.find((c) => c[0] === 'edit')[3], /kaputt/);
+});
+
+test('Local Dev im Dialog: eine abgelehnte Eingabe behält auch die Local-Dev-Auswahl', () => {
+    const wanted = { name: 'Neu', projects: ['A'], shortcut: false, localDev: SAVED };
+    const calls = flowRun({
+        state: STATE(), dashboard: [{ action: 'new' }, back], localOptions: LOCAL_OPTIONS, edit: [wanted, wanted],
+        saveErrors: ['execution error: VibeCode: Es gibt schon einen Workspace „Neu“.'],
+    });
+    const edits = calls.filter((c) => c[0] === 'edit');
+    assert.deepEqual(edits[1][1].localDev, SAVED);
+    assert.equal(calls.filter((c) => c[0] === 'save').length, 2);
+});
+
+test('Local Dev im Dialog: echtes Auswahlmenü, vorgewählt, Auslesen liefert Wert oder null, ohne Menü gar nichts', () => {
+    const out = JSON.parse(widgets(`
+        const choices = localDevChoices(${JSON.stringify(LOCAL_OPTIONS.options)}, ${JSON.stringify(SAVED)});
+        const draft = { name: 'Neu', projects: ['A'], shortcut: false, localDev: ${JSON.stringify(SAVED)} };
+        const withMenu = buildEdit(STATE, draft, null, '', { choices });
+        const titlesOf = (popup) => Array.from({ length: Number(popup.numberOfItems) }, (_, i) => ObjC.unwrap(popup.itemTitleAtIndex(i)));
+        const before = collectEdit(withMenu);
+        withMenu.local.popup.selectItemAtIndex(0);
+        const off = collectEdit(withMenu);
+        withMenu.local.popup.selectItemAtIndex(1);
+        const first = collectEdit(withMenu);
+        const plain = buildEdit(STATE, { name: 'Neu', projects: ['A'], shortcut: false }, null, '');
+        const heightWith = Number(withMenu.alert.accessoryView.frame.size.height);
+        const heightWithout = Number(plain.alert.accessoryView.frame.size.height);
+        // Zwei gleich benannte Kombinationen: NSPopUpButton würde den ersten Titel sonst ersetzen.
+        const twice = localDevChoices([${JSON.stringify(OPTION('mlx', 'm', 'opencode'))}, ${JSON.stringify(OPTION('mlx', 'm', 'opencode'))}], null);
+        return JSON.stringify({ titles: titlesOf(withMenu.local.popup), selected: Number(buildEdit(STATE, draft, null, '', { choices }).local.popup.indexOfSelectedItem),
+            before: before.localDev, off: off.localDev, first: first.localDev, plain: collectEdit(plain), heightWith, heightWithout,
+            twice: twice.map((c) => c.label) });`));
+    assert.deepEqual(out.titles, ['Kein Local Dev', 'MLX (lokal) · XH/Spark → OpenCode', 'Ollama (lokal) · qwen:7b → Codex CLI',
+        'Ollama (lokal) · qwen:7b → OpenCode', 'Ollama (lokal) · big:70b (nicht lokal) → OpenCode']);
+    assert.equal(out.selected, 3);                                                          // der gespeicherte Eintrag
+    assert.deepEqual(out.before, SAVED);
+    assert.equal(out.off, null);
+    assert.deepEqual(out.first, { provider: 'mlx', model: 'XH/Spark', framework: 'opencode' });
+    assert.ok(!('localDev' in out.plain));                                                  // ohne Menü: ungesetzt = unverändert
+    assert.equal(out.heightWith - out.heightWithout, 62);
+    assert.deepEqual(out.twice, ['Kein Local Dev', 'MLX (lokal) · m → OpenCode', 'MLX (lokal) · m → OpenCode (2)']);
+});
+
+test('Local Dev im Dialog: Speichern und Optionen gehen als eigene, gequotete Argumente an vibecode.py', () => {
+    const out = JSON.parse(jxa(`${library}
+const seen = [];
+const app = { doShellScript: (command) => { seen.push(command); return '{"available": true, "options": [], "error": null}'; } };
+function run() {
+    const backend = makeBackend(app, '/usr/bin/python3', '/c/vibecode.py');
+    backend.save({ name: 'W', projects: ['A'], shortcut: false, renameFrom: null });                                         // nichts angegeben
+    backend.save({ name: 'W', projects: ['A'], shortcut: false, renameFrom: null, localDev: null });                          // entfernen
+    backend.save({ name: 'W', projects: ['A'], shortcut: false, renameFrom: null,
+        localDev: { provider: 'ollama', model: "-x it's", framework: 'opencode' } });                                         // setzen
+    const options = backend.localDevOptions();
+    return JSON.stringify({ seen, options });
+}`));
+    const base = "'/usr/bin/python3' '/c/vibecode.py' 'save' '--name=W' '--project=A' '--no-shortcut'";
+    assert.deepEqual(out.seen, [base, `${base} '--no-local-dev'`,
+        `${base} '--local-dev-provider=ollama' '--local-dev-model=-x it'\\''s' '--local-dev-framework=opencode'`,
+        "'/usr/bin/python3' '/c/vibecode.py' 'local-options'"]);
+    assert.deepEqual(out.options, { available: true, options: [], error: null });
+});
+
+// ------------------------------------------------------------------ Local Dev einstellen (Zeile unten)
+
+const ALL = { available: true, error: null, current: { provider: 'mlx', model: 'XH/Spark', framework: 'opencode' }, options: [
+    OPTION('mlx', 'XH/Spark', 'opencode', { active: true, providerReady: false, frameworkReady: true }),
+    OPTION('ollama', 'qwen:7b', 'codex', { providerReady: true, frameworkReady: false }),
+    OPTION('ollama', 'big:70b', 'opencode', { local: false, providerReady: true, frameworkReady: true })] };
+
+test('Übersicht: nur die Local-Dev-Zeile bekommt „Einstellen…“, vor „Öffnen“', () => {
+    const rows = JSON.parse(widgets(`return JSON.stringify(dashboardModel(${JSON.stringify(STATE({
+        entries: [{ id: 'local', title: 'Local Dev', status: { text: 'MLX · Spark → opencode', level: 'ok' } }, { id: 'remote', title: 'Remote', status: null }] }))}));`));
+    const local = rows.find((row) => row.type === 'item' && row.title === 'Local Dev');
+    assert.deepEqual(local.buttons.map((b) => b.label), ['Einstellen…', 'Öffnen']);
+    assert.deepEqual(local.buttons[0].action, { action: 'localSetup' });
+    assert.deepEqual(local.buttons[1].action, { action: 'open', id: 'local' });
+    assert.deepEqual(rows.find((row) => row.type === 'item' && row.title === 'Remote').buttons.map((b) => b.label), ['Öffnen']);
+});
+
+test('Local Dev einstellen: zeigt alle Kombinationen mit Hinweisen, die gespeicherte ist vorgewählt, Speichern sendet den Wert', () => {
+    const calls = flowRun({
+        state: STATE(), dashboard: [{ action: 'localSetup' }, back], localSettings: ALL,
+        pickLocalDev: [{ provider: 'ollama', model: 'big:70b', framework: 'opencode' }],
+    });
+    const choices = calls.find((c) => c[0] === 'pickLocalDev')[1];
+    assert.deepEqual(choices.map((c) => [c.label, c.selected]), [
+        ['MLX (lokal) · XH/Spark → OpenCode · Anbieter fehlt', true],           // MLX lässt sich auch ohne Installation einstellen
+        ['Ollama (lokal) · qwen:7b → Codex CLI · CLI fehlt', false],
+        ['Ollama (lokal) · big:70b (nicht lokal) → OpenCode', false]]);
+    assert.ok(!choices.some((c) => c.value === null));                                       // hier gibt es kein „Kein Local Dev“
+    assert.deepEqual(calls.filter((c) => c[0] === 'setLocalDefault'), [['setLocalDefault', { provider: 'ollama', model: 'big:70b', framework: 'opencode' }]]);
+    assert.equal(calls.filter((c) => c[0] === 'dashboard').length, 2);                       // die Übersicht baut sich neu auf: neuer Status
+});
+
+test('Local Dev einstellen: Abbrechen speichert nichts, Fehler und leere Listen werden gesagt, ein Schreibfehler hält das Fenster offen', () => {
+    const cancelled = flowRun({ state: STATE(), dashboard: [{ action: 'localSetup' }, back], localSettings: ALL, pickLocalDev: [null] });
+    assert.ok(!kinds(cancelled).includes('setLocalDefault'));
+    const failing = flowRun({ state: STATE(), dashboard: [{ action: 'localSetup' }, back],
+        localSettings: { available: true, options: [], current: null, error: 'Local Dev: Konfiguration ungültig' } });
+    assert.deepEqual(failing.find((c) => c[0] === 'error'), ['error', 'Local Dev: Konfiguration ungültig']);
+    assert.ok(!kinds(failing).includes('pickLocalDev'));
+    const empty = flowRun({ state: STATE(), dashboard: [{ action: 'localSetup' }, back],
+        localSettings: { available: true, options: [], current: null, error: null } });
+    assert.match(empty.find((c) => c[0] === 'info')[1], /keine passende Kombination/);
+    const rejected = flowRun({ state: STATE(), dashboard: [{ action: 'localSetup' }, back], localSettings: ALL,
+        pickLocalDev: [{ provider: 'mlx', model: 'm', framework: 'opencode' }],
+        setDefaultError: 'execution error: VibeCode: Codex CLI und MLX sind nicht direkt kompatibel.' });
+    assert.deepEqual(rejected.find((c) => c[0] === 'error'), ['error', 'Codex CLI und MLX sind nicht direkt kompatibel.']);
+    assert.equal(rejected.filter((c) => c[0] === 'dashboard').length, 2);
+    const unreadable = flowRun({ state: STATE(), dashboard: [{ action: 'localSetup' }, back], localSettingsError: 'execution error: VibeCode: kaputt' });
+    assert.match(unreadable.find((c) => c[0] === 'error')[1], /kaputt/);
+});
+
+test('Local Dev einstellen: echtes Auswahlmenü, vorgewählt, Speichern liefert den Wert, Abbrechen null', () => {
+    const out = JSON.parse(widgets(`
+        const choices = localDevChoices(${JSON.stringify(ALL.options)}, ${JSON.stringify(ALL.current)}, false);
+        const built = buildLocalDevSetting(choices);
+        const titles = Array.from({ length: Number(built.popup.numberOfItems) }, (_, i) => ObjC.unwrap(built.popup.itemTitleAtIndex(i)));
+        const ui = nativeUi({});
+        pick = 1; response = FIRST; const saved = ui.pickLocalDev(choices);
+        pick = -1; response = FIRST + 1; const cancelled = ui.pickLocalDev(choices);
+        // Ohne lesbare Vorauswahl steht der erste Eintrag da.
+        const none = buildLocalDevSetting(localDevChoices(${JSON.stringify(ALL.options)}, null, false));
+        return JSON.stringify({ titles, selected: Number(built.popup.indexOfSelectedItem), buttons: titles2(built.alert), saved, cancelled,
+            title: ObjC.unwrap(built.alert.messageText), text: ObjC.unwrap(built.alert.informativeText), noneSelected: Number(none.popup.indexOfSelectedItem) });`, `
+        let response;
+        let pick = -1;
+        const titles2 = (alert) => titles(alert);
+        function scriptedPresent(alert, built) { if (pick >= 0) built.popup.selectItemAtIndex(pick); return response; }`));
+    assert.equal(out.titles.length, 3);
+    assert.equal(out.selected, 0);                                                           // MLX · Spark → OpenCode: der gespeicherte Eintrag
+    assert.deepEqual(out.buttons, ['Speichern', 'Abbrechen']);
+    assert.equal(out.title, 'Local Dev einstellen');
+    assert.match(out.text, /MLX oder Ollama.*OpenCode, Codex, Claude/s);
+    assert.deepEqual(out.saved, { provider: 'ollama', model: 'qwen:7b', framework: 'codex' });
+    assert.equal(out.cancelled, null);
+    assert.equal(out.noneSelected, 0);
+});
+
+test('Local Dev einstellen: Aufrufe an vibecode.py mit eigenen, gequoteten Argumenten', () => {
+    const out = JSON.parse(jxa(`${library}
+const seen = [];
+const app = { doShellScript: (command) => { seen.push(command); return '{"available": true, "options": [], "current": null, "error": null}'; } };
+function run() {
+    const backend = makeBackend(app, '/usr/bin/python3', '/c/vibecode.py');
+    backend.localSettings();
+    backend.setLocalDefault({ provider: 'ollama', model: "-x it's", framework: 'opencode' });
+    return JSON.stringify(seen);
+}`));
+    assert.deepEqual(out, ["'/usr/bin/python3' '/c/vibecode.py' 'local-settings'",
+        "'/usr/bin/python3' '/c/vibecode.py' 'local-default' '--provider=ollama' '--model=-x it'\\''s' '--framework=opencode'"]);
+});
+
+test('Übersicht: ein Workspace mit Local Dev zeigt „Local Dev ✓“ in der Zeile', () => {
+    const rows = JSON.parse(widgets(`return JSON.stringify(dashboardModel(${JSON.stringify(STATE({ workspaces: [
+        { name: 'Demo', projects: ['A', 'B'], shortcut: true, quickOpen: true, localDev: SAVED, missing: [] },
+        { name: 'Solo', projects: ['B'], shortcut: false, missing: [] }] }))}));`));
+    const details = rows.filter((row) => row.type === 'item').slice(0, 2).map((row) => row.detail);
+    assert.deepEqual(details, ['Schreibtisch ✓ · Quick ✓ · Local Dev ✓ · A, B', 'kein Shortcut · B']);
 });
 
 test('Remote-Ordner-Dialog: Host ist Pflicht, Eingaben bleiben stehen, Abbrechen liefert null', () => {
@@ -951,21 +1510,23 @@ test('Übersicht: Presets pro Repository zeigen, was gilt, und was nach einem Um
     const rows = JSON.parse(widgets(`return JSON.stringify(dashboardModel(${JSON.stringify(
         Object.assign(ssh(), { folders: FOLDERS, presets: PRESETS }))}));`));
     assert.deepEqual(rows.filter((row) => row.type === 'section').map((row) => row.text),
-        ['Workspaces', 'Repository-Suche', 'Presets pro Repository', 'SSH', 'Projekte & Module']);
+        ['Workspaces', 'Repository-Suche', 'Presets pro Repository', 'SSH', 'App-Einstellungen']);
     const start = rows.findIndex((row) => row.text === 'Presets pro Repository');
     const after = rows.slice(start + 1, rows.findIndex((row) => row.text === 'SSH'));
-    assert.equal(after[0].text, 'Ohne Preset: Standard-Terminals (Frontend, Claude)');
+    assert.equal(after[0].title, 'Allgemeiner Standard');
     const items = after.filter((row) => row.type === 'item');
     assert.deepEqual(items.map((row) => [row.title, row.detail, row.level]), [
+        ['Allgemeiner Standard', 'Eingebaut: Frontend, Claude', 'off'],
         ['alpha', 'Dev, Agent · 1 Browser-Tab', 'ok'],
         ['moved', '⚠︎ Repository nicht mehr gefunden · neuer Ort: /neu/moved · Shell · 0 Browser-Tabs', 'warn'],
         ['lost', '⚠︎ Repository nicht mehr gefunden · keine Terminals · 2 Browser-Tabs', 'warn']]);
     assert.deepEqual(items.map((row) => row.buttons.map((b) => b.label)),
-        [['Bearbeiten…', 'Zurücksetzen'], ['Übernehmen', 'Entfernen'], ['Entfernen']]);   // Übernehmen nur mit Vorschlag
-    assert.deepEqual(items[0].buttons[0].action, { action: 'editPreset', path: '/g/alpha' });
-    assert.deepEqual(items[1].buttons[0].action,
+        [['Festlegen…'], ['Bearbeiten…', 'Zurücksetzen'], ['Übernehmen', 'Entfernen'], ['Entfernen']]);   // Übernehmen nur mit Vorschlag
+    assert.deepEqual(items[0].buttons[0].action, { action: 'editGeneralPreset' });
+    assert.deepEqual(items[1].buttons[0].action, { action: 'editPreset', path: '/g/alpha' });
+    assert.deepEqual(items[2].buttons[0].action,
         { action: 'movePreset', path: '/alt/moved', to: '/neu/moved', label: 'moved', toLabel: '/neu/moved' });
-    assert.deepEqual(items[2].buttons[0].action, { action: 'resetPreset', path: '/alt/lost', label: 'lost' });
+    assert.deepEqual(items[3].buttons[0].action, { action: 'resetPreset', path: '/alt/lost', label: 'lost' });
     assert.deepEqual(after.find((row) => row.type === 'footer').buttons.map((b) => b.label), ['Preset anlegen…']);
 });
 
@@ -981,20 +1542,35 @@ test('Übersicht: Presets ohne Repositories bieten kein Anlegen an, ohne Modul g
     assert.ok(!sections({ available: false, repos: [], items: [], orphans: [], defaults: { local: [], remote: [] }, errors: [] })
         .includes('Presets pro Repository'));
     assert.equal(model(Object.assign({}, PRESETS, { defaults: { local: [], remote: [] } }))
-        .find((row) => row.text && row.text.startsWith('Ohne Preset')).text, 'Ohne Preset: Standard-Terminals');
+        .find((row) => row.title === 'Allgemeiner Standard').detail, 'Eingebaut: Standard-Terminals');
+    // Der allgemeine Standard braucht kein Repository: er lässt sich auch ohne eines festlegen.
+    assert.ok(own.some((row) => row.type === 'item' && row.title === 'Allgemeiner Standard'));
+});
+
+test('Übersicht: ein festgelegter allgemeiner Standard ersetzt die eingebaute Zeile und lässt sich bearbeiten und zurücksetzen', () => {
+    const general = { terminals: [TERM('Shell'), TERM('Agent', 'Claude Code')], urls: ['http://localhost:3000', 'http://localhost:6006'] };
+    const rows = JSON.parse(widgets(`return JSON.stringify(dashboardModel(${JSON.stringify(
+        Object.assign(ssh(), { presets: Object.assign({}, PRESETS, { general }) }))}));`));
+    const start = rows.findIndex((row) => row.text === 'Presets pro Repository');
+    const item = rows.slice(start + 1).find((row) => row.type === 'item');
+    assert.deepEqual([item.title, item.detail, item.level],
+        ['Allgemeiner Standard', 'Shell, Agent · 2 Browser-Tabs', 'ok']);
+    assert.deepEqual(item.buttons.map((b) => [b.label, b.action]),
+        [['Bearbeiten…', { action: 'editGeneralPreset' }], ['Zurücksetzen', { action: 'resetGeneralPreset' }]]);
+    assert.ok(!rows.some((row) => row.text && row.text.startsWith('Eingebaut')));
 });
 
 test('Übersicht: die Preset-Knöpfe lösen ihre Aktion aus', () => {
     const out = JSON.parse(widgets(`
         const built = buildDashboard(dashboardModel(${JSON.stringify(withPresets())}));
-        const wanted = ['editPreset', 'resetPreset', 'movePreset', 'newPreset'];
+        const wanted = ['editGeneralPreset', 'editPreset', 'resetPreset', 'movePreset', 'newPreset'];
         const clicked = built.buttons.filter((b) => wanted.includes(b.action.action)).map((button) => {
             dashboardAction = null;
             button.view.performClick(null);
             return { title: button.title, action: dashboardAction, expected: button.action };
         });
         return JSON.stringify({ clicked });`));
-    assert.deepEqual(out.clicked.map((c) => c.title), ['Bearbeiten…', 'Zurücksetzen', 'Übernehmen', 'Entfernen', 'Entfernen', 'Preset anlegen…']);
+    assert.deepEqual(out.clicked.map((c) => c.title), ['Festlegen…', 'Bearbeiten…', 'Zurücksetzen', 'Übernehmen', 'Entfernen', 'Entfernen', 'Preset anlegen…']);
     for (const click of out.clicked) assert.deepEqual(click.action, click.expected, click.title);
 });
 
@@ -1077,6 +1653,42 @@ test('Preset-Editor und -Auswahl: Speichern, Abbrechen, Zurücksetzen, Repositor
     assert.match(confirms[1][1], /unter\n\/neu\/pfad\nübertragen/);
 });
 
+test('Preset-Editor und Rückfrage: der allgemeine Standard sagt, für wen er gilt und was nach dem Zurücksetzen gilt', () => {
+    const out = JSON.parse(widgets(`
+        const draft = { terminals: [], urls: [] };
+        const general = buildPresetEditor(GENERAL_REPO, draft, true, '');
+        const own = buildPresetEditor({ name: 'alpha' }, draft, true, '');
+        const app = { chooseFromList: () => false };
+        const ui = nativeUi(app);
+        response = FIRST; ui.confirmResetPreset('Allgemeiner Standard', resetEffect({}, true));
+        response = FIRST; ui.confirmResetPreset('alpha', resetEffect({ general: { terminals: [], urls: [] } }, false));
+        response = FIRST; ui.confirmResetPreset('alpha');
+        return JSON.stringify({ title: ObjC.unwrap(general.alert.messageText), general: ObjC.unwrap(general.alert.informativeText),
+            own: ObjC.unwrap(own.alert.informativeText), seen });`, `
+        let response;
+        const seen = [];
+        function scriptedPresent(alert) { seen.push(ObjC.unwrap(alert.informativeText)); return response; }`));
+    assert.equal(out.title, 'Preset · Allgemeiner Standard');
+    assert.match(out.general, /für jedes Repository, das kein eigenes Preset hat/);
+    assert.match(out.own, /^Welche Terminals und Browser-Tabs starten für dieses Repository\?/);
+    assert.deepEqual(out.seen, [
+        'Danach gelten wieder die eingebauten Standard-Terminals ohne Browser-Tabs.',
+        'Danach gilt wieder der allgemeine Standard. Das Repository selbst bleibt unberührt.',
+        'Danach starten wieder die Standard-Terminals. Das Repository selbst bleibt unberührt.',        // ohne Angabe wie bisher
+    ]);
+});
+
+test('Quick-Öffnen-Aufruf an vibecode.py: Pfad und Modus als eigene, gequotete Argumente', () => {
+    const out = JSON.parse(jxa(`${library}
+const seen = [];
+const app = { doShellScript: (command) => { seen.push(command); return '{"message": "ok"}'; } };
+function run() {
+    makeBackend(app, '/usr/bin/python3', '/c/vibecode.py').folder('quick-open', { path: "/g/My 'Repo'", mode: 'on' });
+    return JSON.stringify(seen);
+}`));
+    assert.deepEqual(out, ["'/usr/bin/python3' '/c/vibecode.py' 'folders' 'quick-open' '--json' '--path=/g/My '\\''Repo'\\''' '--mode=on'"]);
+});
+
 test('Preset-Aufrufe an vibecode.py: das Preset geht als JSON und sicher gequotet', () => {
     const out = JSON.parse(jxa(`${library}
 const seen = [];
@@ -1086,6 +1698,8 @@ function run() {
     backend.preset('save', { path: "/g/My Repo", data: { terminals: [{ name: 'A', type: 'Shell', prompt: "it's", cwd: '' }], urls: [] } });
     backend.preset('reset', { path: '/g/a' });
     backend.preset('move', { path: '/alt/a', to: '/neu/a' });
+    backend.preset('save-general', { data: { terminals: [{ name: 'A', type: 'Shell', prompt: '', cwd: '' }], urls: [] } });
+    backend.preset('reset-general');
     return JSON.stringify(seen);
 }`));
     const base = "'/usr/bin/python3' '/c/vibecode.py' 'presets'";
@@ -1093,6 +1707,8 @@ function run() {
         `${base} 'save' '--json' '--path=/g/My Repo' '--data={"terminals":[{"name":"A","type":"Shell","prompt":"it'\\''s","cwd":""}],"urls":[]}'`,
         `${base} 'reset' '--json' '--path=/g/a'`,
         `${base} 'move' '--json' '--path=/alt/a' '--to=/neu/a'`,
+        `${base} 'save-general' '--json' '--data={"terminals":[{"name":"A","type":"Shell","prompt":"","cwd":""}],"urls":[]}'`,
+        `${base} 'reset-general' '--json'`,
     ]);
 });
 

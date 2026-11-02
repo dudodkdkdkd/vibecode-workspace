@@ -15,6 +15,13 @@ APP_MANAGEMENT_ENABLED="${LOCAL_DEV_MANAGE_APPS:-1}"
 
 export PATH="$HOME/.npm-global/bin:$HOME/.local/bin:$HOME/.opencode/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
 
+# Gemeinsamer Abschluss: Erfolg schließt das eigene fertige Terminal-Fenster, Fehler bleiben sichtbar.
+VIBECODE_TERMINAL_HELPER="${0:A:h}/../core/terminal_session.py"
+if [[ -f "$VIBECODE_TERMINAL_HELPER" && "${TERM_PROGRAM:-}" == "Apple_Terminal" && -t 0 \
+      && "${VIBECODE_TERMINAL_SESSION_TTY:-}" != "$(tty)" ]]; then
+  exec python3 "$VIBECODE_TERMINAL_HELPER" /bin/zsh "${0:A}" "$@"
+fi
+
 JQ_BIN=""
 OSASCRIPT_BIN="${LOCAL_DEV_OSASCRIPT_BIN:-}"
 OPEN_BIN="${LOCAL_DEV_OPEN_BIN:-}"
@@ -142,7 +149,8 @@ fail() {
     if [[ "$START_IN_PROGRESS" == "true" ]] && (( $+functions[restore_suspended_apps] )); then
         restore_suspended_apps
     fi
-    if [[ -t 0 && "${TERM_PROGRAM:-}" == "Apple_Terminal" ]]; then
+    if [[ -t 0 && "${TERM_PROGRAM:-}" == "Apple_Terminal" \
+          && "${VIBECODE_TERMINAL_SESSION_TTY:-}" != "$(tty)" ]]; then
         printf '\nEnter druecken, um das Fenster zu schliessen ...'
         read -r
     fi
@@ -370,6 +378,93 @@ resolve_executable() {
     else
         command -v "$expanded" 2>/dev/null
     fi
+}
+
+# Maschinenlesbar: eine Zeile je Kombination, Felder mit Tab getrennt:
+#   Anbieter-ID, Anbietername, Modell, lokal (1/0), CLI-ID, CLI-Name, eingestellt (1/0), Anbieter bereit (1/0), CLI installiert (1/0)
+# Ohne Argument nur, was sich jetzt starten lässt (Workspace-Dialog). Mit "all" jede konfigurierte, zueinander passende
+# Kombination, auch wenn Anbieter oder CLI auf diesem Mac fehlen (Einstellung: man stellt auch MLX oder OpenCode ein, bevor
+# sie installiert sind). Die Erkennung (installiert, erreichbar, Modelle, Kompatibilität) bleibt hier an einer Stelle und
+# wird im VibeCode-Fenster nicht nachgebaut.
+list_options() {
+    local scope="${1:-startable}"
+    local -a providers frameworks usable models
+    local -A framework_names framework_ready
+    providers=("${(@f)$($JQ_BIN -r '.providers | keys[]' "$CONFIG_FILE")}")
+    frameworks=("${(@f)$($JQ_BIN -r '.frameworks | keys[]' "$CONFIG_FILE")}")
+    local provider_id provider_name type protocol model_id framework_id adapter command
+    local local_flag active_flag provider_flag
+    for provider_id in "${providers[@]}"; do
+        [[ -n "$provider_id" ]] || continue
+        if provider_is_available "$provider_id"; then provider_flag=1; else provider_flag=0; fi
+        [[ "$scope" == all || "$provider_flag" == 1 ]] || continue
+        provider_name="$($JQ_BIN -r --arg id "$provider_id" '.providers[$id].name' "$CONFIG_FILE")"
+        type="$($JQ_BIN -r --arg id "$provider_id" '.providers[$id].type' "$CONFIG_FILE")"
+        protocol="$($JQ_BIN -r --arg id "$provider_id" '.providers[$id].protocol' "$CONFIG_FILE")"
+        usable=()
+        for framework_id in "${frameworks[@]}"; do
+            [[ -n "$framework_id" ]] || continue
+            adapter="$($JQ_BIN -r --arg id "$framework_id" '.frameworks[$id].adapter // empty' "$CONFIG_FILE")"
+            command="$($JQ_BIN -r --arg id "$framework_id" '.frameworks[$id].command // empty' "$CONFIG_FILE")"
+            [[ -n "$adapter" && -n "$command" ]] || continue
+            profiles_are_compatible "$adapter" "$type" "$protocol" || continue
+            if [[ -z "${framework_ready[$framework_id]-}" ]]; then
+                if [[ -n "$(resolve_executable "$command" 2>/dev/null || true)" ]]; then framework_ready[$framework_id]=1
+                else framework_ready[$framework_id]=0; fi
+                framework_names[$framework_id]="$($JQ_BIN -r --arg id "$framework_id" '.frameworks[$id].name' "$CONFIG_FILE")"
+            fi
+            [[ "$scope" == all || "${framework_ready[$framework_id]}" == 1 ]] || continue
+            usable+=("$framework_id")
+        done
+        (( ${#usable} > 0 )) || continue
+        models=("${(@f)$(model_ids_for_provider "$provider_id")}")
+        for model_id in "${models[@]}"; do
+            [[ -n "$model_id" ]] || continue
+            if model_is_local "$provider_id" "$model_id"; then local_flag=1; else local_flag=0; fi
+            for framework_id in "${usable[@]}"; do
+                active_flag=0
+                [[ "$provider_id" == "$ACTIVE_SOURCE" && "$model_id" == "$MODEL" && "$framework_id" == "$ACTIVE_FRAMEWORK" ]] && active_flag=1
+                printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$provider_id" "${provider_name//$'\t'/ }" "$model_id" "$local_flag" \
+                    "$framework_id" "${framework_names[$framework_id]//$'\t'/ }" "$active_flag" "$provider_flag" "${framework_ready[$framework_id]}"
+            done
+        done
+    done
+}
+
+# Die gespeicherte Vorauswahl: Anbieter, Modell, CLI, mit Tabs getrennt.
+show_current() {
+    printf '%s\t%s\t%s\n' "$ACTIVE_SOURCE" "$MODEL" "$ACTIVE_FRAMEWORK"
+}
+
+# Speichert die Vorauswahl (provider, model, framework in local-ai.json), mit denselben Prüfungen und demselben Schreibweg
+# wie --setup, nur ohne Rückfragen. Anbieter oder CLI müssen konfiguriert und zueinander passend sein; installiert müssen
+# sie nicht sein (sie lassen sich einstellen, bevor sie da sind).
+set_default() {
+    local selected_source="${1:-}" selected_model="${2:-}" selected_framework="${3:-}"
+    [[ -n "$selected_source" && -n "$selected_model" && -n "$selected_framework" ]] \
+        || fail "Anbieter, Modell und CLI angeben."
+    [[ "$selected_model" != *[[:cntrl:]]* && "$selected_model" != *$'\t'* ]] || fail "Die Modell-ID enthaelt Steuerzeichen."
+    "$JQ_BIN" -e --arg id "$selected_source" '.providers[$id] | type == "object"' "$CONFIG_FILE" >/dev/null 2>&1 \
+        || fail "Unbekannter Provider: $selected_source"
+    "$JQ_BIN" -e --arg id "$selected_framework" '.frameworks[$id] | type == "object"' "$CONFIG_FILE" >/dev/null 2>&1 \
+        || fail "Unbekannte CLI: $selected_framework"
+    local selected_type="$("$JQ_BIN" -r --arg id "$selected_source" '.providers[$id].type' "$CONFIG_FILE")"
+    local selected_protocol="$("$JQ_BIN" -r --arg id "$selected_source" '.providers[$id].protocol' "$CONFIG_FILE")"
+    local selected_adapter="$("$JQ_BIN" -r --arg id "$selected_framework" '.frameworks[$id].adapter' "$CONFIG_FILE")"
+    local selected_source_name="$("$JQ_BIN" -r --arg id "$selected_source" '.providers[$id].name' "$CONFIG_FILE")"
+    local selected_framework_name="$("$JQ_BIN" -r --arg id "$selected_framework" '.frameworks[$id].name' "$CONFIG_FILE")"
+    profiles_are_compatible "$selected_adapter" "$selected_type" "$selected_protocol" \
+        || fail "$selected_framework_name und $selected_source_name sind wegen des API-Protokolls '$selected_protocol' nicht direkt kompatibel."
+
+    local temp_file="$(mktemp "${CONFIG_FILE}.XXXXXX")" || fail "Temporaere Datei konnte nicht angelegt werden."
+    if ! "$JQ_BIN" --arg source "$selected_source" --arg framework "$selected_framework" --arg model "$selected_model" \
+        '.provider = $source | .framework = $framework | .model = $model | .providers[$source].default_model = $model' \
+        "$CONFIG_FILE" > "$temp_file"; then
+        rm -f "$temp_file"
+        fail "Konfiguration konnte nicht gespeichert werden."
+    fi
+    mv "$temp_file" "$CONFIG_FILE"
+    printf 'Gespeichert: %s → %s → %s\n' "$selected_source_name" "$selected_model" "$selected_framework_name"
 }
 
 load_config() {
@@ -1762,6 +1857,11 @@ Ohne Argument       Toggle: Wenn aus -> starten; wenn an -> stoppen & Speicher f
 --stop               Vom Starter gestarteten Provider stoppen
 --status             Auswahl und Erreichbarkeit anzeigen
 --capabilities       Baum: Provider, lokale Modelle und installierte/kompatible CLIs
+--options            Startbare Kombinationen Anbieter/Modell/CLI, eine Zeile mit Tabs je Kombination (für das VibeCode-Fenster)
+--options-all        Wie --options, aber alle konfigurierten passenden Kombinationen, auch nicht installierte
+--current            Gespeicherte Vorauswahl: Anbieter, Modell, CLI (Tabs)
+--set-default ANBIETER MODELL CLI
+                     Vorauswahl speichern (wie --setup, ohne Rückfragen)
 --memory-plan        KV-Cache-Schaetzung und effektives Kontextlimit anzeigen
 --tune-memory [Spielraum-GiB] [Reserve-GiB] [gruen]
                      Beobachteten RAM-Spielraum in das Hardwareprofil uebernehmen
@@ -1810,25 +1910,6 @@ main() {
             if command -v osascript >/dev/null 2>&1; then
                 osascript -e "display notification \"$SOURCE_NAME ($MODEL) beendet. Arbeitsspeicher freigegeben.\" with title \"Local Dev gestoppt\"" 2>/dev/null || true
             fi
-            local launcher_tty="$(tty 2>/dev/null || true)"
-            if [[ -t 0 && "${TERM_PROGRAM:-}" == "Apple_Terminal" && "$launcher_tty" == /dev/tty* ]]; then
-                /usr/bin/nohup /usr/bin/osascript \
-                    -e 'on run argv' \
-                    -e 'set targetTTY to item 1 of argv' \
-                    -e 'delay 1.0' \
-                    -e 'tell application "Terminal"' \
-                    -e 'repeat with terminalWindow in windows' \
-                    -e 'repeat with terminalTab in tabs of terminalWindow' \
-                    -e 'if (tty of terminalTab) is targetTTY then' \
-                    -e 'if (count of tabs of terminalWindow) is 1 then close terminalWindow' \
-                    -e 'return' \
-                    -e 'end if' \
-                    -e 'end repeat' \
-                    -e 'end repeat' \
-                    -e 'end tell' \
-                    -e 'end run' \
-                    "$launcher_tty" </dev/null >/dev/null 2>&1 &!
-            fi
             ;;
         start|--start)
             show_capability_tree
@@ -1868,6 +1949,18 @@ main() {
             ;;
         --capabilities)
             show_capability_tree
+            ;;
+        --options)
+            list_options
+            ;;
+        --options-all)
+            list_options all
+            ;;
+        --current)
+            show_current
+            ;;
+        --set-default)
+            set_default "${2:-}" "${3:-}" "${4:-}"
             ;;
         --memory-plan)
             show_capacity_plan

@@ -288,3 +288,91 @@ test('Presets: ein zurückgesetztes Preset bringt die Standard-Terminals zurück
     assert.equal(launch(files, '--project', 'A').status, 0);
     assert.equal(terminalsOf(files, 'A').length, 5);
 });
+
+test('Allgemeiner Standard: der echte Launcher nutzt ihn für Repositories ohne Preset, ein eigenes Preset gewinnt, Zurücksetzen bringt die fünf zurück', (t) => {
+    const files = fixture(t);
+    fs.mkdirSync(path.join(files.a, 'frontend'));                       // B hat keinen frontend-Ordner
+    const presetsJs = (...args) => spawnSync('/usr/bin/osascript', ['-l', 'JavaScript', path.join(root, 'workspaces', 'presets.js'),
+        path.join(root, 'workspaces'), ...args], { encoding: 'utf8' });
+    fs.writeFileSync(path.join(files.dir, 'general.json'), JSON.stringify({
+        terminals: [{ name: 'Dev', type: 'Eigener Befehl', prompt: 'npm run dev', cwd: 'frontend' },
+            { name: 'Agent', type: 'Claude Code', prompt: '', cwd: '' }],
+        urls: ['http://localhost:3000'],
+    }));
+    const saved = presetsJs('save-general', files.dir, path.join(files.dir, 'general.json'));
+    assert.equal(saved.status, 0, saved.stderr);
+
+    assert.equal(launch(files, '--project', 'A', '--project', 'B').status, 0);
+    assert.deepEqual(terminalsOf(files, 'A').map((terminal) => [terminal.name, terminal.cwd]),
+        [['Dev', `${files.a}/frontend`], ['Agent', files.a]]);
+    assert.deepEqual(terminalsOf(files, 'B').map((terminal) => [terminal.name, terminal.cwd]),
+        [['Dev', files.b], ['Agent', files.b]]);                         // kein frontend-Ordner: Start im Repository-Ordner
+    assert.deepEqual(JSON.parse(fs.readFileSync(files.workspace, 'utf8')).settings['vibecodeWorkspace.autoOpenUrls'],
+        ['http://localhost:3000']);
+
+    savePreset(files, files.a, { terminals: [{ name: 'Nur eins', type: 'Shell', prompt: '', cwd: '' }], urls: [] });
+    assert.equal(launch(files, '--project', 'A', '--project', 'B').status, 0);
+    assert.deepEqual(terminalsOf(files, 'A').map((terminal) => terminal.name), ['Nur eins']);
+    assert.deepEqual(terminalsOf(files, 'B').map((terminal) => terminal.name), ['Dev', 'Agent']);
+
+    assert.equal(presetsJs('reset-general', files.dir).status, 0);
+    assert.equal(launch(files, '--project', 'B').status, 0);
+    assert.deepEqual(terminalsOf(files, 'B').map((terminal) => terminal.name),
+        ['Frontend', 'Storybook', 'Claude', 'Codex 1', 'Codex 2']);
+});
+
+// ------------------------------------------------------------------ Local Dev (--local-dev)
+
+// Wie im Repository: local-dev/ liegt neben workspaces/, das Skript und seine Konfiguration in workspaces/.
+function withLocalDevModule(files) {
+    const workspaces = path.join(files.dir, 'workspaces');
+    fs.mkdirSync(workspaces);
+    fs.renameSync(files.script, path.join(workspaces, 'VibeCode Workspace.command'));
+    fs.renameSync(path.join(files.dir, 'config.local.zsh'), path.join(workspaces, 'config.local.zsh'));
+    files.script = path.join(workspaces, 'VibeCode Workspace.command');
+    fs.mkdirSync(path.join(files.dir, 'local-dev'));
+    fs.writeFileSync(path.join(files.dir, 'local-dev', 'launcher.zsh'), '#!/bin/zsh\n');
+    return fs.realpathSync(path.join(files.dir, 'local-dev', 'launcher.zsh'));
+}
+
+test('Local Dev: ohne das Modul startet der Workspace trotzdem und der Launcher sagt, warum es fehlt', (t) => {
+    const files = fixture(t);
+    const result = launch(files, '--project', 'A', '--local-dev', 'ollama', 'qwen:7b', 'opencode');
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stderr, /Local Dev ist nicht installiert/);
+    assert.ok(!terminalsOf(files, 'A').some((terminal) => terminal.name.endsWith('Local Dev')));
+    assert.equal(terminalsOf(files, 'A').length, 5);                                // die normalen Terminals sind unberührt
+});
+
+test('Local Dev: der echte Launcher startet es als letztes Terminal des ersten Repositories, mit allem vorgegeben', (t) => {
+    const files = fixture(t);
+    const script = withLocalDevModule(files);
+    const result = launch(files, '--project', 'B', '--project', 'A', '--local-dev', 'ollama', 'qwen:7b', 'opencode');
+    assert.equal(result.status, 0, result.stderr);
+    assert.doesNotMatch(result.stderr, /Local Dev ist nicht installiert/);
+    const terminals = JSON.parse(fs.readFileSync(files.workspace, 'utf8')).settings['vibecodeWorkspace.autoStartTerminals'];
+    const local = terminals.filter((terminal) => terminal.name.endsWith('Local Dev'));
+    assert.equal(local.length, 1);
+    assert.deepEqual([local[0].name, local[0].group, local[0].type, local[0].command, local[0].args],
+        ['B · Local Dev', 'B', 'process', '/bin/zsh', [script, 'start']]);             // das erste ausgewählte Repository
+    assert.equal(local[0].cwd, files.b);
+    assert.deepEqual(local[0].env, { LOCAL_DEV_PROVIDER: 'ollama', LOCAL_DEV_MODEL: 'qwen:7b',
+        LOCAL_DEV_FRAMEWORK: 'opencode', LOCAL_DEV_REPOSITORY_PATH: files.b });
+    assert.deepEqual(terminalsOf(files, 'B').map((terminal) => terminal.name).slice(-2), ['Codex 2', 'Local Dev']);
+    assert.equal(terminalsOf(files, 'A').length, 5);                                // A bekommt kein zweites
+    // Ohne das Flag gibt es nichts davon, und --project allein fasst "zuletzt gewählt" weiter nicht an.
+    assert.equal(launch(files, '--project', 'A').status, 0);
+    assert.ok(!terminalsOf(files, 'A').some((terminal) => terminal.name.endsWith('Local Dev')));
+});
+
+test('Local Dev: --local-dev ohne drei Werte ist ein Fehler und startet nichts', (t) => {
+    const files = fixture(t);
+    for (const args of [['--local-dev'], ['--local-dev', 'ollama'], ['--local-dev', 'ollama', 'qwen:7b'],
+        ['--local-dev', 'ollama', '', 'opencode']]) {
+        const result = launch(files, '--project', 'A', ...args);
+        assert.equal(result.status, 2, args.join(' '));
+        assert.match(result.stderr, /--local-dev braucht Anbieter, Modell und CLI/);
+    }
+    assert.ok(!fs.existsSync(files.workspace));
+});
+

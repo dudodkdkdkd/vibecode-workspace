@@ -160,7 +160,19 @@ function run(argv) {
             throw new Error("Ungültige Terminal-Konfiguration. Die vorhandene Datei wurde nicht verändert.");
         }
     }
-    const result = { version: 2, projects: {} };
+    // Der allgemeine Standard (Fenster: Presets pro Repository) bleibt beim Neuschreiben erhalten
+    // und ist der Ausgangspunkt für Repositories ohne eigene Auswahl.
+    let general = null;
+    if (saved.default !== undefined) {
+        if (!saved.default || typeof saved.default !== "object" || Array.isArray(saved.default)) {
+            throw new Error("Ungültiger allgemeiner Standard. Die vorhandene Datei wurde nicht verändert.");
+        }
+        const { terminals, urls } = normalizeEntry(saved.default);
+        validateTerminals(terminals, "den allgemeinen Standard");
+        validateUrls(urls, "den allgemeinen Standard");
+        general = { terminals, urls };
+    }
+    const result = { version: 2, ...(general ? { default: general } : {}), projects: {} };
     for (const project of projects) {
         if (Object.prototype.hasOwnProperty.call(saved.projects, project.path)) {
             const { terminals, urls } = normalizeEntry(saved.projects[project.path]);
@@ -173,14 +185,14 @@ function run(argv) {
     try {
         const selected = app.chooseFromList(projects.map((project) => project.name), {
             withTitle: "VibeCode Workspace Setup",
-            withPrompt: "Für welche Repositories möchtest du Anzahl und Inhalt der Terminals sowie die automatisch geöffneten Browser-Tabs festlegen? Mehrfachauswahl mit ⌘. Nicht ausgewählte Ordner behalten ihre bisherige Konfiguration oder die fünf Standard-Terminals. Bei USE_PROJECT_TERMINALS=false in config.local.zsh gelten die globalen Terminals; die Browser-Tabs bleiben projektspezifisch.",
+            withPrompt: "Für welche Repositories möchtest du Anzahl und Inhalt der Terminals sowie die automatisch geöffneten Browser-Tabs festlegen? Mehrfachauswahl mit ⌘. Nicht ausgewählte Ordner behalten ihre bisherige Konfiguration oder den allgemeinen Standard (ohne eigenen: die fünf Standard-Terminals). Bei USE_PROJECT_TERMINALS=false in config.local.zsh gelten die globalen Terminals; die Browser-Tabs bleiben projektspezifisch.",
             defaultItems: [],
             multipleSelectionsAllowed: true,
         });
         if (selected === false) return "cancelled";
         for (const project of projects) {
             if (!selected.includes(project.name)) continue;
-            const existing = result.projects[project.path] || { terminals: defaultTerminals(project.path.startsWith("vscode-remote://")), urls: [] };
+            const existing = result.projects[project.path] || general || { terminals: defaultTerminals(project.path.startsWith("vscode-remote://")), urls: [] };
             const terminals = configureProject(app, project, existing.terminals);
             if (terminals === null) return "cancelled";
             const urls = configureUrls(app, project, existing.urls);
