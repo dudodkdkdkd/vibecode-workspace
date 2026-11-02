@@ -91,9 +91,14 @@ const ui = {
     confirmDelete: (name) => { calls.push(['confirmDelete', name]); return next('confirmDelete'); },
     info: (text) => calls.push(['info', text]),
     error: (text) => calls.push(['error', text]),
-    newKind: (kinds) => { calls.push(['newKind', kinds]); return next('newKind'); },
-    askLine: (title) => { calls.push(['askLine', title]); return next('askLine'); },
-    share: (output) => { calls.push(['share', output]); return next('share'); },
+    askConnection: (canGuide, prefill, note) => { calls.push(['askConnection', canGuide, prefill, note]); return next('askConnection'); },
+    clipboardJoinLine: () => script.clipboardJoinLine || '',
+    notify: (text) => calls.push(['notify', text]),
+    askLine: (title, prompt, prefill) => { calls.push(['askLine', title, prefill]); return next('askLine'); },
+    share: (share, notice) => { calls.push(['share', share, notice]); return next('share'); },
+    copy: (text) => calls.push(['copy', text]),
+    infoWithCopy: (text, copyText) => calls.push(['infoWithCopy', text, copyText]),
+    clipboardAllowLine: () => script.clipboardAllowLine || '',
     confirmAllow: (name, fingerprint) => { calls.push(['confirmAllow', name, fingerprint]); return next('confirmAllow'); },
     pickFolders: () => { calls.push(['pickFolders']); return next('pickFolders'); },
     askRemoteFolder: (note) => { calls.push(['askRemoteFolder', note]); return next('askRemoteFolder'); },
@@ -244,21 +249,55 @@ test('SSH: der Zustand wird bei jedem Durchlauf frisch gelesen', () => {
     assert.equal(kinds(calls).filter((k) => k === 'state').length, kinds(calls).filter((k) => k === 'dashboard').length);
 });
 
-test('SSH: geführte Einrichtung öffnet das Setup im Terminal', () => {
-    const calls = flowRun({ state: ssh(), dashboard: [sshNew], newKind: ['guided'] });
-    assert.deepEqual(calls.find((c) => c[0] === 'newKind'), ['newKind', ['guided', 'line']]);
+const JOIN = 'workspace remote ssh join user@remote-mac.local SHA256:abc';
+
+test('SSH: Neue Verbindung ist ein einziger Dialog, die geführte Einrichtung ein Knopf darin', () => {
+    const calls = flowRun({ state: ssh(), dashboard: [sshNew], askConnection: [{ guided: true }] });
+    assert.deepEqual(calls.find((c) => c[0] === 'askConnection'), ['askConnection', true, '', '']);   // keine Vorauswahl davor
     assert.deepEqual(calls.find((c) => c[0] === 'sshOpen'), ['sshOpen', 'guided', null]);
+    assert.equal(kinds(calls).filter((k) => k === 'dashboard').length, 1);                          // das Terminal übernimmt: Fenster zu
 });
 
-test('SSH: Verbinden per Zeile – bereits freigegeben', () => {
+test('SSH: ohne Remote-Modul geht es direkt zur geführten Einrichtung, ohne Modul gibt es eine Meldung', () => {
+    const only = flowRun({ state: ssh({ share: false }), dashboard: [sshNew] });
+    assert.ok(!kinds(only).includes('askConnection'));                                              // nichts zu fragen
+    assert.deepEqual(only.find((c) => c[0] === 'sshOpen'), ['sshOpen', 'guided', null]);
+    const none = flowRun({ state: ssh({ share: false, guided: false, hosts: [SPARK] }), dashboard: [sshNew, back] });
+    assert.match(none.find((c) => c[0] === 'error')[1], /fehlt ein Modul/);
+    assert.ok(!kinds(none).includes('sshOpen') && !kinds(none).includes('askConnection'));
+    const noGuide = flowRun({ state: ssh({ guided: false }), dashboard: [sshNew, back], askConnection: [null] });
+    assert.equal(noGuide.find((c) => c[0] === 'askConnection')[1], false);                          // ohne Setup kein Knopf dafür
+});
+
+test('SSH: eine join-Zeile in der Zwischenablage ist schon eingetragen, sonst bleibt das Feld leer', () => {
+    const withClip = flowRun({ state: ssh(), dashboard: [sshNew, back], clipboardJoinLine: JOIN, askConnection: [null] });
+    assert.equal(withClip.find((c) => c[0] === 'askConnection')[2], JOIN);
+    const without = flowRun({ state: ssh(), dashboard: [sshNew, back], askConnection: [null] });
+    assert.equal(without.find((c) => c[0] === 'askConnection')[2], '');
+});
+
+test('SSH: Verbinden per Zeile – sofort ein Hinweis, dann das Ergebnis; bereits freigegeben', () => {
     const calls = flowRun({
-        state: ssh(), dashboard: [sshNew, back], newKind: ['line'],
-        askLine: ['workspace remote ssh join user@remote-mac.local SHA256:abc'],
-        sshResults: [result(0, '✔ Verbunden mit user@remote-mac.local.')],
+        state: ssh(), dashboard: [sshNew, back], askConnection: [{ line: JOIN }],
+        sshResults: [result(0, '✔ Verbunden mit user@remote-mac.local. Befehle: workspace remote ssh run -- <befehl>')],
     });
-    assert.deepEqual(calls.find((c) => c[0] === 'ssh' && c[1] === 'join'),
-        ['ssh', 'join', 'workspace remote ssh join user@remote-mac.local SHA256:abc']);
-    assert.deepEqual(calls.find((c) => c[0] === 'info'), ['info', '✔ Verbunden mit user@remote-mac.local.']);
+    const order = calls.map((c) => c[0]).filter((k) => ['askConnection', 'notify', 'ssh', 'info'].includes(k));
+    assert.deepEqual(order, ['askConnection', 'notify', 'ssh', 'info']);                            // der Hinweis kommt VOR dem langen Prüfen
+    assert.match(calls.find((c) => c[0] === 'notify')[1], /^Verbinde mit user@remote-mac\.local .*30 Sekunden/);
+    assert.deepEqual(calls.find((c) => c[0] === 'ssh' && c[1] === 'join'), ['ssh', 'join', JOIN]);
+    assert.equal(calls.find((c) => c[0] === 'info')[1],
+        'Verbunden mit user@remote-mac.local ✓\n\nIm Bereich SSH kannst du jetzt auf „Verbinden“ klicken.');
+    assert.ok(!calls.find((c) => c[0] === 'info')[1].includes('workspace remote'));                 // CLI-Hinweis gehört nicht ins Fenster
+});
+
+test('SSH: eine leere Zeile fragt noch einmal nach und startet nichts', () => {
+    const calls = flowRun({
+        state: ssh(), dashboard: [sshNew, back], askConnection: [{ line: '' }, { line: '   ' }, { line: JOIN }],
+        sshResults: [result(0, '✔ Verbunden mit x. Befehle: y')],
+    });
+    const asked = calls.filter((c) => c[0] === 'askConnection');
+    assert.deepEqual(asked.map((c) => c[3]), ['', 'Bitte die Zeile einfügen.', 'Bitte die Zeile einfügen.']);
+    assert.equal(calls.filter((c) => c[0] === 'ssh' && c[1] === 'join').length, 1);
 });
 
 test('SSH: noch nicht freigegeben zeigt nur die allow-Zeile und sagt, was am anderen Mac zu tun ist', () => {
@@ -269,28 +308,29 @@ test('SSH: noch nicht freigegeben zeigt nur die allow-Zeile und sagt, was am and
         'Danach hier: workspace remote ssh join',
     ].join('\n');
     const calls = flowRun({
-        state: ssh(), dashboard: [sshNew, back], newKind: ['line'],
-        askLine: ['workspace remote ssh join user@remote-mac.local'], sshResults: [result(2, cli)],
+        state: ssh(), dashboard: [sshNew, back], askConnection: [{ line: 'workspace remote ssh join user@remote-mac.local' }],
+        sshResults: [result(2, cli)],
     });
-    const text = calls.find((c) => c[0] === 'info')[1];
-    assert.match(text, /^Noch nicht freigegeben\./);
+    const [, text, copyText] = calls.find((c) => c[0] === 'infoWithCopy');
+    assert.equal(copyText, "workspace remote ssh allow 'ssh-ed25519 AAAAkey user@client'");                // der Kopieren-Knopf kopiert genau diese Zeile
+    assert.ok(!kinds(calls).includes('info'));
+    assert.match(text, /^Noch nicht freigegeben: Der andere Mac muss dich noch freigeben\./);
     assert.ok(text.includes("workspace remote ssh allow 'ssh-ed25519 AAAAkey user@client'"));
-    assert.match(text, /Diesen Mac freigeben… → Schlüssel eintragen/);
-    assert.match(text, /Bereich SSH/);
-    assert.ok(!text.includes('Danach hier: workspace remote ssh join'));      // CLI-Hinweis gehört nicht ins Fenster
+    assert.match(text, /1\. Dort: .*Diesen Mac freigeben… → Schlüssel eintragen/);
+    assert.match(text, /2\. Danach hier im Bereich SSH auf „Verbinden“ klicken\.$/);
+    assert.ok(!text.includes('Danach hier: workspace remote ssh join'));
 });
 
-test('SSH: Fehler bei der Verbindung, Abbruch und Auswahl "Zurück" ändern nichts', () => {
+test('SSH: Fehler bei der Verbindung und Abbruch ändern nichts, ein Fehler nennt den Grund', () => {
     const failed = flowRun({
-        state: ssh(), dashboard: [sshNew, back], newKind: ['line'],
-        askLine: ['x'], sshResults: [result(1, '', 'Host-Schlüssel stimmt NICHT überein')],
+        state: ssh(), dashboard: [sshNew, back], askConnection: [{ line: 'x' }],
+        sshResults: [result(1, '', 'user@remote-mac.local:22 nicht erreichbar (timed out)')],
     });
-    assert.deepEqual(failed.find((c) => c[0] === 'error'), ['error', 'Host-Schlüssel stimmt NICHT überein']);
+    assert.deepEqual(failed.find((c) => c[0] === 'error'), ['error', 'user@remote-mac.local:22 nicht erreichbar (timed out)']);
+    assert.equal(failed.filter((c) => c[0] === 'notify').length, 1);                                // gemeldet wurde: es läuft
 
-    const cancelled = flowRun({
-        state: ssh(), dashboard: [sshNew, sshNew, back], newKind: ['line', null], askLine: [null],
-    });
-    assert.ok(!kinds(cancelled).includes('error'));
+    const cancelled = flowRun({ state: ssh(), dashboard: [sshNew, sshNew, back], askConnection: [null, null] });
+    assert.ok(!kinds(cancelled).includes('error') && !kinds(cancelled).includes('notify'));
     assert.equal(cancelled.filter((c) => c[0] === 'ssh' && typeof c[1] === 'string').length, 0);   // kein Backend-Aufruf
 });
 
@@ -322,6 +362,45 @@ test('SSH: Entfernte Anmeldung aus: „Erneut prüfen“ fragt nach, ohne die Sy
     assert.deepEqual(backend.map((c) => c[1]), ['share', 'share-recheck', 'share-recheck']);   // nur das erste Mal öffnet es die Einstellungen
     assert.equal(calls.filter((c) => c[0] === 'share').length, 3);
     assert.equal(calls.filter((c) => c[0] === 'share').at(-1)[1].remoteLogin, true);            // nach dem Einschalten geht es weiter
+});
+
+test('SSH: „Zeile kopieren“ kopiert die Zeile, sagt es und zeigt die Maske wieder, ohne das Modul noch einmal zu fragen', () => {
+    const calls = flowRun({
+        state: ssh(), dashboard: [sshShare, back], sshResults: [shareResult({ awake: true })],
+        share: ['copy', 'copy', 'done'],
+    });
+    assert.deepEqual(calls.filter((c) => c[0] === 'copy'), [['copy', SHARE().line], ['copy', SHARE().line]]);
+    assert.deepEqual(calls.filter((c) => c[0] === 'share').map((c) => c[2]), ['', 'Zeile kopiert ✓', 'Zeile kopiert ✓']);   // die Rückmeldung gilt nur einmal
+    assert.equal(calls.filter((c) => c[0] === 'ssh' && c.length === 3).length, 1);                                         // nur das erste share
+});
+
+test('SSH: „Schlüssel eintragen…“ füllt eine allow-Zeile aus der Zwischenablage vor und gibt trotzdem erst nach Bestätigung frei', () => {
+    const line = "workspace remote ssh allow 'ssh-ed25519 AAAAkey user@client'";
+    const key = JSON.stringify({ name: 'user@client', fingerprint: 'SHA256:xyz', known: false });
+    const calls = flowRun({
+        state: ssh(), dashboard: [sshShare, back], sshResults: [shareResult(), result(0, key)],
+        share: ['allow'], clipboardAllowLine: line, askLine: [line], confirmAllow: [false],
+    });
+    assert.deepEqual(calls.find((c) => c[0] === 'askLine'), ['askLine', 'Schlüssel eintragen', line]);
+    assert.ok(calls.some((c) => c[0] === 'confirmAllow'));                                          // die Bestätigung bleibt Pflicht
+    assert.ok(!calls.some((c) => c[0] === 'ssh' && c[1] === 'allow'));                              // und ohne Ja wird nichts geschrieben
+    const without = flowRun({ state: ssh(), dashboard: [sshShare, back], sshResults: [shareResult()], share: ['allow'], askLine: [null] });
+    assert.equal(without.find((c) => c[0] === 'askLine')[2], '');
+});
+
+test('SSH: nur genau eine allow-Zeile mit einem Schlüssel wird aus der Zwischenablage übernommen', () => {
+    const out = JSON.parse(widgets(`
+        const good = "workspace remote ssh allow 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIabc user@client'";
+        const cases = [good, '  ' + good + '\\n', "workspace remote ssh allow 'ssh-ed25519 AAAA'", "workspace remote ssh allow 'ecdsa-sha2-nistp256 AAAA+/= x'",
+            'workspace remote ssh allow ssh-ed25519 AAAA x', "workspace remote ssh allow 'rm -rf ~'", "workspace remote ssh allow 'ssh-ed25519 AAAA x' ; rm -rf ~",
+            good + '\\n' + good, "workspace remote ssh join a@b", '', null, 5, "workspace remote ssh allow 'ssh-ed25519 AAAA " + "x".repeat(300) + "'"];
+        const pick = (app) => nativeUi(app).clipboardAllowLine();
+        return JSON.stringify({ parsed: cases.map(allowLineFrom), ok: pick({ theClipboard: () => good }),
+            nonText: pick({ theClipboard: () => { throw new Error('kein Text'); } }) });`));
+    assert.deepEqual(out.parsed.map((line) => line !== ''), [true, true, true, true, false, false, false, false, false, false, false, false, false]);
+    assert.ok(out.parsed[1].startsWith("workspace remote ssh allow 'ssh-ed25519") && !out.parsed[1].includes('\n'));
+    assert.equal(out.nonText, '');
+    assert.match(out.ok, /^workspace remote ssh allow '/);
 });
 
 test('SSH: eine unlesbare Antwort des Moduls wird gesagt, statt eine leere Maske zu zeigen', () => {
@@ -887,9 +966,9 @@ test('Freigabe-Dialog: Wach halten erscheint nur, solange der Mac nicht schon wa
         return JSON.stringify({ asleep: titles(asleep.alert), awake: titles(awake.alert),
             actions: [asleep.actions, awake.actions], text: ObjC.unwrap(asleep.alert.informativeText),
             awakeText: ObjC.unwrap(awake.alert.informativeText) });`));
-    assert.deepEqual(out.asleep, ['Schlüssel eintragen…', 'Wach halten', 'Fertig']);
-    assert.deepEqual(out.awake, ['Schlüssel eintragen…', 'Fertig']);
-    assert.deepEqual(out.actions, [['allow', 'wake', 'done'], ['allow', 'done']]);
+    assert.deepEqual(out.asleep, ['Schlüssel eintragen…', 'Zeile kopieren', 'Wach halten', 'Fertig']);
+    assert.deepEqual(out.awake, ['Schlüssel eintragen…', 'Zeile kopieren', 'Fertig']);
+    assert.deepEqual(out.actions, [['allow', 'copy', 'wake', 'done'], ['allow', 'copy', 'done']]);
     assert.match(out.text, /Wachhalten: aus\. Der Mac kann einschlafen/);
     assert.match(out.awakeText, /Wachhalten: an ✓/);
 });
@@ -910,6 +989,48 @@ test('Freigabe-Dialog: bereit zeigt Status, zwei Schritte und die Zeile in einem
     assert.match(out.fields[1][0], /^2\. Der andere Mac zeigt dann eine Zeile\. Klicke hier auf „Schlüssel eintragen…“/);
     // Befehle fürs Terminal gehören nicht in die Maske.
     for (const text of [out.text, ...out.fields.slice(1).map((f) => f[0])]) assert.doesNotMatch(text, /sudo|systemsetup|--wake|workspace remote/);
+});
+
+test('Freigabe-Dialog: die Rückmeldung nach „Zeile kopieren“ steht ganz oben', () => {
+    const out = JSON.parse(widgets(`
+        const text = (notice) => ObjC.unwrap(buildShare(${JSON.stringify(SHARE())}, notice).alert.informativeText);
+        return JSON.stringify({ with: text('Zeile kopiert ✓'), without: text('') });`));
+    assert.match(out.with, /^Zeile kopiert ✓\nBereit: Dieser Mac nimmt SSH-Verbindungen an\. ✓/);
+    assert.match(out.without, /^Bereit: Dieser Mac nimmt SSH-Verbindungen an\. ✓/);
+});
+
+test('Kopieren: der Text landet im Pasteboard, ersetzt den alten, und die echte Zwischenablage wird dabei nicht angefasst', () => {
+    const out = JSON.parse(widgets(`
+        const board = $.NSPasteboard.pasteboardWithUniqueName;           // ein eigenes Pasteboard: Cmd+V des Nutzers bleibt unberührt
+        const first = copyToBoard(board, 'workspace remote ssh join a@b');
+        const afterFirst = ObjC.unwrap(board.stringForType($.NSPasteboardTypeString));
+        copyToBoard(board, 'zweiter Text mit Umlaut ä und \\'Anführungszeichen\\'');
+        return JSON.stringify({ first, afterFirst, second: ObjC.unwrap(board.stringForType($.NSPasteboardTypeString)) });`));
+    assert.equal(out.first, true);
+    assert.equal(out.afterFirst, 'workspace remote ssh join a@b');
+    assert.equal(out.second, "zweiter Text mit Umlaut ä und 'Anführungszeichen'");
+});
+
+test('Einfügen: das Programm bekommt ein Bearbeiten-Menü, damit Cmd+V, Cmd+C, Cmd+X und Cmd+A in den Dialogen wirken', () => {
+    const out = JSON.parse(widgets(`
+        const application = $.NSApplication.sharedApplication;
+        const keyEvent = (key) => $.NSEvent.keyEventWithTypeLocationModifierFlagsTimestampWindowNumberContextCharactersCharactersIgnoringModifiersIsARepeatKeyCode(
+            $.NSEventTypeKeyDown, $.NSMakePoint(0, 0), $.NSEventModifierFlagCommand, 0, 0, $(), $(key), $(key), false, 0);
+        const before = application.mainMenu ? Number(application.mainMenu.numberOfItems) : 0;
+        const menu = installEditMenu(application);
+        const edit = menu.itemAtIndex(1).submenu;
+        const items = Array.from({ length: Number(edit.numberOfItems) }, (_, i) => {
+            const item = edit.itemAtIndex(i);
+            return [ObjC.unwrap(item.title), ObjC.unwrap(item.action), ObjC.unwrap(item.keyEquivalent)];
+        });
+        const handled = ['v', 'c', 'x', 'a', 'q'].map((key) => [key, Boolean(application.mainMenu.performKeyEquivalent(keyEvent(key)))]);
+        return JSON.stringify({ before, same: application.mainMenu === menu || ObjC.unwrap(application.mainMenu.itemAtIndex(1).submenu.title) === 'Bearbeiten',
+            titles: [ObjC.unwrap(menu.itemAtIndex(0).submenu.title), ObjC.unwrap(edit.title)], items, handled });`));
+    assert.equal(out.same, true);
+    assert.deepEqual(out.items.map((item) => item.slice(0, 3)), [['Ausschneiden', 'cut:', 'x'], ['Kopieren', 'copy:', 'c'],
+        ['Einsetzen', 'paste:', 'v'], ['Alles auswählen', 'selectAll:', 'a']]);
+    // Das Kürzel wird erkannt. Ohne dieses Menü gab es keinen Treffer, und Einfügen tat gar nichts (Cmd+Q ist bewusst nicht belegt).
+    assert.deepEqual(out.handled, [['v', true], ['c', true], ['x', true], ['a', true], ['q', false]]);
 });
 
 test('Freigabe-Dialog: Kopieren fehlgeschlagen und unlesbarer Host-Schlüssel werden gesagt', () => {
@@ -943,7 +1064,7 @@ test('Freigabe-Dialog: Entfernte Anmeldung aus zeigt nur das Eine, was fehlt, un
     assert.doesNotMatch(out.text, /sudo|systemsetup|--wake|workspace remote/);
 });
 
-test('SSH-Eingaben: Abbrechen liefert null, Auswahlliste und Bestätigung sind eindeutig', () => {
+test('SSH-Eingaben: Abbrechen liefert null, die Bestätigung ist eindeutig', () => {
     const out = JSON.parse(widgets(`
         let behaviour;
         const app = {
@@ -953,18 +1074,15 @@ test('SSH-Eingaben: Abbrechen liefert null, Auswahlliste und Bestätigung sind e
                 if (behaviour === 'boom') throw new Error('anderer Fehler');
                 return { textReturned: 'eingefügte Zeile' };
             },
-            chooseFromList: (items) => { app.items = items; return behaviour === 'back' ? false : [items[1]]; },
         };
         const ui = nativeUi(app);
         behaviour = 'ok'; const typed = ui.askLine('Titel', 'Prompt');
         const options = app.shown.options;
         behaviour = 'cancel'; const cancelled = ui.askLine('Titel', 'Prompt');
         behaviour = 'boom'; let other = null; try { ui.askLine('T', 'P'); } catch (error) { other = error.message; }
-        behaviour = 'pick'; const kind = ui.newKind(['guided', 'line']);
-        behaviour = 'back'; const none = ui.newKind(['guided', 'line']);
         response = FIRST; const yes = ui.confirmAllow('user@client', 'SHA256:xyz');
         response = FIRST + 1; const no = ui.confirmAllow('user@client', 'SHA256:xyz');
-        return JSON.stringify({ typed, cancelled, other, kind, none, yes, no, items: app.items,
+        return JSON.stringify({ typed, cancelled, other, yes, no,
             defaultButton: options.defaultButton, cancelButton: options.cancelButton, seen });`, `
         let response;
         const seen = [];
@@ -972,14 +1090,75 @@ test('SSH-Eingaben: Abbrechen liefert null, Auswahlliste und Bestätigung sind e
     assert.equal(out.typed, 'eingefügte Zeile');
     assert.equal(out.cancelled, null);
     assert.equal(out.other, 'anderer Fehler');
-    assert.equal(out.kind, 'line');
-    assert.equal(out.none, null);
     assert.equal(out.yes, true);
     assert.equal(out.no, false);
-    assert.equal(out.items.length, 2);
     assert.equal(out.cancelButton, 'Abbrechen');
     assert.match(out.seen[0], /Name: user@client\nFingerprint: SHA256:xyz/);
     assert.match(out.seen[0], /deinem eigenen Mac/);
+});
+
+test('Neue Verbindung: ein Dialog mit Verbinden, Geführte Einrichtung… und Abbrechen; die Zeile steht schon drin, wenn sie passt', () => {
+    const out = JSON.parse(widgets(`
+        let behaviour;
+        const app = {
+            displayDialog: (prompt, options) => {
+                app.shown = { prompt, options };
+                if (behaviour === 'cancel') { const e = new Error('abgebrochen'); e.errorNumber = -128; throw e; }
+                if (behaviour === 'boom') throw new Error('anderer Fehler');
+                return behaviour === 'guided' ? { textReturned: '', buttonReturned: 'Geführte Einrichtung…' }
+                    : { textReturned: 'workspace remote ssh join a@b', buttonReturned: 'Verbinden' };
+            },
+        };
+        const ui = nativeUi(app);
+        behaviour = 'line'; const line = ui.askConnection(true, 'workspace remote ssh join vor@ausgefüllt', 'Hinweis');
+        const withGuide = app.shown;
+        behaviour = 'guided'; const guided = ui.askConnection(true, '', '');
+        behaviour = 'line'; const noGuide = ui.askConnection(false, '', '');
+        const withoutGuide = app.shown;
+        behaviour = 'cancel'; const cancelled = ui.askConnection(true, '', '');
+        behaviour = 'boom'; let other = null; try { ui.askConnection(true, '', ''); } catch (error) { other = error.message; }
+        return JSON.stringify({ line, guided, noGuide, cancelled, other, withGuide, withoutGuide });`));
+    assert.deepEqual(out.line, { line: 'workspace remote ssh join a@b' });
+    assert.deepEqual(out.guided, { guided: true });
+    assert.deepEqual(out.noGuide, { line: 'workspace remote ssh join a@b' });
+    assert.equal(out.cancelled, null);
+    assert.equal(out.other, 'anderer Fehler');
+    assert.deepEqual(out.withGuide.options.buttons, ['Abbrechen', 'Geführte Einrichtung…', 'Verbinden']);
+    assert.deepEqual(out.withoutGuide.options.buttons, ['Abbrechen', 'Verbinden']);                  // ohne Setup-Modul kein Knopf dafür
+    assert.equal(out.withGuide.options.defaultAnswer, 'workspace remote ssh join vor@ausgefüllt');   // vorausgefüllt
+    assert.equal(out.withGuide.options.defaultButton, 'Verbinden');
+    assert.equal(out.withGuide.options.cancelButton, 'Abbrechen');
+    assert.match(out.withGuide.prompt, /^Hinweis\n\nFüge die Zeile ein/);
+    assert.match(out.withGuide.prompt, /Zwischenablage ist schon eingetragen/);
+    assert.match(out.withGuide.prompt, /Geführte Einrichtung/);
+    assert.doesNotMatch(out.withoutGuide.prompt, /Zwischenablage|Geführte/);
+});
+
+test('Neue Verbindung: nur eine einzelne join-Zeile wird aus der Zwischenablage übernommen, alles andere nie', () => {
+    const out = JSON.parse(widgets(`
+        const cases = ['workspace remote ssh join user@Remote-Mac.local SHA256:abc', '  workspace remote ssh join user@Remote-Mac.local SHA256:abc 22\\n',
+            'workspace remote ssh join user@Remote-Mac.local', 'workspace remote ssh join', 'workspace remote ssh allow x', 'ls -la',
+            'workspace remote ssh join a@b SHA256:abc\\nrm -rf ~', 'workspace remote ssh join a@b; rm -rf ~',
+            'workspace remote ssh join ' + 'x'.repeat(400), 'workspace remote ssh join a b c d', '', null, 5, { text: 1 }];
+        const pick = (app) => nativeUi(app).clipboardJoinLine();
+        return JSON.stringify({ parsed: cases.map(joinLineFrom), ok: pick({ theClipboard: () => cases[0] }),
+            nonText: pick({ theClipboard: () => { throw new Error('kein Text'); } }), junk: pick({ theClipboard: () => 'abc' }) });`));
+    assert.deepEqual(out.parsed, ['workspace remote ssh join user@Remote-Mac.local SHA256:abc', 'workspace remote ssh join user@Remote-Mac.local SHA256:abc 22',
+        'workspace remote ssh join user@Remote-Mac.local', '', '', '', '', '', '', '', '', '', '', '']);
+    assert.equal(out.ok, 'workspace remote ssh join user@Remote-Mac.local SHA256:abc');
+    assert.equal(out.nonText, '');                                                                  // keine Textinhalte: leer, kein Absturz
+    assert.equal(out.junk, '');
+});
+
+test('Neue Verbindung: der Hinweis ist best effort, ein Fehler dabei bricht nichts ab', () => {
+    const out = JSON.parse(widgets(`
+        const shown = [];
+        nativeUi({ displayNotification: (text, options) => shown.push([text, options]) }).notify('Verbinde …');
+        let survived = true;
+        try { nativeUi({ displayNotification: () => { throw new Error('Mitteilungen aus'); } }).notify('Verbinde …'); } catch (e) { survived = false; }
+        return JSON.stringify({ shown, survived });`));
+    assert.deepEqual(out.shown, [['Verbinde …', { withTitle: 'VibeCode Workspace' }]]);
+    assert.equal(out.survived, true);
 });
 
 test('SSH-Aufrufe an vibecode.py: sicher gequotet, Antwort als {code, out, err}', () => {

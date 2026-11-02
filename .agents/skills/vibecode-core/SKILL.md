@@ -165,6 +165,12 @@ modules is present, so a removed module only hides what it provided.
 - The window may trigger **only** `SSH_ACTIONS` (`share`, `share-wake`, `share-recheck`, `join`, `allow-check`, `allow`) through
   `vibecode.py _ssh ACTION --line=…`. It always answers `{code, out, err}` and never raises on exit codes:
   **`join` exit 2 means "not authorized yet" and is not an error.** Do not add a generic "run any command" path.
+- **New connection is one dialog** (`askConnection`: paste field + *Verbinden* / *Geführte Einrichtung…*), not a chooser followed by a
+  paste dialog. `join` can block for up to 30 s with **no window on screen** (the overview is ordered out while an action runs), so
+  `notify()` shows a banner first; without it a slow or unreachable Mac looks like "nothing happened". A join line (and an allow line) on
+  the clipboard is prefilled only if `joinLineFrom` / `allowLineFrom` accept it as exactly one well-formed line; allowing a key still
+  needs the fingerprint confirmation. *Zeile kopieren* (`copy` via `copyToBoard`, tests use `pasteboardWithUniqueName`, never the real
+  clipboard) re-copies the line; after the not-yet-authorized join result it copies the allow line.
 - **The share mask shows state, not terminal text.** `share*` call `remote ssh share --json` (`--wake`, `--no-open`), which prints
   `{remoteLogin, awake, line, fingerprint, copied, settingsOpened}` from `ssh_facts()`; the plain `ssh share` text for the terminal is
   unchanged and uses the same facts. `buildShare` shows only what is missing while Remote Login is off (**Erneut prüfen** =
@@ -197,6 +203,12 @@ modules is present, so a removed module only hides what it provided.
   `VIBECODE_DESKTOP_DIR`. Keep it that way.
 
 ## JXA pitfalls found while building this (each cost a failed run)
+
+- **Pasting into any text field of the window did nothing.** The process runs with the Accessory activation policy and has no main menu,
+  so macOS never routes Cmd+V / Cmd+C / Cmd+X / Cmd+A to a focused field (`NSAlert` accessory fields and `displayDialog` alike). `run()`
+  calls `installEditMenu()` first: an invisible Bearbeiten menu (`cut:` `copy:` `paste:` `selectAll:`, target nil, so the responder
+  chain gets it) behind an empty application menu item. Verified: `mainMenu.performKeyEquivalent` returns `false` for Cmd+V without it
+  and `true` with it; a real paste into a focused field needs a key window and cannot be tested headless.
 
 - **`window.center` and other no-argument methods are called by property access** (no parentheses), like `alert.runModal`.
 - **Nil for object parameters is `$()`, not `null`.** `null` arrives as `NSNull` and crashes with

@@ -195,35 +195,72 @@ function allowLine(output) {
     return match ? match[1] : "";
 }
 
+// Die Zeile des anderen Macs, wenn der Text wie genau eine solche aussieht, sonst "". Nur dann wird sie vorausgefüllt: der
+// Inhalt der Zwischenablage kommt von außen und wird nie ungeprüft übernommen (und der Nutzer bestätigt ihn trotzdem).
+function joinLineFrom(text) {
+    if (typeof text !== "string") return "";
+    const line = text.trim();
+    return line.length <= 300 && /^workspace remote ssh join \S+( \S+){0,2}$/.test(line) ? line : "";
+}
+
+// Neue Verbindung: ein einziger Dialog statt erst einer Auswahl und dann dem Einfügen. Die geführte Einrichtung bleibt als Knopf.
 function newConnection(ui, backend, ssh) {
-    const kinds = [];
-    if (ssh.guided) kinds.push("guided");
-    if (ssh.share) kinds.push("line");
-    const kind = ui.newKind(kinds);
-    if (!kind) return false;
-    if (kind === "guided") {
+    if (!ssh.share) {
+        // Ohne das Remote-Modul gibt es kein Verbinden per Zeile.
+        if (!ssh.guided) {
+            ui.error("Für eine neue Verbindung fehlt ein Modul (Remote oder Setup).");
+            return false;
+        }
         backend.sshOpen("guided");
         return true;
     }
-    const line = ui.askLine("Mit anderem Mac verbinden",
-        "Füge die Zeile ein, die der andere Mac unter „Diesen Mac freigeben…“ anzeigt. Sie beginnt mit „workspace remote ssh join“.");
-    if (line === null) return false;
-    const result = backend.ssh("join", line);
+    const prefill = ui.clipboardJoinLine();
+    let note = "";
+    let answer;
+    for (;;) {
+        answer = ui.askConnection(ssh.guided, prefill, note);
+        if (answer === null) return false;
+        if (answer.guided) {
+            backend.sshOpen("guided");
+            return true;
+        }
+        if (answer.line.trim()) break;
+        note = "Bitte die Zeile einfügen.";
+    }
+    // Das Prüfen kann bis zu 30 Sekunden dauern, und währenddessen ist kein Fenster zu sehen: ohne Hinweis wirkt es, als passiere nichts.
+    const target = /join\s+(\S+)/.exec(answer.line);
+    ui.notify(`Verbinde${target ? ` mit ${target[1]}` : ""} … das kann bis zu 30 Sekunden dauern.`);
+    const result = backend.ssh("join", answer.line);
     if (result.code === 0) {
-        ui.info(result.out);
+        const connected = /Verbunden mit (.+?)\. Befehle/.exec(result.out);
+        ui.info(connected ? `Verbunden mit ${connected[1]} ✓\n\nIm Bereich SSH kannst du jetzt auf „Verbinden“ klicken.` : result.out);
     } else if (result.code === 2) {
-        ui.info("Noch nicht freigegeben.\n\nÖffne auf dem anderen Mac VibeCode Workspace → Bereich SSH → Diesen Mac freigeben… → Schlüssel eintragen… " +
-            "und füge diese Zeile ein (sie liegt in der Zwischenablage):\n\n" + allowLine(result.out) +
-            "\n\nDanach hier im Bereich SSH auf Verbinden klicken.");
+        const allow = allowLine(result.out);
+        ui.infoWithCopy("Noch nicht freigegeben: Der andere Mac muss dich noch freigeben.\n\n" +
+            "1. Dort: VibeCode Workspace → Bereich SSH → Diesen Mac freigeben… → Schlüssel eintragen… und diese Zeile einfügen " +
+            "(sie liegt in der Zwischenablage):\n\n" + allow +
+            "\n\n2. Danach hier im Bereich SSH auf „Verbinden“ klicken.", allow);
     } else {
         ui.error(result.err || result.out);
     }
     return false;
 }
 
+// Wie joinLineFrom: nur genau eine allow-Zeile mit einem öffentlichen Schlüssel in Anführungszeichen wird vorausgefüllt. Freigegeben
+// wird trotzdem erst nach der Bestätigung mit Name und Fingerprint.
+function allowLineFrom(text) {
+    if (typeof text !== "string") return "";
+    const line = text.trim();
+    return line.length <= 2000 &&
+        /^workspace remote ssh allow '(?:ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp\d+) [A-Za-z0-9+\/=]+(?: [^'\r\n]{0,200})?'$/.test(line) ? line : "";
+}
+
 function allowFlow(ui, backend) {
+    const prefill = ui.clipboardAllowLine();
     const line = ui.askLine("Schlüssel eintragen",
-        "Füge die Zeile ein, die der andere Mac anzeigt. Sie beginnt mit „workspace remote ssh allow“.");
+        "Füge die Zeile ein, die der andere Mac anzeigt. Sie beginnt mit „workspace remote ssh allow“." +
+        (prefill ? "\n\nDie Zeile aus der Zwischenablage ist schon eingetragen. Freigegeben wird erst nach deiner Bestätigung des Fingerprints." : ""),
+        prefill);
     if (line === null) return;
     const check = backend.ssh("allow-check", line);
     if (check.code !== 0) {
@@ -243,24 +280,32 @@ function allowFlow(ui, backend) {
 
 function shareFlow(ui, backend) {
     let result = backend.ssh("share");
+    let share = null;
+    let notice = "";
     for (;;) {
-        if (result.code !== 0) {
-            ui.error(result.err || result.out);
-            return;
+        if (result) {
+            if (result.code !== 0) {
+                ui.error(result.err || result.out);
+                return;
+            }
+            // Das Modul liefert den Zustand als JSON; die Maske zeigt daraus nur, was gerade zu tun ist.
+            try {
+                share = JSON.parse(result.out);
+            } catch (error) {
+                ui.error("Die Antwort des Remote-Moduls war nicht lesbar.");
+                return;
+            }
+            result = null;
         }
-        // Das Modul liefert den Zustand als JSON; die Maske zeigt daraus nur, was gerade zu tun ist.
-        let share;
-        try {
-            share = JSON.parse(result.out);
-        } catch (error) {
-            ui.error("Die Antwort des Remote-Moduls war nicht lesbar.");
-            return;
-        }
-        const choice = ui.share(share);
+        const choice = ui.share(share, notice);
+        notice = "";
         if (choice === "wake") {
             result = backend.ssh("share-wake");
         } else if (choice === "recheck") {
             result = backend.ssh("share-recheck");           // ohne die Systemeinstellungen noch einmal zu öffnen
+        } else if (choice === "copy") {
+            ui.copy(share.line);                             // die Zwischenablage wird gern überschrieben: noch einmal in Ruhe kopieren
+            notice = "Zeile kopiert ✓";
         } else if (choice === "allow") {
             allowFlow(ui, backend);
             return;
@@ -730,11 +775,6 @@ function buildRemoteFolder(note, draft) {
     return { alert, host, root };
 }
 
-const KIND_TITLES = {
-    guided: "Geführte Einrichtung im Terminal (Host, Schlüssel, Repository-Suche)",
-    line: "Mit der Zeile eines anderen Macs verbinden (ohne Passwort)",
-};
-
 // Die Freigabe-Maske: kurz und je nach Zustand. Aus: nur das Eine, was fehlt. An: Status, die Zeile für den anderen Mac in einem
 // eigenen, markierbaren Feld und die zwei Schritte. Keine Terminal-Befehle: die gehören in die Doku, nicht in diese Maske.
 function wrappingText(text, frame, mono) {
@@ -744,7 +784,7 @@ function wrappingText(text, frame, mono) {
     return field;
 }
 
-function buildShare(share) {
+function buildShare(share, notice) {
     const alert = $.NSAlert.alloc.init;
     alert.messageText = $("Diesen Mac freigeben");
     let actions;
@@ -755,8 +795,8 @@ function buildShare(share) {
             "Danach hier auf „Erneut prüfen“ klicken.");
         actions = ["recheck", "done"];
     } else {
-        const status = ["Bereit: Dieser Mac nimmt SSH-Verbindungen an. ✓",
-            share.awake ? "Wachhalten: an ✓" : "Wachhalten: aus. Der Mac kann einschlafen, dann ist er per SSH nicht erreichbar."];
+        const status = (notice ? [notice] : []).concat(["Bereit: Dieser Mac nimmt SSH-Verbindungen an. ✓",
+            share.awake ? "Wachhalten: an ✓" : "Wachhalten: aus. Der Mac kann einschlafen, dann ist er per SSH nicht erreichbar."]);
         if (!share.fingerprint) status.push("⚠︎ Der Host-Schlüssel ist nicht lesbar: der andere Mac kann den Fingerprint nicht prüfen.");
         alert.informativeText = $(`${status.join("\n")}\n\n1. Auf dem anderen Mac: VibeCode → SSH → Neue Verbindung… → ` +
             `„Mit der Zeile eines anderen Macs verbinden“ und diese Zeile einfügen ` +
@@ -768,9 +808,9 @@ function buildShare(share) {
         view.addSubview(wrappingText("2. Der andere Mac zeigt dann eine Zeile. Klicke hier auf „Schlüssel eintragen…“ und füge sie ein.",
             $.NSMakeRect(0, 0, WIDTH, 40), false));
         alert.accessoryView = view;
-        actions = ["allow"].concat(share.awake ? [] : ["wake"], ["done"]);
+        actions = ["allow", "copy"].concat(share.awake ? [] : ["wake"], ["done"]);
     }
-    const titles = { allow: "Schlüssel eintragen…", wake: "Wach halten", recheck: "Erneut prüfen", done: "Fertig" };
+    const titles = { allow: "Schlüssel eintragen…", copy: "Zeile kopieren", wake: "Wach halten", recheck: "Erneut prüfen", done: "Fertig" };
     actions.forEach((action) => alert.addButtonWithTitle($(titles[action])));
     return { alert, actions, line };
 }
@@ -964,18 +1004,66 @@ function nativeUi(app) {
             if (!isButton(response, $.NSAlertFirstButtonReturn)) return null;
             return built.choices[Number(built.popup.indexOfSelectedItem)].value;
         },
-        newKind(kinds) {
-            const chosen = app.chooseFromList(kinds.map((kind) => KIND_TITLES[kind]), {
-                withTitle: "Neue Verbindung", withPrompt: "Wie möchtest du verbinden?",
-                okButtonName: "Weiter", cancelButtonName: "Zurück",
-            });
-            if (chosen === false) return null;
-            return kinds.find((kind) => KIND_TITLES[kind] === chosen[0]) || null;
+        // Ein Dialog für "Neue Verbindung": Zeile einfügen (ggf. aus der Zwischenablage vorausgefüllt) oder die geführte Einrichtung.
+        // Ergebnis: null (Abbrechen), {guided: true} oder {line}.
+        askConnection(canGuide, prefill, note) {
+            const buttons = canGuide ? ["Abbrechen", "Geführte Einrichtung…", "Verbinden"] : ["Abbrechen", "Verbinden"];
+            try {
+                const answer = app.displayDialog(
+                    `${note ? `${note}\n\n` : ""}Füge die Zeile ein, die der andere Mac unter „Diesen Mac freigeben…“ anzeigt. ` +
+                    `Sie beginnt mit „workspace remote ssh join“.${prefill ? "\n\nDie Zeile aus der Zwischenablage ist schon eingetragen." : ""}` +
+                    `${canGuide ? "\n\nOhne die Zeile: „Geführte Einrichtung…“ (Host und Schlüssel im Terminal)." : ""}`, {
+                        withTitle: "Neue Verbindung", defaultAnswer: prefill || "", buttons,
+                        defaultButton: "Verbinden", cancelButton: "Abbrechen",
+                    });
+                return answer.buttonReturned === "Geführte Einrichtung…" ? { guided: true } : { line: answer.textReturned };
+            } catch (error) {
+                if (error.errorNumber === -128) return null;
+                throw error;
+            }
         },
-        askLine(title, prompt) {
+        clipboardAllowLine() {
+            try {
+                return allowLineFrom(app.theClipboard());
+            } catch (error) {
+                return "";
+            }
+        },
+        // In die Zwischenablage kopieren (NSPasteboard): dieselbe Zwischenablage wie Cmd+C, auch für Universal Clipboard.
+        copy(text) {
+            copyToBoard($.NSPasteboard.generalPasteboard, text);
+        },
+        // Wie info, mit einem zweiten Knopf, der die Zeile kopiert (und danach schließt: der nächste Schritt ist am anderen Mac).
+        infoWithCopy(text, copyText) {
+            const alert = $.NSAlert.alloc.init;
+            alert.messageText = $("VibeCode Workspace");
+            alert.informativeText = $(String(text));
+            alert.addButtonWithTitle($("OK"));
+            if (copyText) alert.addButtonWithTitle($("Zeile kopieren"));
+            if (isButton(present(alert, null), $.NSAlertSecondButtonReturn) && copyText) {
+                this.copy(copyText);
+                this.notify("Zeile kopiert.");
+            }
+        },
+        clipboardJoinLine() {
+            try {
+                return joinLineFrom(app.theClipboard());
+            } catch (error) {
+                return "";                                   // keine Textinhalte oder kein Zugriff: dann eben nicht vorausfüllen
+            }
+        },
+        // Kurzer Hinweis ohne Fenster; scheitert er (Mitteilungen aus), bleibt der Ablauf derselbe.
+        notify(text) {
+            try {
+                app.displayNotification(text, { withTitle: "VibeCode Workspace" });
+            } catch (error) {
+                // best effort
+            }
+        },
+        askLine(title, prompt, prefill) {
             try {
                 return app.displayDialog(prompt, {
-                    withTitle: title, defaultAnswer: "", buttons: ["Abbrechen", "Weiter"],
+                    withTitle: title, defaultAnswer: prefill || "", buttons: ["Abbrechen", "Weiter"],
                     defaultButton: "Weiter", cancelButton: "Abbrechen",
                 }).textReturned;
             } catch (error) {
@@ -983,8 +1071,8 @@ function nativeUi(app) {
                 throw error;
             }
         },
-        share(output) {
-            const built = buildShare(output);
+        share(state, notice) {
+            const built = buildShare(state, notice);
             const response = present(built.alert, built);
             return built.actions[Number(response) - Number($.NSAlertFirstButtonReturn)] || "done";
         },
@@ -1083,12 +1171,38 @@ function nativeUi(app) {
     };
 }
 
+// Ohne Hauptmenü kennt ein Programm im Hintergrund (Accessory) weder Cmd+V noch Cmd+C, Cmd+X oder Cmd+A: Einfügen in die Textfelder
+// der Dialoge ginge nicht. Ein Bearbeiten-Menü genügt; es bleibt unsichtbar, nur die Tastenkürzel wirken (an die Antwortkette,
+// target nil). Der Eintrag davor ist das Programmmenü, ohne das macOS die weiteren Menüs nicht auswertet.
+const EDIT_SHORTCUTS = [["Ausschneiden", "cut:", "x"], ["Kopieren", "copy:", "c"], ["Einsetzen", "paste:", "v"], ["Alles auswählen", "selectAll:", "a"]];
+
+// Text in ein Pasteboard schreiben. Getrennt von der Zwischenablage, damit Tests ein eigenes Pasteboard nehmen können.
+function copyToBoard(board, text) {
+    board.clearContents;
+    return Boolean(board.setStringForType($(String(text)), $.NSPasteboardTypeString));
+}
+
+function installEditMenu(application) {
+    const mainMenu = $.NSMenu.alloc.init;
+    const appItem = $.NSMenuItem.alloc.init;
+    appItem.submenu = $.NSMenu.alloc.initWithTitle($("VibeCode Workspace"));
+    mainMenu.addItem(appItem);
+    const editItem = $.NSMenuItem.alloc.init;
+    const edit = $.NSMenu.alloc.initWithTitle($("Bearbeiten"));
+    EDIT_SHORTCUTS.forEach(([title, action, key]) => edit.addItemWithTitleActionKeyEquivalent($(title), action, $(key)));
+    editItem.submenu = edit;
+    mainMenu.addItem(editItem);
+    application.mainMenu = mainMenu;
+    return mainMenu;
+}
+
 function run(argv) {
     const [python, core] = argv;
     const app = Application.currentApplication();
     app.includeStandardAdditions = true;
     const application = $.NSApplication.sharedApplication;
     application.setActivationPolicy($.NSApplicationActivationPolicyAccessory);
+    installEditMenu(application);
     application.activateIgnoringOtherApps(true);
     flow(nativeUi(app), makeBackend(app, python, core));
     return "";
