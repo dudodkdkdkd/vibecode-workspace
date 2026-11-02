@@ -133,7 +133,7 @@ im Setup (`terminals.json`), nur im Fenster:
 ### SSH im Fenster
 
 Der Bereich **SSH** zeigt deine eingerichteten Verbindungen: die SSH-Hosts mit Repository-Suche (mit der Anzahl der zuletzt
-gefundenen Repositories) und den gespeicherten Mac, z. B. der Remote-Mac. Den Bereich gibt es nur, wenn ein Modul SSH anbietet.
+gefundenen Repositories) und den gespeicherten Remote-Mac. Den Bereich gibt es nur, wenn ein Modul SSH anbietet.
 Die Übersicht fragt dabei **keinen Host per SSH** an, sie zeigt den zuletzt gefundenen Stand.
 
 | Schaltfläche | Was sie tut |
@@ -159,9 +159,9 @@ Auch ohne Fenster:
 
 ```bash
 ./VibeCode\ Workspace.command list                     # gespeicherte Workspaces
-./VibeCode\ Workspace.command run Demo              # Workspace starten
+./VibeCode\ Workspace.command run Demo                 # Workspace starten
 ./VibeCode\ Workspace.command save --name=Demo --project=example-api --project=example-web --shortcut
-./VibeCode\ Workspace.command delete --name=Demo    # samt Schreibtisch-Shortcut
+./VibeCode\ Workspace.command delete --name=Demo       # samt Schreibtisch-Shortcut
 ./VibeCode\ Workspace.command shortcuts sync           # alle Shortcuts neu anlegen
 ./VibeCode\ Workspace.command remote ssh share         # Modul-Befehle: launch, setup, remote …, local
 ```
@@ -199,7 +199,7 @@ Modulordner, verschwinden seine Einträge; ein neues Modul braucht nur einen Ord
 ---
 
 ### 2️⃣ **Remote Management** (`remote/`)
-**Zweck:** Einen Mac (z. B. ein Remote-Mac) wach halten, Claude/Codex darauf laufen
+**Zweck:** Einen entfernten Mac wach halten, Claude/Codex darauf laufen
 lassen und sich von einem anderen Mac per SSH verbinden.
 
 | Feature | Beschreibung |

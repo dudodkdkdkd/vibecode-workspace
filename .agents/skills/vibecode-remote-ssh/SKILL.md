@@ -1,6 +1,6 @@
 ---
 name: vibecode-remote-ssh
-description: Give one Mac SSH access to another (normally client Mac → remote Mac) and run commands there, via `workspace remote ssh`. Use when the user says things like "gib Zugriff frei", "gib diesen Mac frei", "ich will dass du Zugriff auf den remote Mac bekommst", "verbinde dich mit meinem remote Mac", "führ das auf dem remote Mac aus", "grant/allow access", "connect to the other Mac", or when a task has to execute on the other device. Also for an unreachable or refusing remote Mac.
+description: Give one Mac SSH access to another (normally client Mac → remote Mac) and run commands there, via `workspace remote ssh`. Use when the user says things like "gib Zugriff frei", "gib diesen Mac frei", "ich will dass du Zugriff auf den anderen Mac bekommst", "verbinde dich mit meinem anderen Mac", "führ das auf dem anderen Mac aus", "grant/allow access", "connect to the other Mac", or when a task has to execute on the other device. Also for an unreachable or refusing remote Mac.
 ---
 
 # SSH between the user's two Macs
