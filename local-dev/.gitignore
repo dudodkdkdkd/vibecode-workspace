@@ -1,21 +1,16 @@
 # Local Dev - Ignorierte Dateien
 
-# Config-Dateien (lokale Einstellungen)
-ollama-config.json
-mlx-config.json
-local-ai.json
-local-ai.json.pre-v2.bak
+# Config-Dateien (lokale Einstellungen einschließlich Sicherungskopien)
+ollama-config.json*
+mlx-config.json*
+local-ai.json*
 
-# Lock-Dateien
+# Laufzeit-Locks; Abhängigkeits-Lockdateien wie yarn.lock bleiben versionierbar
 .ollama-opencode.lock
 .mlx-spark.lock
 .local-ai-state/
-*.lock
 
-# Log-Dateien
-*.log
-local-dev.log
-mlx-spark.log
+# Log-Dateien werden bereits durch die .gitignore im Repository-Root ignoriert.
 
 # Server-Skripte
 mlx-server.sh
