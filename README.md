@@ -633,4 +633,33 @@ vibecode-workspace/
 
 ---
 
+## Datenschutz bei Beiträgen
+
+Dieses Repository ist öffentlich. Die verbindlichen Regeln stehen in [AGENTS.md](AGENTS.md)
+und [CLAUDE.md](CLAUDE.md); für Cursor gilt zusätzlich eine [immer aktive Projektregel](.cursor/rules/public-repository-privacy.mdc).
+Sie gelten für Code, Tests, Beispiele, Dokumentation sowie Commit-Nachrichten und Autorendaten.
+
+Verwende ausschließlich erfundene Namen, Geräte, Pfade und Projekte, etwa `user@remote-mac.local`,
+`/Users/example/` und `example-api`. Echte Verbindungsdaten, öffentliche oder private SSH-Schlüssel,
+Fingerprints, Zugangsdaten, Logs und persönliche Konfigurationen gehören nicht in versionierte Dateien.
+Testschlüssel dürfen nur für den Test in temporären Verzeichnissen erzeugt werden.
+
+Richte in jedem neuen Klon die neutrale Git-Identität ausschließlich für dieses Repository ein:
+
+```bash
+git config --local user.name "VibeCode Contributors"
+git config --local user.email "contributors@example.invalid"
+```
+
+Prüfe vor jedem Commit den vollständigen gestagten Diff einschließlich neuer Dateien auf persönliche
+Angaben und führe einen Secret-Scan mit geschwärzter Ausgabe aus, zum Beispiel mit installiertem Gitleaks:
+`gitleaks git --pre-commit --staged --redact=100`. Prüfe vor dem Push alle ausgehenden Commits samt Metadaten.
+`.gitignore` schützt keine bereits versionierten Dateien oder persönlichen Angaben innerhalb von Quelltext;
+auch ein Secret-Scanner ersetzt die manuelle Datenschutzprüfung nicht.
+
+Nach einer Bereinigung der Historie alte Klone neu klonen und nur geprüfte Änderungen übertragen,
+damit entfernte Informationen nicht durch einen Merge oder Push wieder veröffentlicht werden.
+
+---
+
 **Viel Erfolg mit deinem modularen VibeCode Workspace! 🚀**

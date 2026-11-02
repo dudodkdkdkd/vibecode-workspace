@@ -1,0 +1,13 @@
+---
+description: Protect personal information and credentials in this public repository
+alwaysApply: true
+---
+
+# Public repository privacy
+
+Follow the **Public repository: privacy and secrets** section of [AGENTS.md](../../AGENTS.md)
+for every change, commit and push, including tests, examples and documentation.
+Use only invented identities, device names, paths and project names. Never copy real connection
+details, credentials or real SSH key material into tracked content. Review staged content and
+outgoing commit metadata; secret scanning alone does not detect all personal information.
+Use the repository-local neutral commit identity specified in AGENTS.md.

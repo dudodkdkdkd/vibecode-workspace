@@ -3,6 +3,28 @@
 macOS launcher that opens multiple repositories in one VS Code workspace with
 per-project terminals and auto-opened URL tabs.
 
+## Public repository: privacy and secrets (always applies)
+
+- Never commit real personal names, usernames, email addresses, device/host names, network
+  addresses, home-directory paths, account identifiers or identifiable customer/project names.
+  This includes source code, tests, fixtures, examples, documentation, skills and commit messages.
+- Use synthetic examples only: `user`, `remote-mac.local`, `/Users/example/`, `example-api`
+  and documentation addresses such as `192.0.2.5`. Loopback addresses used by local services are fine.
+  Reproduce the structure of a bug with invented data, never the user's actual connection details.
+- Never commit credentials, real SSH keys (public or private), real key fingerprints or tokens.
+  Tests may generate disposable keys inside temporary directories and use clearly dummy values.
+- Never copy personal data from the clipboard, system output, screenshots, logs or local configuration
+  into tracked files. Keep runtime data outside the repo or in explicitly ignored local files.
+  Never force-add those files. `.gitignore` does not protect inline content or already tracked files.
+- Before every commit, review the complete staged diff and new files for personal data and secrets;
+  run a secret scan with redacted output. Secret scanners do not replace the manual privacy review.
+  Before pushing, review every outgoing commit, including messages and author/committer identities.
+- Use the repository-local neutral Git identity `VibeCode Contributors <contributors@example.invalid>`
+  for commits. Configure it in each fresh clone; never change the global Git identity for this project.
+- Do not merge or push pre-cleanup history from an old clone. Use a fresh clone and port only reviewed
+  changes. If sensitive data is already committed, inspect history as well as the current files.
+- Keep the privacy sections in `AGENTS.md` and `CLAUDE.md` synchronized; the always-on Cursor rule points here.
+
 ## Before changing the launcher
 
 Read `.agents/skills/vibecode-workspace-launcher/SKILL.md`. It documents pitfalls that
