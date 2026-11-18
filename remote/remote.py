@@ -27,6 +27,8 @@ DAYS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sun
 PLATFORM_PRESETS = ['Claude', 'Claude Code', 'Codex', 'OpenCode']
 CLI_PLATFORMS = {'Claude Code': 'claude', 'Codex': 'codex', 'OpenCode': 'opencode'}
 MANUAL_END = 253402300799  # 9999-12-31 23:59:59 UTC; displayed as "bis AUS".
+WAKE_SETTINGS = ('keep_awake', 'apps', 'close_apps_on_off', 'switch_at', 'cycle')
+CONTROLLER_VERSION = 3
 INTERNAL_DEFAULTS = {
     # Kept internally so installations from the former scheduled mode can be
     # detected and safely migrated/cancelled. They are not user-facing config.
@@ -59,12 +61,12 @@ def write(name, value):
             os.unlink(tmp)
 
 
-def duration(value):
+def duration(value, *, max_seconds=86400):
     m = re.fullmatch(r'([1-9][0-9]*)(m|h)', value)
     if not m:
-        raise ValueError('Dauer: 1m bis 24h, z. B. 5h oder 90m.')
+        raise ValueError('Gib eine Dauer wie 5h oder 90m ein.')
     seconds = int(m[1]) * (3600 if m[2] == 'h' else 60)
-    if seconds > 86400:
+    if max_seconds is not None and seconds > max_seconds:
         raise ValueError('Maximale Dauer: 24h.')
     return seconds
 
@@ -80,6 +82,15 @@ def config(overrides=None):
         raise ValueError('days benötigt englische Wochentage.')
     if not isinstance(c['apps'], list) or any(not isinstance(a, str) or not a.strip() for a in c['apps']):
         raise ValueError('apps benötigt eine Liste von App-Namen.')
+    if 'switch_at' in c and (type(c['switch_at']) is not int or not 0 <= c['switch_at'] < MANUAL_END):
+        raise ValueError('Ungültiger Zeitpunkt für den Wachhalten-Timer.')
+    cycle = c['cycle']
+    if cycle is not None and (
+        not c.get('switch_at') or not isinstance(cycle, dict) or set(cycle) != {'on_seconds', 'off_seconds'}
+        or any(type(seconds) is not int or seconds <= 0 for seconds in cycle.values())
+        or c['switch_at'] + sum(cycle.values()) >= MANUAL_END
+    ):
+        raise ValueError('Ungültige AN- oder AUS-Dauer für den automatischen Wechsel.')
     if not re.fullmatch(r'([01][0-9]|2[0-3]):[0-5][0-9]', c['start']):
         raise ValueError('start benötigt HH:MM.')
     duration(c['duration'])
@@ -88,7 +99,7 @@ def config(overrides=None):
 
 def simple_config(saved=None):
     saved = read('config.json') if saved is None else saved
-    return (isinstance(saved, dict) and set(saved) <= {'keep_awake', 'apps'} and
+    return (isinstance(saved, dict) and set(saved) <= set(WAKE_SETTINGS) and
             'keep_awake' in saved and 'apps' in saved)
 
 
@@ -105,11 +116,31 @@ def slots(c, now):
     return result
 
 
+def timer_phase(c, now):
+    """Return the current state and the next switch time, or zero for no switch."""
+    initial_on, first_switch = c['keep_awake'], c.get('switch_at', 0)
+    if not first_switch or now < first_switch:
+        return initial_on, first_switch
+    cycle = c['cycle']
+    if not cycle:
+        return not initial_on, 0
+
+    cycle_length = cycle['on_seconds'] + cycle['off_seconds']
+    first_phase_length = cycle['off_seconds'] if initial_on else cycle['on_seconds']
+    completed_cycles, elapsed = divmod(int(now) - first_switch, cycle_length)
+    cycle_start = first_switch + completed_cycles * cycle_length
+    if elapsed < first_phase_length:
+        return not initial_on, cycle_start + first_phase_length
+    return initial_on, cycle_start + cycle_length
+
+
 def window(c, state, now):
+    if 'switch_at' in c:
+        enabled, next_switch = timer_phase(c, now)
+        return (next_switch or MANUAL_END) if enabled else 0
     if state.get('disabled', False) or not c['keep_awake']:
         return 0
-    # The new two-value config uses keep_awake itself as the persistent ON/OFF
-    # switch. The remaining branches only preserve old timed configurations.
+    # Older manual and weekly configurations still use request.json.
     if simple_config():
         return MANUAL_END
     ends = [MANUAL_END if state.get('manual_on', False) else state.get('manual_until', 0)]
@@ -335,7 +366,7 @@ def platform_label(name):
 def stamp(value):
     if value == MANUAL_END:
         return 'manuell (bis AUS)'
-    return dt.datetime.fromtimestamp(value).strftime('%a %d %b · %H:%M') if value else '—'
+    return dt.datetime.fromtimestamp(value).strftime('%d.%m.%Y um %H:%M') if value else '—'
 
 
 def status(output=print):
@@ -348,6 +379,15 @@ def status(output=print):
     output(f'Status          {"AKTIV" if active else ("STARTET" if end else "AUS")}')
     output('Mac-Ruhezustand ' +
            ('BLOCKIERT' if active and health.get('awake') else 'nicht durch VibeCode blockiert'))
+    enabled, next_switch = timer_phase(c, now)
+    if next_switch:
+        next_mode = 'AUS' if enabled else 'AN'
+        output(f'Timer           {next_mode} am {stamp(next_switch)}')
+    cycle = c['cycle']
+    if cycle:
+        on_minutes = cycle['on_seconds'] // 60
+        off_minutes = cycle['off_seconds'] // 60
+        output(f'Automatik       AN {on_minutes} min · AUS {off_minutes} min')
     for app in c['apps']:
         output(f'{platform_label(app):<31}{"LÄUFT" if platform_running(app) else "AUS"}')
     if not c['apps']:
@@ -356,9 +396,7 @@ def status(output=print):
         output(f'Fehler          {health["error"]}')
 
 
-# SSH to a second Mac (e.g. client -> server). The target lives in its own
-# file: config.json is limited to {keep_awake, apps} by simple_config(), and
-# normalize_settings() would drop any extra key from it.
+# The SSH target lives separately from the wake/app settings.
 SSH_FILE = 'ssh.json'
 # Neither pattern may start with "-": the values end up as ssh arguments and
 # must never be readable as an option such as -oProxyCommand=...
@@ -775,18 +813,24 @@ def wake_plan(c, remove=False):
     write('wake.json', saved)
 
 
-def install(schedule=False):
+def install(schedule=False, *, only_if_loaded=False):
+    domain = 'gui/' + str(os.getuid())
+    target = domain + '/' + LABEL
+    loaded = run('/bin/launchctl', 'print', target, check=False).returncode == 0
+    if only_if_loaded and not loaded:
+        return
     c = config()
     BASE.mkdir(parents=True, exist_ok=True)
     if not (BASE / 'config.json').exists():
-        write('config.json', {'keep_awake': c['keep_awake'], 'apps': c['apps']})
+        save_settings()
     if schedule:
         wake_plan(c)
         state = read('request.json', {})
         state['disabled'] = False
         write('request.json', state)
-    domain = 'gui/' + str(os.getuid())
-    if run('/bin/launchctl', 'print', domain + '/' + LABEL, check=False).returncode == 0:
+    if loaded:
+        if read('health.json', {}).get('version') != CONTROLLER_VERSION:
+            run('/bin/launchctl', 'kickstart', '-k', target)
         return
     PLIST.parent.mkdir(parents=True, exist_ok=True)
     payload = {'Label': LABEL, 'ProgramArguments': [sys.executable, str(ROOT / 'remote.py'), 'controller'],
@@ -810,37 +854,53 @@ def stop(disable=False):
 
 
 def save_settings(**changes):
-    """Validate and atomically persist settings changed in the control terminal."""
-    updated = config(changes)
-    # Deliberately keep the user-facing configuration to the two controls
-    # available in the terminal: ON/OFF and the selected platforms.
-    write('config.json', {'keep_awake': updated['keep_awake'], 'apps': updated['apps']})
-    return updated
-
-
-def normalize_settings():
-    """One-time migration from the former multi-option dialog to two values."""
-    saved = read('config.json')
-    if simple_config(saved):
-        return
-    current = config()
-    was_active = bool(window(current, read('request.json', {}), time.time()))
-    write('config.json', {'keep_awake': was_active, 'apps': current['apps']})
+    """Persist one snapshot of the mode, timer and app settings."""
+    BASE.mkdir(parents=True, exist_ok=True)
+    with (BASE / 'settings.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        c = config()
+        if 'switch_at' not in c:
+            state = read('request.json', {})
+            changes.setdefault('keep_awake', bool(window(c, state, time.time())))
+            changes.setdefault('switch_at', 0)
+        if changes or not simple_config():
+            c = config(changes)
+            write('config.json', {key: c[key] for key in WAKE_SETTINGS})
+        return c
 
 
 def activate():
     """Enable indefinite wake/app mode until the user explicitly turns it off."""
-    save_settings(keep_awake=True)
     install()
-    state = read('request.json', {})
-    state.update(manual_on=True, manual_until=0, disabled=False)
-    write('request.json', state)
+    save_settings(keep_awake=True, switch_at=0, cycle=None)
 
 
 def deactivate():
-    """Disable wake/app mode; the controller releases and quits managed apps."""
-    stop()
-    save_settings(keep_awake=False)
+    """Turn off wake mode and let the controller apply the app preference."""
+    return save_settings(keep_awake=False, switch_at=0, cycle=None)
+
+
+def set_timer(enabled, seconds):
+    install()
+    save_settings(keep_awake=enabled, switch_at=math.ceil(time.time()) + seconds, cycle=None)
+
+
+def start_cycle(on_seconds, off_seconds):
+    install()
+    now = time.time()
+    enabled = bool(window(config(), read('request.json', {}), now))
+    first_duration = on_seconds if enabled else off_seconds
+    save_settings(keep_awake=enabled, switch_at=math.ceil(now) + first_duration,
+                  cycle={'on_seconds': on_seconds, 'off_seconds': off_seconds})
+
+
+def read_duration(input_fn, prompt):
+    raw = input_fn(prompt).strip().lower()
+    if not raw:
+        return None
+    if re.fullmatch(r'[0-9]+', raw):
+        raw += 'h'
+    return duration(raw, max_seconds=None)
 
 
 def setting(value):
@@ -858,7 +918,6 @@ def platforms_menu(input_fn, output):
         output('')
         output('PLATTFORMEN / APPS')
         output('Bei AN werden diese Apps vollständig geöffnet und überwacht.')
-        output('Bei AUS werden ihre gesamten App- und Terminal-Prozesse wieder beendet.')
         for index, name in enumerate(PLATFORM_PRESETS, 1):
             marker = 'x' if name in c['apps'] else ' '
             label = platform_label(name)
@@ -902,47 +961,66 @@ def control_loop(input_fn=input, output=print):
         output('═' * 55)
         status(output)
         c = config()
-        active = bool(window(c, read('request.json', {}), time.time()))
+        now = time.time()
+        active = bool(window(c, read('request.json', {}), now))
+        _, next_switch = timer_phase(c, now)
         output('')
         output(f'Wachhalten + Apps  {setting(active)}')
         output(f'Ausgewählte Apps   {", ".join(c["apps"]) if c["apps"] else "keine"}')
         output('')
         output(f'  [1] Wachhalten + Apps {"AUSSCHALTEN" if active else "EINSCHALTEN"}')
         output('  [2] Apps auswählen')
+        output(f'  [3] Apps bei AUS schließen ({"JA" if c["close_apps_on_off"] else "NEIN"})')
+        output('  [4] AN für eine bestimmte Zeit, dann AUS')
+        output('  [5] AUS für eine bestimmte Zeit, dann wieder AN')
+        if next_switch:
+            output('  [6] Timer aufheben und aktuellen Zustand behalten')
+        output('  [7] Automatischen Wechsel zwischen AN und AUS einstellen')
         output('  [s] Status aktualisieren')
         output('  [q] Kontrollterminal schließen')
         try:
             answer = input_fn('Auswahl: ').strip().lower()
+            if answer == '1':
+                if active:
+                    deactivate()
+                else:
+                    activate()
+            elif answer == '2':
+                platforms_menu(input_fn, output)
+            elif answer == '3':
+                save_settings(close_apps_on_off=not c['close_apps_on_off'])
+            elif answer in ('4', '5'):
+                if answer == '5':
+                    output('Schläft der Mac beim Ablauf, schaltet VibeCode beim Aufwachen wieder ein.')
+                seconds = read_duration(input_fn, 'Dauer in Stunden oder z. B. 90m (Enter bricht ab): ')
+                if seconds is not None:
+                    set_timer(answer == '4', seconds)
+            elif answer == '6' and next_switch:
+                current = config()
+                enabled = bool(window(current, read('request.json', {}), time.time()))
+                save_settings(keep_awake=enabled, switch_at=0, cycle=None)
+            elif answer == '7':
+                on_seconds = read_duration(input_fn, 'Dauer für AN in Stunden oder z. B. 90m (Enter bricht ab): ')
+                if on_seconds is not None:
+                    off_seconds = read_duration(input_fn, 'Dauer für AUS (Enter übernimmt die AN-Dauer): ')
+                    start_cycle(on_seconds, off_seconds or on_seconds)
+            elif answer == 'q':
+                return
+            elif answer not in ('s', ''):
+                raise ValueError('Ungültige Auswahl.')
         except (EOFError, KeyboardInterrupt):
             output('')
             return
-        if answer == '1':
+        except (ValueError, OSError, subprocess.SubprocessError) as exc:
+            output(f'Fehler: {exc}')
             try:
-                if active:
-                    deactivate()
-                    output('AUS: Wachhaltesperre gelöst; ausgewählte Apps werden vollständig beendet.')
-                else:
-                    activate()
-                    output('AN: Der Mac bleibt wach; ausgewählte Apps werden geöffnet.')
-            except (ValueError, OSError, subprocess.SubprocessError) as exc:
-                output(f'Fehler: {exc}')
-                try:
-                    input_fn('Weiter mit Enter ...')
-                except (EOFError, KeyboardInterrupt):
-                    return
-        elif answer == '2':
-            platforms_menu(input_fn, output)
-        elif answer in ('s', ''):
-            continue
-        elif answer == 'q':
-            return
-        else:
-            output('Ungültige Auswahl.')
+                input_fn('Weiter mit Enter ...')
+            except (EOFError, KeyboardInterrupt):
+                return
 
 
 def control(input_fn=input, output=print):
     BASE.mkdir(parents=True, exist_ok=True)
-    normalize_settings()
     with (BASE / 'control.lock').open('a+') as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -950,6 +1028,8 @@ def control(input_fn=input, output=print):
             output('Das VibeCode-Kontrollterminal ist bereits geöffnet.')
             return
         try:
+            install(only_if_loaded=True)
+            save_settings()
             control_loop(input_fn, output)
         finally:
             fcntl.flock(lock, fcntl.LOCK_UN)
@@ -973,6 +1053,7 @@ def controller():
         managed_apps = saved_managed_apps()
         terminal_handles = cli_handles()
         service_error = ''
+        close_apps_on_off = True
         def release():
             nonlocal coffee, coffee_key
             if coffee and coffee.poll() is None:
@@ -980,11 +1061,24 @@ def controller():
                 coffee.wait(timeout=5)
             coffee = None
             coffee_key = None
+
+        def close_managed_platforms():
+            if managed_apps:
+                quit_apps(sorted(managed_apps))
+                managed_apps.clear()
+                save_managed_apps(managed_apps)
+            for platform, handle in list(terminal_handles.items()):
+                close_cli_platform(handle)
+                del terminal_handles[platform]
+                save_cli_handles(terminal_handles)
+
         try:
+            write('health.json', {'version': CONTROLLER_VERSION})
             while alive:
                 error, end = '', 0
                 try:
                     c, state, now = config(), read('request.json', {}), time.time()
+                    close_apps_on_off = c['close_apps_on_off']
                     end = window(c, state, now)
                     if end:
                         wanted_coffee = ('manual',) if end == MANUAL_END else ('until', end)
@@ -1043,7 +1137,7 @@ def controller():
                         if not previous:
                             # Mark the transition before UI side effects to avoid duplicate windows on errors.
                             previous = end
-                            if c['open_control_terminal']:
+                            if c['open_control_terminal'] and not c.get('switch_at'):
                                 try:
                                     terminal()
                                 except Exception as exc:
@@ -1057,18 +1151,11 @@ def controller():
                         error = service_error
                     else:
                         release()
-                        if previous or managed_apps or terminal_handles:
-                            previous = 0
-                            # Selected apps belong to the ON state and must be fully
-                            # gone after OFF, even if they ignore a normal quit event.
-                            quit_apps(sorted(managed_apps))
-                            managed_apps.clear()
-                            save_managed_apps(managed_apps)
-                            for handle in terminal_handles.values():
-                                close_cli_platform(handle)
-                            terminal_handles.clear()
-                            save_cli_handles(terminal_handles)
-                            active_platforms = ()
+                        previous = 0
+                        active_platforms = ()
+                        service_error = ''
+                        if close_apps_on_off:
+                            close_managed_platforms()
                 except Exception as exc:
                     error = str(exc)
                     # Invalid config releases our assertion; normal app errors retain the bounded window.
@@ -1077,19 +1164,15 @@ def controller():
                         previous = 0
                     else:
                         previous = end
-                write('health.json', {'updated': time.time(), 'until': end,
+                write('health.json', {'version': CONTROLLER_VERSION, 'updated': time.time(), 'until': end,
                                      'awake': coffee is not None and coffee.poll() is None, 'error': error})
                 time.sleep(2)
         finally:
             release()
-            if managed_apps:
-                quit_apps(sorted(managed_apps))
-                save_managed_apps(set())
-            for handle in terminal_handles.values():
-                close_cli_platform(handle)
-            if terminal_handles:
-                save_cli_handles({})
-            write('health.json', {'updated': time.time(), 'until': 0, 'awake': False})
+            if close_apps_on_off:
+                close_managed_platforms()
+            write('health.json', {'version': CONTROLLER_VERSION, 'updated': time.time(),
+                                 'until': 0, 'awake': False})
 
 
 def main(args):
@@ -1147,11 +1230,12 @@ def main(args):
     elif cmd == 'wake-state':
         wake_state()
     elif cmd == 'off':
-        deactivate()
-        print('AUS: Wachhaltesperre gelöst; ausgewählte Apps werden vollständig beendet.')
+        c = deactivate()
+        apps_action = 'werden beendet' if c['close_apps_on_off'] else 'bleiben geöffnet'
+        print(f'AUS. Wachhaltesperre gelöst. Ausgewählte Apps {apps_action}.')
     elif cmd == 'uninstall':
         stop(disable=True)
-        save_settings(keep_awake=False)
+        deactivate()
         wake_plan(config(), remove=True)
         run('/bin/launchctl', 'bootout', 'gui/' + str(os.getuid()) + '/' + LABEL, check=False)
         PLIST.unlink(missing_ok=True)

@@ -1,4 +1,6 @@
 {
   "keep_awake": false,
-  "apps": ["Codex", "Claude"]
+  "apps": ["Codex", "Claude"],
+  "close_apps_on_off": true,
+  "cycle": null
 }

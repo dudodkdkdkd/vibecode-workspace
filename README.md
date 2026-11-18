@@ -40,9 +40,9 @@ Terminal und schließen die Übersicht. Jedes Modul meldet seinen Status selbst 
 Die eigenen macOS-Terminal-Fenster der App, ihrer Shortcuts und Module schließen nach erfolgreichem Abschluss automatisch,
 auch nach einem Abbruch ohne Fehler. Bei Fehlern bleiben Ausgabe und Diagnose bis zur Bestätigung mit Enter sichtbar.
 Laufende Agenten und SSH-Sitzungen bleiben geöffnet. Fenster mit mehreren Tabs und manuell benutzte Shells bleiben erhalten.
-Der Schalter für Wachhalten lässt die Übersicht geöffnet und aktualisieren ihren Zustand direkt.
-Wachhalten nutzt den bestehenden Modus: Einschalten hält den Mac wach und startet die ausgewählten Apps;
-Ausschalten löst die Wachhaltesperre und beendet diese Apps. **Apps wählen…** öffnet das Kontrollterminal.
+Der Schalter für Wachhalten lässt die Übersicht geöffnet und aktualisiert ihren Zustand direkt.
+Einschalten hält den Mac wach und startet die ausgewählten Apps. Ausschalten löst die Wachhaltesperre
+und schließt die Apps je nach Einstellung. **Apps wählen…** öffnet das Kontrollterminal.
 
 Ein **Workspace** ist eine benannte Auswahl von Projekten, z. B. „Demo“ = example-api + example-web + example-docs.
 Es gibt zwei Wege, Projekte zu öffnen:
@@ -204,9 +204,9 @@ lassen und sich von einem anderen Mac per SSH verbinden.
 
 | Feature | Beschreibung |
 |---------|-------------|
-| **Wachhalten** | Hält den Mac per `caffeinate` wach, bis du ihn ausschaltest |
-| **Plattformen / Apps** | Startet und beendet Claude, Claude Code, Codex, OpenCode mit dem Wachhalten |
-| **Kontrollterminal** | Menü zum Ein-/Ausschalten und zur App-Auswahl |
+| **Wachhalten** | Hält den Mac per `caffeinate` wach, bis der Timer abläuft oder du den Modus ausschaltest |
+| **Plattformen / Apps** | Startet die gewählten Apps beim Einschalten. Du stellst ein, ob sie beim Ausschalten geschlossen werden |
+| **Kontrollterminal** | Menü zum manuellen Ein-/Ausschalten, zur App-Auswahl und für Timer |
 | **SSH zum Remote-Mac** | Speichert das Ziel einmalig, prüft die Erreichbarkeit und verbindet |
 
 **Hauptdateien:**
@@ -408,15 +408,25 @@ Repository-Ordner. Dev- und Storybook-Server benötigen dort passende npm-Skript
 ### Remote Management (`remote/`)
 | Datei | Zweck |
 |-------|-------|
-| `remote.example.json` | Standardwerte (`keep_awake`, `apps`); deine Einstellungen liegen in `~/.config/vibecode-workspace/remote/config.json` |
+| `remote.example.json` | Standardwerte für Wachhalten und Apps. Deine Einstellungen liegen in `~/.config/vibecode-workspace/remote/config.json` |
 
 **Usage** (`workspace` steht hier für `./workspaces/workspace`):
 ```bash
 workspace remote on        # Wachhalten + gewählte Apps starten
-workspace remote off       # Wachhalten lösen, Apps beenden
+workspace remote off       # Wachhalten lösen, Apps je nach Einstellung beenden
 workspace remote status    # aktuellen Zustand zeigen
 workspace remote control   # Kontrollterminal (Menü)
 ```
+
+Im Kontrollterminal schaltet **1** den Modus dauerhaft ein oder aus. Unter **2** wählst du die Apps,
+die bei AN laufen sollen. Mit **3** legst du fest, ob sie bei AUS geschlossen werden.
+Mit **4** schaltest du für eine Dauer ein, mit **5** schaltest du für eine Dauer aus und danach einmal wieder ein.
+Unter **7** stellst du den automatischen Wechsel ein. Gib die AN-Dauer und die AUS-Dauer an. Enter bei der
+AUS-Dauer übernimmt die AN-Dauer. Der Wechsel beginnt mit dem aktuellen Zustand und wiederholt sich.
+Eine Zahl wie `3` steht für Stunden. Du kannst auch `90m` oder `2h` eingeben. Der Timer läuft bei geschlossenem
+Kontrollterminal weiter. **6** hebt den Timer oder den automatischen Wechsel auf und behält den aktuellen Zustand bei.
+Nach dem Ruhezustand setzt VibeCode den Zeitplan entsprechend der Uhrzeit fort. Wechsel, die in den Ruhezustand
+fallen, werden übersprungen.
 
 #### SSH vom Client-Mac zum Remote-Mac
 

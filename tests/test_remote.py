@@ -103,7 +103,9 @@ class RemoteTests(unittest.TestCase):
         coffee = Mock()
         coffee.poll.return_value = None
         now = self.ts(8, 18, 59)
-        loops = [now, self.ts(8, 19)]
+        end = self.ts(8, 19)
+        r.save_settings(keep_awake=True, switch_at=int(end))
+        loops = [now, end]
         def advance(_):
             if len(loops) > 1:
                 loops.pop(0)
@@ -166,30 +168,139 @@ class RemoteTests(unittest.TestCase):
         self.assertEqual(r.read('managed-apps.json'), [])
 
     def test_on_off_state_is_indefinite_and_persisted(self):
+        r.save_settings(keep_awake=False, switch_at=int(self.ts(8, 16)))
         with patch.object(r, 'install') as install:
             r.activate()
         install.assert_called_once_with()
         self.assertTrue(r.config()['keep_awake'])
-        self.assertTrue(r.read('request.json')['manual_on'])
-        self.assertEqual(r.window(r.config(), r.read('request.json'), self.ts(8, 15)), r.MANUAL_END)
+        self.assertEqual(r.config()['switch_at'], 0)
+        self.assertEqual(r.window(r.config(), {}, self.ts(8, 17)), r.MANUAL_END)
 
+        r.save_settings(keep_awake=False, switch_at=int(self.ts(8, 18)))
         r.deactivate()
         self.assertFalse(r.config()['keep_awake'])
-        self.assertFalse(r.read('request.json')['manual_on'])
-        self.assertEqual(r.window(r.config(), r.read('request.json'), self.ts(8, 15)), 0)
+        self.assertEqual(r.config()['switch_at'], 0)
+        self.assertEqual(r.window(r.config(), {}, self.ts(8, 19)), 0)
 
-    def test_control_terminal_only_changes_on_off_and_apps(self):
+    def test_control_terminal_preserves_app_choice_when_setting_a_timer(self):
         self.c.update(keep_awake=False, apps=[])
         r.write('config.json', self.c)
-        answers = iter(['2', '1', '2', '3', '4', 'b', 'q'])
+        answers = iter(['2', '1', '2', '3', '4', 'b', '3', '4', '90m', 'q'])
         output = []
-        with patch.object(r, 'status'):
-            r.control_loop(lambda _prompt: next(answers), output.append)
-        self.assertEqual(r.config()['apps'], ['Claude', 'Claude Code', 'Codex', 'OpenCode'])
-        self.assertFalse(r.config()['keep_awake'])
+        now = self.ts(8, 15)
+        with patch.object(r.time, 'time', return_value=now), patch.object(r, 'install'):
+            r.control(lambda _prompt: next(answers), output.append)
+        c = r.config()
+        self.assertEqual(c['apps'], ['Claude', 'Claude Code', 'Codex', 'OpenCode'])
+        self.assertFalse(c['close_apps_on_off'])
+        self.assertEqual(r.window(c, {}, now), now + 5400)
+        self.assertEqual(r.window(c, {}, now + 5400), 0)
         rendered = '\n'.join(output)
-        self.assertIn('Wachhalten + Apps', rendered)
-        self.assertNotIn('Zeitplan', rendered)
+        self.assertIn('Timer           AUS am', rendered)
+        self.assertIn('Apps bei AUS schließen (NEIN)', rendered)
+
+    def test_control_terminal_schedules_and_cancels_a_delayed_restart(self):
+        begin = self.ts(8, 15)
+        with patch.object(r.time, 'time', return_value=begin), patch.object(r, 'install'):
+            answers = iter(['5', '3', 'q'])
+            r.control_loop(lambda _: next(answers), lambda _: None)
+            c = r.config()
+            end = begin + 3 * 3600
+            self.assertEqual(r.window(c, {}, end - 1), 0)
+            self.assertEqual(r.window(c, {}, end), r.MANUAL_END)
+            self.assertEqual(r.window(c, {}, end + 3600), r.MANUAL_END)
+            answers = iter(['6', 'q'])
+            r.control_loop(lambda _: next(answers), lambda _: None)
+        self.assertEqual(r.config()['switch_at'], 0)
+        self.assertEqual(r.window(r.config(), {}, end), 0)
+
+    def test_control_terminal_cycles_from_off_with_different_durations(self):
+        begin = self.ts(8, 15)
+        r.save_settings(keep_awake=False, apps=[])
+        with patch.object(r.time, 'time', return_value=begin) as clock, patch.object(r, 'install'):
+            answers = iter(['7', '1m', '2m', 'q'])
+            r.control_loop(lambda _: next(answers), lambda _: None)
+
+            c = r.config()
+            for offset, enabled, next_offset in [(0, False, 120), (119, False, 120), (120, True, 180),
+                                                  (180, False, 300), (300, True, 360), (720, False, 840)]:
+                with self.subTest(offset=offset):
+                    self.assertEqual(r.timer_phase(c, begin + offset), (enabled, begin + next_offset))
+                    self.assertEqual(r.window(c, {}, begin + offset), begin + next_offset if enabled else 0)
+
+            clock.return_value = begin + 300
+            output = []
+            answers = iter(['6', 'q'])
+            r.control_loop(lambda _: next(answers), output.append)
+        rendered = '\n'.join(output)
+        self.assertIn('Timer           AUS am', rendered)
+        self.assertIn('Automatik       AN 1 min · AUS 2 min', rendered)
+        self.assertIsNone(r.config()['cycle'])
+        self.assertEqual(r.window(r.config(), {}, begin + 360), r.MANUAL_END)
+
+    def test_control_terminal_cycles_from_on_with_the_same_duration(self):
+        begin = self.ts(8, 15)
+        r.save_settings(keep_awake=True, apps=[])
+        with patch.object(r.time, 'time', return_value=begin), patch.object(r, 'install'):
+            answers = iter(['7', '90m', '', 'q'])
+            r.control_loop(lambda _: next(answers), lambda _: None)
+        c = r.config()
+        self.assertEqual(r.timer_phase(c, begin), (True, begin + 5400))
+        self.assertEqual(r.timer_phase(c, begin + 5400), (False, begin + 10800))
+        self.assertEqual(r.timer_phase(c, begin + 10800), (True, begin + 16200))
+        r.deactivate()
+        self.assertIsNone(r.config()['cycle'])
+        self.assertEqual(r.window(r.config(), {}, begin + 16200), 0)
+
+    def test_repeated_pauses_keep_apps_and_reuse_their_cli_session(self):
+        handle = {'tty': '/dev/ttys999', 'token': 'a' * 32}
+        now = self.ts(8, 15)
+        r.save_settings(keep_awake=False, switch_at=int(now + 60),
+                        cycle={'on_seconds': 120, 'off_seconds': 60},
+                        close_apps_on_off=False, apps=['Claude', 'Codex'])
+        r.save_cli_handles({'Codex': handle})
+        r.save_managed_apps({'Claude'})
+        coffee = Mock()
+        coffee.poll.return_value = None
+
+        loops = [now, now + 60, now + 180, now + 240]
+        def advance(_):
+            if len(loops) == 1:
+                raise KeyboardInterrupt
+            loops.pop(0)
+
+        with patch.object(r.time, 'time', side_effect=lambda: loops[0]), \
+             patch.object(r.time, 'sleep', side_effect=advance), \
+             patch.object(r.subprocess, 'Popen', return_value=coffee) as launch, \
+             patch.object(r, 'quit_apps') as quit_apps, \
+             patch.object(r, 'app_running', return_value=True), \
+             patch.object(r, 'launch_cli_platform') as launch_cli, \
+             patch.object(r, 'close_cli_platform') as close_cli, \
+             patch.object(r, 'cli_handle_alive', return_value=True) as cli_alive:
+            with self.assertRaises(KeyboardInterrupt):
+                r.controller()
+        quit_apps.assert_not_called()
+        close_cli.assert_not_called()
+        launch_cli.assert_not_called()
+        self.assertEqual(cli_alive.call_args_list, [call(handle), call(handle)])
+        self.assertEqual(r.cli_handles(), {'Codex': handle})
+        self.assertEqual(r.saved_managed_apps(), {'Claude'})
+        self.assertEqual([process.args[0][:4] for process in launch.call_args_list],
+                         [['/usr/bin/caffeinate', '-is', '-t', '120']] * 2)
+
+    def test_install_refreshes_an_already_loaded_controller_once_upgraded(self):
+        target = f'gui/{os.getuid()}/{r.LABEL}'
+        with patch.object(r, 'run', return_value=Mock(returncode=0)) as run, \
+             patch.object(r, 'wake_plan') as wake_plan:
+            r.install(only_if_loaded=True)
+            r.write('health.json', {'version': r.CONTROLLER_VERSION})
+            r.install(only_if_loaded=True)
+        self.assertEqual(run.call_args_list, [
+            call('/bin/launchctl', 'print', target, check=False),
+            call('/bin/launchctl', 'kickstart', '-k', target),
+            call('/bin/launchctl', 'print', target, check=False),
+        ])
+        wake_plan.assert_not_called()
 
     def test_optional_opencode_terminal_is_started_and_closed_with_wake_mode(self):
         self.c.update(apps=['OpenCode'])
@@ -270,7 +381,7 @@ class RemoteTests(unittest.TestCase):
         r.ssh_set(['user@remote-mac.local', '2222'])
         self.assertEqual(r.read('ssh.json'),
                          {'user': 'user', 'host': 'remote-mac.local', 'port': 2222})
-        # Extra keys in config.json would be migrated away by normalize_settings().
+        # SSH settings must survive migration of the wake settings.
         self.assertEqual(r.read('config.json'), {'keep_awake': True, 'apps': ['Claude']})
         self.assertEqual(r.ssh_command(r.saved_ssh_target())[-1], 'user@remote-mac.local')
         with self.assertRaises(ValueError):
