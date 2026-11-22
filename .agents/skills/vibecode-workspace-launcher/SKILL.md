@@ -64,7 +64,10 @@ changing behaviour — several of these look like obvious one-liners and are not
   with a direct shell command. `python-envs.terminal.autoActivationType` is machine-scoped
   and cannot be overridden in a workspace; with no explicit global override, the
   Python Environments extension respects `python.terminal.activateEnvironment`.
-  Never replace these splits with standalone tabs or reverse the requested start order.
+  Preserve these splits and the requested start order in the default `panel` layout.
+  **VibeCode: Terminal-Layout wählen** saves the VS Code user setting `vibecodeWorkspace.terminalLayout`.
+  The opt-in `tabs` and `grid` layouts open project terminals in stacked editor rows, with
+  one shared tab group or one pane per terminal respectively. The ungrouped control terminal stays in the panel.
 - VS Code's task runner always splits after the **first** terminal of a task group,
   producing `Frontend, Codex 2, Codex 1, Claude, Storybook` despite correct process start
   order. `presentation.group` is retained for manual tasks, not automatic layout.

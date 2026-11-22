@@ -11,6 +11,7 @@ const source = fs.readFileSync(path.join(__dirname,
 async function preview({ remote = true, urls, forwardError, responseDelay = 0, dispose = false }) {
     const panels = [], forwarded = [], requested = [];
     const vscode = {
+        commands: { registerCommand: () => ({ dispose() {} }) },
         Uri: { parse: value => ({ toString: () => value }) },
         ViewColumn: { Active: 1 },
         env: { remoteName: remote ? 'ssh-remote' : undefined, asExternalUri: async uri => {

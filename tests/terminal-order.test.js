@@ -9,7 +9,7 @@ const source = fs.readFileSync(path.join(__dirname,
     '../workspaces/vscode-extension/auto-open-tabs/extension.js'), 'utf8');
 const labels = ['Frontend', 'Storybook', 'Claude', 'Codex 1', 'Codex 2'];
 
-function extension({ trusted = true, active = [], fail, end, configured = labels, definitions = [] } = {}) {
+function extension({ trusted = true, active = [], fail, end, configured = labels, definitions = [], layout = 'panel', locations = {} } = {}) {
     const events = { start: new Set(), end: new Set(), trust: new Set() };
     const subscribe = name => listener => {
         events[name].add(listener);
@@ -20,9 +20,26 @@ function extension({ trusted = true, active = [], fail, end, configured = labels
     const warnings = [];
     const errors = [];
     const created = [];
+    const layouts = [];
+    const messages = [];
+    const settingsUpdates = [];
+    const commands = new Map();
+    let selectedLayout;
+    let selectedTerminals = [];
     let pendingStart = false;
     let parallelStarts = 0;
     const vscode = {
+        ConfigurationTarget: { Global: 1 },
+        commands: {
+            registerCommand: (id, handler) => {
+                commands.set(id, handler);
+                return { dispose: () => commands.delete(id) };
+            },
+            executeCommand: async (id, nextLayout) => {
+                assert.equal(id, 'vscode.setEditorLayout');
+                layouts.push(JSON.parse(JSON.stringify(nextLayout)));
+            },
+        },
         TaskScope: { Workspace: 2 },
         TerminalLocation: { Panel: 1 },
         ThemeColor: class { constructor(id) { this.id = id; } },
@@ -33,12 +50,28 @@ function extension({ trusted = true, active = [], fail, end, configured = labels
         } },
         workspace: {
             isTrusted: trusted,
-            getConfiguration: () => ({ get: key => key === 'autoStartTasks' ? configured
-                : key === 'autoStartTerminals' ? definitions : [] }),
+            getConfiguration: () => ({
+                get: key => ({ autoStartTasks: configured, autoStartTerminals: definitions, terminalLayout: layout,
+                    terminalLocations: locations })[key],
+                update: async (key, value, target) => {
+                    assert.equal(target, 1);
+                    if (key === 'terminalLocations') {
+                        locations = JSON.parse(JSON.stringify(value));
+                        return;
+                    }
+                    assert.equal(key, 'terminalLayout');
+                    settingsUpdates.push(value);
+                    layout = value;
+                },
+            }),
             onDidGrantWorkspaceTrust: subscribe('trust'),
         },
         window: {
             terminals: active.map(name => ({ name })),
+            showQuickPick: async (items, options) => options.canPickMany
+                ? items.filter(item => selectedTerminals.includes(item.label))
+                : items.find(item => item.value === selectedLayout),
+            showInformationMessage: message => messages.push(message),
             createTerminal: options => {
                 if (pendingStart) parallelStarts++;
                 started.push(options.name);
@@ -95,7 +128,18 @@ function extension({ trusted = true, active = [], fail, end, configured = labels
     };
     vm.runInNewContext(source, sandbox);
     return {
-        activate: () => sandbox.module.exports.activate(context), started, warnings, errors, created,
+        activate: () => sandbox.module.exports.activate(context), started, warnings, errors, created, layouts, messages, settingsUpdates,
+        pickLayout: async value => {
+            selectedLayout = value;
+            await commands.get('vibecodeWorkspace.chooseTerminalLayout')();
+        },
+        pickLocations: async (names, value) => {
+            selectedTerminals = names;
+            selectedLayout = value;
+            await commands.get('vibecodeWorkspace.chooseTerminalLocations')();
+        },
+        locations: () => locations,
+        closeProjectTerminals: () => { vscode.window.terminals = vscode.window.terminals.filter(terminal => terminal.name === 'Control'); },
         parallelStarts: () => parallelStarts,
         subscriptions: () => events.start.size + events.end.size,
         grantTrust: async () => {
@@ -178,6 +222,125 @@ test('split startup preserves running sessions and waits for workspace trust', a
     assert.deepEqual(app.started, ['Claude', 'Codex 1', 'Codex 2']);
     assert.equal(app.created[0].options.location.parentTerminal.name, 'Storybook');
     assert.equal(app.created[1].options.location.parentTerminal, app.created[0].terminal);
+});
+
+const layoutDefinitions = [
+    { name: 'API · Shell', group: 'API', command: 'echo API' },
+    { name: 'API · Tests', group: 'API', command: 'echo tests' },
+    { name: 'Web · Shell', group: 'Web', command: 'echo Web' },
+    { name: 'API · Local Dev', group: 'API', command: 'echo local' },
+    { name: 'Control', command: 'echo control' },
+];
+
+test('tab layout stacks projects in separate rows and keeps the control terminal in the panel', async () => {
+    const app = extension({ definitions: layoutDefinitions, layout: 'tabs' });
+    await app.activate();
+    assert.deepEqual(app.layouts, [{ orientation: 1, groups: [{}, {}] }]);
+    assert.deepEqual(app.started, layoutDefinitions.map(definition => definition.name));
+    assert.deepEqual(app.created.map(({ options }) => options.location.viewColumn ?? options.location), [1, 1, 2, 1, 1]);
+    assert.equal(app.created[4].options.location, 1);
+    assert.deepEqual(app.errors, []);
+});
+
+test('grid puts all terminals for the same project side by side even when definitions are interleaved', async () => {
+    const app = extension({ definitions: layoutDefinitions, layout: 'grid' });
+    await app.activate();
+    assert.deepEqual(app.layouts, [{ orientation: 1, groups: [{ groups: [{}, {}, {}] }, {}] }]);
+    assert.deepEqual(app.created.slice(0, 4).map(({ options }) => options.location.viewColumn), [1, 2, 4, 3]);
+    assert.equal(app.created[4].options.location, 1);
+    assert.deepEqual(app.errors, []);
+});
+
+test('one project in grid mode still opens its terminals side by side', async () => {
+    const app = extension({ definitions: layoutDefinitions.slice(0, 2), layout: 'grid' });
+    await app.activate();
+    assert.deepEqual(app.layouts, [{ orientation: 0, groups: [{}, {}] }]);
+    assert.deepEqual(app.created.map(({ options }) => options.location.viewColumn), [1, 2]);
+});
+
+test('layout picker saves without restarting running sessions and starts immediately once they are closed', async () => {
+    const app = extension({ definitions: layoutDefinitions });
+    await app.activate();
+    await app.pickLayout();
+    assert.deepEqual(app.settingsUpdates, []);
+    await app.pickLayout('grid');
+    assert.deepEqual(app.settingsUpdates, ['grid']);
+    assert.deepEqual(app.layouts, []);
+    assert.equal(app.created.length, layoutDefinitions.length);
+    assert.match(app.messages[0], /beim nächsten Start/);
+
+    app.closeProjectTerminals();
+    await app.pickLayout('grid');
+    assert.equal(app.layouts.length, 1);
+    assert.deepEqual(app.started.slice(layoutDefinitions.length), layoutDefinitions.slice(0, -1).map(({ name }) => name));
+});
+
+test('panel splits, shared editor tabs and separate editor panes can coexist across projects', async () => {
+    const definitions = [
+        ['API', 'Dev', 'panel'], ['API', 'Codex', 'grid'], ['Web', 'Codex', 'grid'],
+        ['API', 'Storybook', 'panel'], ['API', 'Shell', 'tabs'], ['API', 'Tests', 'tabs'],
+        ['Web', 'Claude', 'grid'], ['Web', 'Dev', 'panel'],
+    ].map(([group, name, placement]) => ({
+        name: `${group} · ${name}`, group, placement, command: 'echo test', cwd: `/repos/${group}`,
+    }));
+    const locations = Object.fromEntries(definitions.map(({ name, cwd, placement }) => [JSON.stringify([cwd, name]), placement]));
+    const app = extension({ definitions, locations, layout: 'tabs' });
+    await app.activate();
+
+    assert.deepEqual(app.layouts, [{ orientation: 1, groups: [{ groups: [{}, {}] }, { groups: [{}, {}] }] }]);
+    const terminals = new Map(app.created.map(entry => [entry.options.name, entry]));
+    assert.equal(terminals.get('API · Dev').options.location, 1);
+    assert.equal(terminals.get('API · Storybook').options.location.parentTerminal, terminals.get('API · Dev').terminal);
+    assert.equal(terminals.get('Web · Dev').options.location, 1);
+    assert.equal(terminals.get('API · Codex').options.location.viewColumn, 1);
+    assert.equal(terminals.get('API · Shell').options.location.viewColumn, 2);
+    assert.equal(terminals.get('API · Tests').options.location.viewColumn, 2);
+    assert.equal(terminals.get('Web · Codex').options.location.viewColumn, 3);
+    assert.equal(terminals.get('Web · Claude').options.location.viewColumn, 4);
+});
+
+test('a restored editor terminal does not become the split parent of a panel terminal', async () => {
+    const definitions = layoutDefinitions.slice(0, 2);
+    const app = extension({
+        definitions, active: ['API · Shell'],
+        locations: { [JSON.stringify(['', 'API · Shell'])]: 'grid' },
+    });
+    await app.activate();
+    assert.deepEqual(app.layouts, []);
+    assert.deepEqual(app.started, ['API · Tests']);
+    assert.equal(app.created[0].options.location, 1);
+});
+
+test('a preset placement takes precedence over the VS Code preference', async () => {
+    const definition = { ...layoutDefinitions[0], placement: 'panel' };
+    const locations = { [JSON.stringify(['', definition.name])]: 'grid' };
+    const app = extension({ definitions: [definition], layout: 'tabs', locations });
+    await app.activate();
+    assert.deepEqual(app.layouts, []);
+    assert.equal(app.created[0].options.location, 1);
+    await app.pickLocations([definition.name], 'tabs');
+    assert.deepEqual(app.locations(), locations);
+    assert.match(app.messages[0], /Projekt-Presets festgelegt/);
+});
+
+test('the location picker saves multiple selections and can restore the default for one terminal', async () => {
+    const app = extension({ definitions: layoutDefinitions, layout: 'tabs' });
+    const names = ['API · Shell', 'Web · Shell'];
+    const keys = names.map(name => JSON.stringify(['', name]));
+    await app.activate();
+    await app.pickLocations(names);
+    assert.deepEqual(app.locations(), {});
+    await app.pickLocations(names, 'panel');
+    assert.deepEqual(app.locations(), { [keys[0]]: 'panel', [keys[1]]: 'panel' });
+    assert.equal(app.created.length, layoutDefinitions.length);
+    await app.pickLocations([names[1]], 'default');
+    assert.deepEqual(app.locations(), { [keys[0]]: 'panel' });
+
+    app.closeProjectTerminals();
+    await app.pickLocations([names[1]], 'grid');
+    const restarted = app.created.slice(layoutDefinitions.length);
+    assert.equal(restarted.find(({ options }) => options.name === names[0]).options.location, 1);
+    assert.equal(restarted.find(({ options }) => options.name === names[1]).options.location.viewColumn, 2);
 });
 
 test('split startup continues after a failed terminal and quotes process arguments literally', async (t) => {

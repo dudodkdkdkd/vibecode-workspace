@@ -257,13 +257,14 @@ test('Presets: der echte Launcher startet die Terminals und Tabs aus einem gespe
         ['Frontend', 'Storybook', 'Claude', 'Codex 1', 'Codex 2']);
 
     savePreset(files, files.a, {
-        terminals: [{ name: 'Dev', type: 'Eigener Befehl', prompt: 'npm run dev', cwd: 'frontend' },
-            { name: 'Agent', type: 'Claude Code', prompt: 'Räum "auf"', cwd: '' }],
+        terminals: [{ name: 'Dev', type: 'Eigener Befehl', prompt: 'npm run dev', cwd: 'frontend', placement: 'panel' },
+            { name: 'Agent', type: 'Claude Code', prompt: 'Räum "auf"', cwd: '', placement: 'tabs' }],
         urls: ['http://localhost:5173'],
     });
     assert.equal(launch(files, '--project', 'A').status, 0);
     const terminals = terminalsOf(files, 'A');
     assert.deepEqual(terminals.map((terminal) => terminal.name), ['Dev', 'Agent']);
+    assert.deepEqual(terminals.map((terminal) => terminal.placement), ['panel', 'tabs']);
     assert.equal(terminals[0].command, 'npm run dev');
     assert.equal(terminals[0].cwd, `${files.a}/frontend`);
     assert.equal(terminals[1].cwd, files.a);
@@ -296,7 +297,7 @@ test('Allgemeiner Standard: der echte Launcher nutzt ihn für Repositories ohne 
         path.join(root, 'workspaces'), ...args], { encoding: 'utf8' });
     fs.writeFileSync(path.join(files.dir, 'general.json'), JSON.stringify({
         terminals: [{ name: 'Dev', type: 'Eigener Befehl', prompt: 'npm run dev', cwd: 'frontend' },
-            { name: 'Agent', type: 'Claude Code', prompt: '', cwd: '' }],
+            { name: 'Agent', type: 'Claude Code', prompt: '', cwd: '', placement: 'grid' }],
         urls: ['http://localhost:3000'],
     }));
     const saved = presetsJs('save-general', files.dir, path.join(files.dir, 'general.json'));
@@ -307,6 +308,7 @@ test('Allgemeiner Standard: der echte Launcher nutzt ihn für Repositories ohne 
         [['Dev', `${files.a}/frontend`], ['Agent', files.a]]);
     assert.deepEqual(terminalsOf(files, 'B').map((terminal) => [terminal.name, terminal.cwd]),
         [['Dev', files.b], ['Agent', files.b]]);                         // kein frontend-Ordner: Start im Repository-Ordner
+    assert.deepEqual(terminalsOf(files, 'B').map((terminal) => terminal.placement), [undefined, 'grid']);
     assert.deepEqual(JSON.parse(fs.readFileSync(files.workspace, 'utf8')).settings['vibecodeWorkspace.autoOpenUrls'],
         ['http://localhost:3000']);
 

@@ -114,6 +114,8 @@ Ein **Preset** legt fest, welche **Terminals** (Shell, Claude Code, Codex, Codex
 Name und Unterordner) und welche **Browser-Tabs** für ein Repository starten. Es ist dieselbe Konfiguration wie bei „Terminals ändern“
 im Setup (`terminals.json`), nur im Fenster:
 
+- **Öffnen in** legt pro Terminal **Unteres Panel**, **Editor-Tab** oder **Editor-Raster** fest. **Standard** übernimmt die
+  Einstellung aus VS Code. Die Auswahl wird im Preset gespeichert und gilt beim nächsten Workspace-Start.
 - **Allgemeiner Standard:** die erste Zeile des Bereichs. Er gilt für **jedes Repository ohne eigenes Preset**, lokal wie auf
   SSH-Hosts. Solange du nichts festlegst, sind das die eingebauten **Standard-Terminals** (Frontend, Storybook, Claude, Codex 1,
   Codex 2, ohne Browser-Tabs). **Festlegen…** öffnet dasselbe Formular, **Zurücksetzen** bringt die eingebauten zurück. Hat ein
@@ -122,13 +124,30 @@ im Setup (`terminals.json`), nur im Fenster:
 - **Preset anlegen…** wählt ein Repository und öffnet das Formular. Ohne Preset startet es mit dem **allgemeinen Standard**,
   also mit dem, was dort heute wirklich läuft. Typ „–“ lässt eine Zeile aus.
 - **Bearbeiten…** ändert ein vorhandenes Preset, **Zurücksetzen** bringt den allgemeinen Standard zurück.
-- Der Startbefehl wird vom Setup-Assistenten selbst gebaut (inklusive sicherem Quoting des Prompts); das Fenster schreibt nur
-  Typ, Name, Prompt und Unterordner. Ein ungültiges Preset (z. B. Unterordner mit `..`, Browser-Tab ohne `http://`) wird mit
+- Der Startbefehl wird vom Setup-Assistenten selbst gebaut (inklusive sicherem Quoting des Prompts); das Fenster schreibt
+  Typ, Name, Prompt, Unterordner und Öffnungsort. Ein ungültiges Preset (z. B. Unterordner mit `..`, Browser-Tab ohne `http://`) wird mit
   Grund abgelehnt, deine Eingaben bleiben stehen. Eine beschädigte `terminals.json` wird nie ersetzt.
 - **Presets hängen am Pfad des Repositories.** Verschiebst du ein Repository, gilt sein Preset nicht mehr. Die Übersicht zeigt es
   dann orange als „Repository nicht mehr gefunden“; gibt es genau ein gleichnamiges Repository am neuen Ort, überträgt
   **Übernehmen** das Preset dorthin. Das alte wird erst nach dem erfolgreichen Kopieren entfernt.
 - Im Terminal: `./VibeCode\ Workspace.command presets list | save --path=PFAD --data=JSON | reset PFAD | move ALT NEU | save-general --data=JSON | reset-general`.
+
+### Terminal-Layout im Editor
+
+Öffne in VS Code mit `⌘⇧P` den Befehl **VibeCode: Terminal-Layout wählen**.
+
+- **Splits im Terminalpanel** öffnet die Projektterminals wie gewohnt unten. Das ist der Standard.
+- **Terminal-Tabs pro Projekt** gibt jedem Projekt eine eigene Tableiste. Die Editorzeilen stehen untereinander.
+- **Terminal-Raster pro Projekt** zeigt alle Terminals eines Projekts nebeneinander und die Projekte untereinander.
+
+Die Wahl gilt als Standard. Mit **VibeCode: Öffnungsort für Terminals wählen** kannst du Terminals ohne festen Öffnungsort
+im Preset auswählen und ihnen Panel, Tabs oder Raster zuweisen. Tabs desselben Projekts teilen sich
+eine Editorgruppe. Raster-Terminals bekommen je eine eigene Gruppe daneben. **Standard-Layout verwenden** hebt die
+individuelle Zuordnung auf.
+
+Lege beispielsweise Dev-Server ins Panel und Agenten ins Raster. Mit `⌘J` blendest du das untere Panel ein und aus.
+Die Agenten aller Projekte im selben Workspace bleiben dabei sichtbar. VS Code speichert die Wahl lokal. Sie greift
+beim nächsten Start der Projektterminals. Sind alle Projektterminals geschlossen, startet die Auswahl sie direkt neu.
 
 ### SSH im Fenster
 

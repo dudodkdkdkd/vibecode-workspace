@@ -647,7 +647,8 @@ function run(argv) {
         if (!Array.isArray(entries) || entries.some((entry) => !entry ||
             typeof entry.name !== "string" || !entry.name.trim() ||
             typeof entry.command !== "string" || !entry.command.trim() ||
-            typeof entry.cwd !== "string")) {
+            typeof entry.cwd !== "string" ||
+            (entry.placement !== undefined && !["panel", "tabs", "grid"].includes(entry.placement)))) {
             throw new Error(`Ungültige Terminals für ${label}. Bitte das Setup erneut ausführen.`);
         }
         if (!Array.isArray(urls) || urls.some((url) => typeof url !== "string" || !url.trim())) {
@@ -665,7 +666,8 @@ function run(argv) {
                     "$1--dangerously-bypass-approvals-and-sandbox")
                 : entry.command;
             if (hasOwnEntry) {
-                terminalDefinitions.push({ project, terminalName: entry.name, command, relativeCwd: entry.cwd });
+                terminalDefinitions.push({ project, terminalName: entry.name, command, relativeCwd: entry.cwd,
+                    placement: entry.placement });
                 continue;
             }
             // Der allgemeine Standard gilt für viele Repositories und speichert lokale Befehle (zsh): auf SSH-Hosts
@@ -674,13 +676,13 @@ function run(argv) {
             let relativeCwd = entry.cwd;
             if (remoteProject) {
                 terminalDefinitions.push({ project, terminalName: entry.name,
-                    command: command.split("exec zsh -l").join("exec bash -l"), relativeCwd });
+                    command: command.split("exec zsh -l").join("exec bash -l"), relativeCwd, placement: entry.placement });
                 continue;
             }
             if (relativeCwd && !$.NSFileManager.defaultManager.fileExistsAtPath($(`${locations.get(project).path.replace(/\/$/, "")}/${relativeCwd}`))) {
                 relativeCwd = "";
             }
-            terminalDefinitions.push({ project, terminalName: entry.name, command, relativeCwd });
+            terminalDefinitions.push({ project, terminalName: entry.name, command, relativeCwd, placement: entry.placement });
         }
     }
 
@@ -701,7 +703,8 @@ function run(argv) {
         const openUrls = [...new Set(group.flatMap((name) => projectUrls.get(name) || []))];
         const tasks = [];
         const usedLabels = new Set();
-        for (const { project, terminalName, command, relativeCwd } of terminalDefinitions) {
+        const terminalPlacements = new Map();
+        for (const { project, terminalName, command, relativeCwd, placement } of terminalDefinitions) {
             if (!group.includes(project)) continue;
             if (relativeCwd.startsWith("/") || relativeCwd.startsWith("~") || relativeCwd.split("/").includes("..")) {
                 throw new Error(`Ungültiges relatives Arbeitsverzeichnis für ${project}: ${relativeCwd}`);
@@ -713,6 +716,7 @@ function run(argv) {
             let suffix = 2;
             while (usedLabels.has(label)) label = `${baseLabel} (${suffix++})`;
             usedLabels.add(label);
+            if (placement !== undefined) terminalPlacements.set(label, placement);
             const task = {
                 label,
                 type: "shell",
@@ -812,6 +816,7 @@ function run(argv) {
             .map((task) => ({
                 name: task.label,
                 group: task.presentation.group,
+                placement: terminalPlacements.get(task.label),
                 type: task.type,
                 command: task.command,
                 args: task.args,

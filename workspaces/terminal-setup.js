@@ -1,6 +1,8 @@
 // macOS JXA: Dialoge und JSON-Speicherung der Terminals pro Repository.
 ObjC.import("Foundation");
 
+const TERMINAL_PLACEMENTS = ["panel", "tabs", "grid"];
+
 function readText(path) {
     const value = $.NSString.stringWithContentsOfFileEncodingError(
         $(path), $.NSUTF8StringEncoding, null
@@ -78,7 +80,8 @@ function normalizeEntry(raw) {
 function validateTerminals(terminals, projectName) {
     if (!Array.isArray(terminals) || terminals.some((entry) => !entry ||
         !["Shell", "Claude Code", "Codex", "Codex 2", "Antigravity", "Eigener Befehl"].includes(entry.type) ||
-        [entry.name, entry.prompt, entry.command, entry.cwd].some((value) => typeof value !== "string"))) {
+        [entry.name, entry.prompt, entry.command, entry.cwd].some((value) => typeof value !== "string") ||
+        (entry.placement !== undefined && !TERMINAL_PLACEMENTS.includes(entry.placement)))) {
         throw new Error(`Ungültige Terminals für ${projectName}.`);
     }
 }
@@ -140,7 +143,8 @@ function configureProject(app, project, existing) {
                 cwd = null;
             }
         } while (cwd === null);
-        terminals.push({ name, type, prompt, command: terminalCommand(type, prompt, project.path.startsWith("vscode-remote://")), cwd });
+        terminals.push({ name, type, prompt, command: terminalCommand(type, prompt, project.path.startsWith("vscode-remote://")),
+            cwd, placement: previous?.placement });
     }
     return terminals;
 }

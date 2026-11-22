@@ -12,6 +12,7 @@ const source = fs.readFileSync(path.join(__dirname,
 async function terminalOptions(definition) {
     let options;
     const vscode = {
+        commands: { registerCommand: () => ({ dispose() {} }) },
         TerminalLocation: { Panel: 1 },
         ThemeColor: class { constructor(id) { this.id = id; } },
         ThemeIcon: class { constructor(id, color) { this.id = id; this.color = color; } },

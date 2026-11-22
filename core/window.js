@@ -7,8 +7,14 @@ const WIDTH = 460;
 const ROW = 26;
 // Muss zu terminal-setup.js passen; die Prüfung und der Befehlsaufbau liegen dort, nicht hier.
 const PRESET_TYPES = ["Shell", "Claude Code", "Codex", "Codex 2", "Antigravity", "Eigener Befehl"];
+const PRESET_PLACEMENTS = [
+    { label: "Standard" },
+    { value: "panel", label: "Unteres Panel" },
+    { value: "tabs", label: "Editor-Tab" },
+    { value: "grid", label: "Editor-Raster" },
+];
 const PRESET_ROWS = { min: 6, max: 12 };
-const PRESET_WIDTH = 640;
+const PRESET_WIDTH = 780;
 
 function shellQuote(value) {
     return "'" + String(value).replace(/'/g, "'\\''") + "'";
@@ -706,7 +712,8 @@ function buildPresetEditor(repo, draft, custom, note) {
     const rowHeight = 28;
     const total = 20 + count * rowHeight + 12 + 18 + 4 + 24;
     const view = $.NSView.alloc.initWithFrame($.NSMakeRect(0, 0, PRESET_WIDTH, total));
-    const columns = [[0, 130, "Terminal"], [140, 110, "Name"], [260, 250, "Startprompt oder Befehl"], [520, 120, "Unterordner"]];
+    const columns = [[0, 130, "Terminal"], [140, 110, "Name"], [260, 250, "Startprompt oder Befehl"],
+        [520, 120, "Unterordner"], [650, 130, "Öffnen in"]];
     columns.forEach(([x, width, title]) => view.addSubview(label(title, $.NSMakeRect(x, total - 18, width, 16), true)));
     const rows = [];
     for (let index = 0; index < count; index += 1) {
@@ -715,6 +722,10 @@ function buildPresetEditor(repo, draft, custom, note) {
         const popup = $.NSPopUpButton.alloc.initWithFramePullsDown($.NSMakeRect(0, y, 130, 24), false);
         ["–"].concat(PRESET_TYPES).forEach((type) => popup.addItemWithTitle($(type)));
         if (terminal) popup.selectItemWithTitle($(terminal.type));
+        const placement = $.NSPopUpButton.alloc.initWithFramePullsDown($.NSMakeRect(650, y, 130, 24), false);
+        PRESET_PLACEMENTS.forEach(({ label: title }) => placement.addItemWithTitle($(title)));
+        const selected = PRESET_PLACEMENTS.findIndex((option) => option.value === terminal?.placement);
+        placement.selectItemAtIndex(Math.max(0, selected));
         const field = (x, width, value, placeholder) => {
             const input = $.NSTextField.alloc.initWithFrame($.NSMakeRect(x, y, width, 24));
             input.stringValue = $(value || "");
@@ -723,7 +734,8 @@ function buildPresetEditor(repo, draft, custom, note) {
             return input;
         };
         view.addSubview(popup);
-        rows.push({ popup, name: field(140, 110, terminal && terminal.name, "Name"),
+        view.addSubview(placement);
+        rows.push({ popup, placement, name: field(140, 110, terminal && terminal.name, "Name"),
             prompt: field(260, 250, terminal && terminal.prompt, "leer = ohne Vorgabe"),
             cwd: field(520, 120, terminal && terminal.cwd, "z. B. frontend") });
     }
@@ -751,6 +763,7 @@ function collectPreset(built) {
         terminals: built.rows.filter((row) => ObjC.unwrap(row.popup.titleOfSelectedItem) !== "–").map((row) => ({
             type: ObjC.unwrap(row.popup.titleOfSelectedItem), name: ObjC.unwrap(row.name.stringValue).trim(),
             prompt: ObjC.unwrap(row.prompt.stringValue), cwd: ObjC.unwrap(row.cwd.stringValue).trim(),
+            placement: PRESET_PLACEMENTS[row.placement.indexOfSelectedItem]?.value,
         })),
         urls: ObjC.unwrap(built.urls.stringValue).split(",").map((url) => url.trim()).filter(Boolean),
     };

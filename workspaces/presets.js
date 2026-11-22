@@ -27,7 +27,7 @@ function exists(path) {
 function loadWizard(moduleDirectory) {
     const source = readText(`${moduleDirectory}/terminal-setup.js`);
     return new Function(`${source}
-return { terminalCommand, defaultTerminals, validateTerminals, validateUrls, normalizeEntry };`)();
+return { terminalCommand, defaultTerminals, validateTerminals, validateUrls, normalizeEntry, TERMINAL_PLACEMENTS };`)();
 }
 
 function isRemote(path) {
@@ -74,7 +74,8 @@ function writeStore(file, store) {
 }
 
 function visible(terminal) {
-    return { name: terminal.name, type: terminal.type, prompt: terminal.prompt, cwd: terminal.cwd };
+    return { name: terminal.name, type: terminal.type, prompt: terminal.prompt, cwd: terminal.cwd,
+        placement: terminal.placement };
 }
 
 function check(condition, message) {
@@ -89,6 +90,8 @@ function buildPreset(wizard, path, preset) {
         const where = `Terminal ${index + 1}`;
         check(entry && TYPES.includes(entry.type), `${where}: unbekannter Typ.`);
         check([entry.name, entry.prompt, entry.cwd].every((value) => typeof value === "string"), `${where}: ungültige Angaben.`);
+        check(entry.placement === undefined || wizard.TERMINAL_PLACEMENTS.includes(entry.placement),
+            `${where}: Öffnungsort muss Panel, Tab oder Raster sein.`);
         const name = entry.name.trim() || entry.type;
         check(name.length <= 60 && !/[\u0000-\u001f\u007f]/.test(name), `${where}: Name zu lang oder mit Steuerzeichen.`);
         check(!names.has(name), `Zwei Terminals heißen „${name}“. Jedes braucht einen eigenen Namen.`);
@@ -99,7 +102,8 @@ function buildPreset(wizard, path, preset) {
         const cwd = entry.cwd.trim();
         check(!cwd.startsWith("/") && !cwd.startsWith("~") && !cwd.split("/").includes("..") && !/[\u0000-\u001f\u007f]/.test(cwd),
             `${where} („${name}“): Bitte einen relativen Unterordner ohne „..“ angeben.`);
-        return { name, type: entry.type, prompt, command: wizard.terminalCommand(entry.type, prompt, isRemote(path)), cwd };
+        return { name, type: entry.type, prompt, command: wizard.terminalCommand(entry.type, prompt, isRemote(path)),
+            cwd, placement: entry.placement };
     });
     const urls = preset.urls.map((url) => {
         check(typeof url === "string", "Ungültiger Browser-Tab.");

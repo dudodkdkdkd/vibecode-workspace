@@ -53,19 +53,23 @@ test('Standard-Terminals kommen aus dem Wizard, lokal und remote', () => {
 
 test('Speichern schreibt genau die Befehle, die der Wizard selbst bauen würde (auch mit bösen Prompts)', (t) => {
     const files = fixture(t);
-    const result = save(files, '/repo/a', { terminals: TERMINALS, urls: ['http://localhost:5173', ' https://x.test/a '] });
+    const terminals = [{ ...TERMINALS[0], placement: 'panel' }, ...TERMINALS.slice(1)];
+    const result = save(files, '/repo/a', { terminals, urls: ['http://localhost:5173', ' https://x.test/a '] });
     assert.equal(result.status, 0, result.err);
     const entry = stored(files).projects['/repo/a'];
     assert.equal(stored(files).version, 2);
     assert.deepEqual(entry.urls, ['http://localhost:5173', 'https://x.test/a']);
-    const expected = TERMINALS.map((terminal) => ({
+    const expected = terminals.map((terminal) => ({
         name: terminal.name, type: terminal.type, cwd: terminal.cwd,
+        ...(terminal.placement ? { placement: terminal.placement } : {}),
         prompt: terminal.type === 'Shell' ? '' : terminal.prompt,
         command: wizard(`terminalCommand(${JSON.stringify(terminal.type)}, ${JSON.stringify(terminal.type === 'Shell' ? '' : terminal.prompt)}, false)`),
     }));
     assert.deepEqual(entry.terminals, expected);
     assert.ok(entry.terminals[1].command.includes("'Räum auf: it'\\''s \"wichtig\" $(rm -rf ~) `x`'"));   // sicher gequotet
     assert.deepEqual(JSON.parse(result.out).terminals.map((x) => x.name), ['Frontend', 'Claude', 'Codex 1', 'Shell']);
+    const reloaded = JSON.parse(presets('list', files.dir).out)[0].terminals;
+    assert.deepEqual(reloaded.map((terminal) => terminal.placement), ['panel', undefined, undefined, undefined]);
     assert.ok(!('command' in JSON.parse(result.out).terminals[0]));                  // der Befehl bleibt abgeleitet
 });
 
@@ -120,6 +124,7 @@ test('ungültige Eingaben werden mit klarem Grund abgelehnt und schreiben nichts
         [one({ cwd: 'a\u0007b' }), /relativen Unterordner/],
         [one({ name: 'x'.repeat(61) }), /Name zu lang/],
         [one({ name: 5 }), /ungültige Angaben/],
+        [one({ placement: 'sidebar' }), /Öffnungsort/],
         [{ terminals: [one({ name: 'Gleich' }).terminals[0], one({ name: 'Gleich' }).terminals[0]], urls: [] }, /heißen „Gleich“/],
         [{ terminals: Array.from({ length: 13 }, (_, i) => ({ name: `T${i}`, type: 'Shell', prompt: '', cwd: '' })), urls: [] }, /Höchstens 12/],
         [{ terminals: [], urls: ['localhost:5173'] }, /http:\/\/ oder https:\/\//],

@@ -2,7 +2,7 @@
   "name": "vibecode-workspace-auto-open-tabs",
   "displayName": "VibeCode Workspace Auto-Open Tabs",
   "description": "Startet Workspace-Terminals in fester Reihenfolge und öffnet hinterlegte URLs als eigene Tabs.",
-  "version": "0.0.2",
+  "version": "0.0.5",
   "publisher": "vibecode-workspace",
   "private": true,
   "engines": { "vscode": "^1.74.0" },
@@ -10,9 +10,41 @@
   "extensionKind": ["ui"],
   "activationEvents": ["onStartupFinished"],
   "contributes": {
+    "commands": [
+      {
+        "command": "vibecodeWorkspace.chooseTerminalLayout",
+        "category": "VibeCode",
+        "title": "Terminal-Layout wählen"
+      },
+      {
+        "command": "vibecodeWorkspace.chooseTerminalLocations",
+        "category": "VibeCode",
+        "title": "Öffnungsort für Terminals wählen"
+      }
+    ],
     "configuration": {
       "title": "VibeCode Workspace",
       "properties": {
+        "vibecodeWorkspace.terminalLayout": {
+          "type": "string",
+          "enum": ["panel", "tabs", "grid"],
+          "enumDescriptions": [
+            "Projektterminals wie bisher in Splits im unteren Panel.",
+            "Eine Editorzeile mit Terminal-Tabs pro Projekt.",
+            "Eine Editorzeile pro Projekt mit gleichzeitig sichtbaren Terminals nebeneinander."
+          ],
+          "default": "panel",
+          "scope": "application",
+          "description": "Standard-Layout für VibeCode-Projektterminals ohne eigenen Öffnungsort."
+        },
+        "vibecodeWorkspace.terminalLocations": {
+          "type": "object",
+          "additionalProperties": { "type": "string", "enum": ["panel", "tabs", "grid"] },
+          "default": {},
+          "scope": "application",
+          "ignoreSync": true,
+          "description": "Lokale Öffnungsorte für Projektterminals ohne festen Öffnungsort im Preset. Verwende VibeCode: Öffnungsort für Terminals wählen."
+        },
         "vibecodeWorkspace.autoStartTerminals": {
           "type": "array",
           "items": { "type": "object" },

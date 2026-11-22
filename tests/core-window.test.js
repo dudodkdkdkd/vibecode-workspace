@@ -1757,9 +1757,10 @@ test('Preset-Editor: echte Formularzeilen, vorbelegt, mit freien Zeilen und nur 
     const out = JSON.parse(widgets(`
         const repo = { name: 'alpha' };
         const draft = { terminals: ${JSON.stringify(PRESETS.items[0].terminals)}, urls: ['http://a.test', 'http://b.test'] };
+        draft.terminals[0].placement = 'panel';
         const built = buildPresetEditor(repo, draft, true, '');
         const rows = (b) => b.rows.map((row) => [ObjC.unwrap(row.popup.titleOfSelectedItem), ObjC.unwrap(row.name.stringValue),
-            ObjC.unwrap(row.prompt.stringValue), ObjC.unwrap(row.cwd.stringValue)]);
+            ObjC.unwrap(row.prompt.stringValue), ObjC.unwrap(row.cwd.stringValue), ObjC.unwrap(row.placement.titleOfSelectedItem)]);
         const eight = buildPresetEditor(repo, { terminals: Array.from({ length: 8 }, (_, i) => ({ name: 'T' + i, type: 'Shell', prompt: '', cwd: '' })), urls: [] }, false, '');
         const many = buildPresetEditor(repo, { terminals: Array.from({ length: 12 }, (_, i) => ({ name: 'T' + i, type: 'Shell', prompt: '', cwd: '' })), urls: [] }, false, '');
         return JSON.stringify({ title: ObjC.unwrap(built.alert.messageText), rows: rows(built), buttons: titles(built.alert),
@@ -1768,7 +1769,11 @@ test('Preset-Editor: echte Formularzeilen, vorbelegt, mit freien Zeilen und nur 
             urls: ObjC.unwrap(built.urls.stringValue), counts: [built.rows.length, eight.rows.length, many.rows.length],
             popupItems: Array.from({ length: built.rows[0].popup.numberOfItems }, (_, i) => ObjC.unwrap(built.rows[0].popup.itemTitleAtIndex(i))) });`));
     assert.equal(out.title, 'Preset · alpha');
-    assert.deepEqual(out.rows.slice(0, 3), [['Eigener Befehl', 'Dev', 'npm run dev', 'frontend'], ['Claude Code', 'Agent', '', ''], ['–', '', '', '']]);
+    assert.deepEqual(out.rows.slice(0, 3), [
+        ['Eigener Befehl', 'Dev', 'npm run dev', 'frontend', 'Unteres Panel'],
+        ['Claude Code', 'Agent', '', '', 'Standard'],
+        ['–', '', '', '', 'Standard'],
+    ]);
     assert.deepEqual(out.counts, [6, 8, 12]);                                       // mindestens 6, so viele wie nötig, höchstens 12
     assert.deepEqual(out.buttons, ['Speichern', 'Abbrechen', 'Standard wiederherstellen']);
     assert.deepEqual(out.fresh, ['Speichern', 'Abbrechen']);
@@ -1785,12 +1790,13 @@ test('Preset-Editor: Auslesen überspringt freie Zeilen und trennt die Tabs saub
             row.prompt.stringValue = $(prompt); row.cwd.stringValue = $(cwd);
         };
         fill(built.rows[1], 'Codex 2', '  Mein Codex ', 'Räum "auf" it\\'s', ' src ');
+        built.rows[1].placement.selectItemWithTitle($('Editor-Tab'));
         fill(built.rows[4], 'Eigener Befehl', '', 'npm test', '');
         built.urls.stringValue = $(' http://a.test ,, http://b.test , ');
         const empty = buildPresetEditor({ name: 'x' }, { terminals: [], urls: [] }, false, '');
         return JSON.stringify({ collected: collectPreset(built), empty: collectPreset(empty) });`));
     assert.deepEqual(out.collected.terminals, [
-        { type: 'Codex 2', name: 'Mein Codex', prompt: 'Räum "auf" it\'s', cwd: 'src' },
+        { type: 'Codex 2', name: 'Mein Codex', prompt: 'Räum "auf" it\'s', cwd: 'src', placement: 'tabs' },
         { type: 'Eigener Befehl', name: '', prompt: 'npm test', cwd: '' }]);          // leerer Name: das Modul setzt den Typ ein
     assert.deepEqual(out.collected.urls, ['http://a.test', 'http://b.test']);
     assert.deepEqual(out.empty, { terminals: [], urls: [] });
