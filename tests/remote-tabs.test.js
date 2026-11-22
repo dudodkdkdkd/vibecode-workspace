@@ -24,6 +24,7 @@ async function preview({ remote = true, urls, forwardError, responseDelay = 0, d
             getConfiguration: () => ({ get: key => key === 'autoOpenUrls' ? urls : [] }),
         },
         window: {
+            tabGroups: { all: [], onDidChangeTabGroups: () => ({ dispose() {} }) },
             createWebviewPanel: (_id, _title, _column, options) => {
                 const panel = { webview: { html: '' }, options, onDidDispose: listener => { panel.dispose = listener; } };
                 panels.push(panel);

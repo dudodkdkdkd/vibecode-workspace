@@ -9,8 +9,11 @@ const source = fs.readFileSync(path.join(__dirname,
     '../workspaces/vscode-extension/auto-open-tabs/extension.js'), 'utf8');
 const labels = ['Frontend', 'Storybook', 'Claude', 'Codex 1', 'Codex 2'];
 
-function extension({ trusted = true, active = [], fail, end, configured = labels, definitions = [], layout = 'panel', locations = {} } = {}) {
-    const events = { start: new Set(), end: new Set(), trust: new Set() };
+function extension({
+    trusted = true, active = [], fail, end, configured = labels, definitions = [],
+    layout = 'panel', locations = {}, editorTabs = [],
+} = {}) {
+    const events = { start: new Set(), end: new Set(), trust: new Set(), groups: new Set() };
     const subscribe = name => listener => {
         events[name].add(listener);
         return { dispose: () => events[name].delete(listener) };
@@ -21,23 +24,45 @@ function extension({ trusted = true, active = [], fail, end, configured = labels
     const errors = [];
     const created = [];
     const layouts = [];
+    const TabInputTerminal = class {};
+    const tabGroups = editorTabs.map((label, index) => ({
+        isActive: index === 0, tabs: [{ label, input: new TabInputTerminal() }],
+    }));
+    let sizeResets = 0;
     const messages = [];
     const settingsUpdates = [];
     const commands = new Map();
+    const panelActions = [];
+    let gridContext;
     let selectedLayout;
     let selectedTerminals = [];
     let pendingStart = false;
     let parallelStarts = 0;
     const vscode = {
         ConfigurationTarget: { Global: 1 },
+        TabInputTerminal,
         commands: {
             registerCommand: (id, handler) => {
                 commands.set(id, handler);
                 return { dispose: () => commands.delete(id) };
             },
-            executeCommand: async (id, nextLayout) => {
+            executeCommand: async (id, ...args) => {
+                if (id === 'setContext') {
+                    assert.equal(args[0], 'vibecodeWorkspace.terminalGrid');
+                    gridContext = args[1];
+                    return;
+                }
+                if (id === 'workbench.action.togglePanel') {
+                    panelActions.push('toggle');
+                    return;
+                }
+                if (id === 'workbench.action.evenEditorWidths') {
+                    panelActions.push('balance');
+                    sizeResets++;
+                    return;
+                }
                 assert.equal(id, 'vscode.setEditorLayout');
-                layouts.push(JSON.parse(JSON.stringify(nextLayout)));
+                layouts.push(JSON.parse(JSON.stringify(args[0])));
             },
         },
         TaskScope: { Workspace: 2 },
@@ -67,6 +92,7 @@ function extension({ trusted = true, active = [], fail, end, configured = labels
             onDidGrantWorkspaceTrust: subscribe('trust'),
         },
         window: {
+            tabGroups: { all: tabGroups, onDidChangeTabGroups: subscribe('groups') },
             terminals: active.map(name => ({ name })),
             showQuickPick: async (items, options) => options.canPickMany
                 ? items.filter(item => selectedTerminals.includes(item.label))
@@ -139,6 +165,17 @@ function extension({ trusted = true, active = [], fail, end, configured = labels
             await commands.get('vibecodeWorkspace.chooseTerminalLocations')();
         },
         locations: () => locations,
+        sizeResets: () => sizeResets,
+        gridContext: () => gridContext,
+        togglePanel: async () => {
+            panelActions.length = 0;
+            await commands.get('vibecodeWorkspace.togglePanel')();
+            return panelActions;
+        },
+        focusGroup: async index => {
+            tabGroups.forEach((group, position) => { group.isActive = position === index; });
+            for (const listener of events.groups) await listener();
+        },
         closeProjectTerminals: () => { vscode.window.terminals = vscode.window.terminals.filter(terminal => terminal.name === 'Control'); },
         parallelStarts: () => parallelStarts,
         subscriptions: () => events.start.size + events.end.size,
@@ -256,6 +293,42 @@ test('one project in grid mode still opens its terminals side by side', async ()
     await app.activate();
     assert.deepEqual(app.layouts, [{ orientation: 0, groups: [{}, {}] }]);
     assert.deepEqual(app.created.map(({ options }) => options.location.viewColumn), [1, 2]);
+});
+
+test('restored editor grids equalize at startup and on focus changes without restarting terminals', async () => {
+    const definitions = layoutDefinitions.slice(0, 2);
+    const active = definitions.map(({ name }) => name);
+    const app = extension({ definitions, active, layout: 'grid', editorTabs: active });
+    await app.activate();
+    assert.equal(app.sizeResets(), 1);
+    await app.focusGroup(1);
+    assert.equal(app.sizeResets(), 2);
+    await app.focusGroup(1);
+    assert.equal(app.sizeResets(), 2);
+    await app.focusGroup(0);
+    assert.equal(app.sizeResets(), 3);
+    assert.deepEqual(app.layouts, []);
+    assert.deepEqual(app.started, []);
+});
+
+test('focus changes do not resize unrelated editor groups in a panel workspace', async () => {
+    const definitions = layoutDefinitions.slice(0, 2);
+    const app = extension({ definitions, layout: 'panel', editorTabs: ['Shell', 'Tests'] });
+    await app.activate();
+    await app.focusGroup(1);
+    assert.equal(app.sizeResets(), 0);
+    assert.equal(app.gridContext(), false);
+});
+
+test('the grid panel shortcut rebalances after the native toggle even when the active group stays the same', async () => {
+    const definitions = layoutDefinitions.slice(0, 2);
+    const active = definitions.map(({ name }) => name);
+    const app = extension({ definitions, active, layout: 'grid', editorTabs: active });
+    await app.activate();
+    assert.equal(app.gridContext(), true);
+    assert.deepEqual(await app.togglePanel(), ['toggle', 'balance']);
+    assert.deepEqual(await app.togglePanel(), ['toggle', 'balance']);
+    assert.deepEqual(app.started, []);
 });
 
 test('layout picker saves without restarting running sessions and starts immediately once they are closed', async () => {

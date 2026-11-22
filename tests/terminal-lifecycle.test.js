@@ -12,7 +12,7 @@ const source = fs.readFileSync(path.join(__dirname,
 async function terminalOptions(definition) {
     let options;
     const vscode = {
-        commands: { registerCommand: () => ({ dispose() {} }) },
+        commands: { registerCommand: () => ({ dispose() {} }), executeCommand: async () => {} },
         TerminalLocation: { Panel: 1 },
         ThemeColor: class { constructor(id) { this.id = id; } },
         ThemeIcon: class { constructor(id, color) { this.id = id; this.color = color; } },
@@ -22,6 +22,7 @@ async function terminalOptions(definition) {
                 ? [{ name: 'Lifecycle test', ...definition }] : [] }),
         },
         window: {
+            tabGroups: { all: [], onDidChangeTabGroups: () => ({ dispose() {} }) },
             terminals: [],
             createTerminal: value => {
                 options = value;

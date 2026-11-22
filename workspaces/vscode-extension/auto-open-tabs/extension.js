@@ -279,8 +279,7 @@ async function showStartedTerminal(definition, terminal) {
     }
 }
 
-async function startTerminals(configured, layout, overrides) {
-    const definitions = uniqueTerminals(configured);
+async function startTerminals(definitions, layout, overrides) {
     const editorLocations = await editorTerminalLocations(definitions, layout, overrides);
     const panelProject = (definition) => definition.group && !editorLocations.has(definition.name);
     // Queue all project panel splits before waiting for any editor terminal.
@@ -368,12 +367,35 @@ async function activate(context) {
         if (typeof url !== "string" || !url.trim()) continue;
         openTab(url.trim());
     }
+    const tabGroups = vscode.window.tabGroups;
+    let activeGroup = tabGroups.all.find((group) => group.isActive);
+    let gridTerminalNames = new Set();
+    const balanceGrid = async () => {
+        if (!gridTerminalNames.size || tabGroups.all.length < 2) return;
+        const hasGridTerminal = tabGroups.all.some((group) => group.tabs.some((tab) =>
+            tab.input instanceof vscode.TabInputTerminal &&
+            (gridTerminalNames.has(tab.label) || gridTerminalNames.has(tab.label.replace(/ \(\d+\)$/, "")))));
+        if (!hasGridTerminal) return;
+        try {
+            await vscode.commands.executeCommand("workbench.action.evenEditorWidths");
+        } catch (error) {
+            console.warn("VibeCode: Die Kachelgrößen konnten nicht ausgeglichen werden.", error);
+        }
+    };
     const startConfigured = async () => {
         try {
             const settings = vscode.workspace.getConfiguration("vibecodeWorkspace");
             const terminals = settings.get("autoStartTerminals", []);
             if (Array.isArray(terminals) && terminals.length) {
-                await startTerminals(terminals, settings.get("terminalLayout", "panel"), settings.get("terminalLocations", {}));
+                const definitions = uniqueTerminals(terminals);
+                const layout = settings.get("terminalLayout", "panel");
+                const overrides = settings.get("terminalLocations", {});
+                gridTerminalNames = new Set(definitions
+                    .filter((definition) => terminalLayout(definition, layout, overrides) === "grid")
+                    .map((definition) => definition.name));
+                await vscode.commands.executeCommand("setContext", "vibecodeWorkspace.terminalGrid", gridTerminalNames.size > 0);
+                await startTerminals(definitions, layout, overrides);
+                await balanceGrid();
             } else {
                 await startOrderedTasks();
             }
@@ -383,6 +405,18 @@ async function activate(context) {
     };
     let starting;
     const start = () => starting ??= startConfigured().finally(() => { starting = undefined; });
+    context.subscriptions.push(tabGroups.onDidChangeTabGroups(() => {
+        const focused = tabGroups.all.find((group) => group.isActive);
+        if (focused === activeGroup) return;
+        activeGroup = focused;
+        // VS Code expands a group when focus moves to it at its minimum size.
+        // Restore the equal sizes without rebuilding groups or switching focus.
+        if (!starting) return balanceGrid();
+    }));
+    context.subscriptions.push(vscode.commands.registerCommand("vibecodeWorkspace.togglePanel", async () => {
+        await vscode.commands.executeCommand("workbench.action.togglePanel");
+        await balanceGrid();
+    }));
     const projectTerminals = (settings) => {
         const configured = settings.get("autoStartTerminals", []);
         return Array.isArray(configured) ? uniqueTerminals(configured).filter((definition) => definition.group) : [];
