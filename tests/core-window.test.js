@@ -101,13 +101,14 @@ const ui = {
     clipboardAllowLine: () => script.clipboardAllowLine || '',
     confirmAllow: (name, fingerprint) => { calls.push(['confirmAllow', name, fingerprint]); return next('confirmAllow'); },
     pickFolders: () => { calls.push(['pickFolders']); return next('pickFolders'); },
-    askRemoteFolder: (note) => { calls.push(['askRemoteFolder', note]); return next('askRemoteFolder'); },
+    askRemoteFolder: (note, host) => { calls.push(host === undefined ? ['askRemoteFolder', note] : ['askRemoteFolder', note, host]); return next('askRemoteFolder'); },
     confirmRemoveFolder: (label) => { calls.push(['confirmRemoveFolder', label]); return next('confirmRemoveFolder'); },
     editPreset: (repo, draft, custom, note) => { calls.push(['editPreset', repo.name, draft, custom, note]); return next('editPreset'); },
     pickRepo: (repos) => { calls.push(['pickRepo', repos.map((repo) => repo.name)]); return next('pickRepo'); },
     pickLocalDev: (choices) => { calls.push(['pickLocalDev', choices]); return next('pickLocalDev'); },
     confirmResetPreset: (label, effect) => { calls.push(['confirmResetPreset', label, effect]); return next('confirmResetPreset'); },
     confirmMovePreset: (label, target) => { calls.push(['confirmMovePreset', label, target]); return next('confirmMovePreset'); },
+    confirmTailscale: (kind) => { calls.push(['confirmTailscale', kind]); return next('confirmTailscale'); },
 };
 const backend = {
     state: () => { calls.push(['state']); return script.state; },
@@ -142,6 +143,7 @@ const backend = {
         return answer;
     },
     sshOpen: (kind, name) => calls.push(['sshOpen', kind, name || null]),
+    tailscale: (action) => { calls.push(['tailscale', action]); const answer = next('tailscaleResults'); if (answer && answer.throw) throw new Error(answer.throw); return answer; },
     ssh: (action, line) => { calls.push(['ssh', action, line === undefined ? null : line]); return next('sshResults'); },
 };
 function run() { flow(ui, backend); return JSON.stringify(calls); }
@@ -286,7 +288,7 @@ test('SSH: Verbinden per Zeile – sofort ein Hinweis, dann das Ergebnis; bereit
     assert.match(calls.find((c) => c[0] === 'notify')[1], /^Verbinde mit user@remote-mac\.local .*30 Sekunden/);
     assert.deepEqual(calls.find((c) => c[0] === 'ssh' && c[1] === 'join'), ['ssh', 'join', JOIN]);
     assert.equal(calls.find((c) => c[0] === 'info')[1],
-        'Verbunden mit user@remote-mac.local ✓\n\nIm Bereich SSH kannst du jetzt auf „Verbinden“ klicken.');
+        'Verbunden mit user@remote-mac.local ✓\n\nIm Bereich Remote kannst du jetzt auf „Verbinden“ klicken.');
     assert.ok(!calls.find((c) => c[0] === 'info')[1].includes('workspace remote'));                 // CLI-Hinweis gehört nicht ins Fenster
 });
 
@@ -317,7 +319,7 @@ test('SSH: noch nicht freigegeben zeigt nur die allow-Zeile und sagt, was am and
     assert.match(text, /^Noch nicht freigegeben: Der andere Mac muss dich noch freigeben\./);
     assert.ok(text.includes("workspace remote ssh allow 'ssh-ed25519 AAAAkey user@client'"));
     assert.match(text, /1\. Dort: .*Diesen Mac freigeben… → Schlüssel eintragen/);
-    assert.match(text, /2\. Danach hier im Bereich SSH auf „Verbinden“ klicken\.$/);
+    assert.match(text, /2\. Danach hier im Bereich Remote auf „Verbinden“ klicken\.$/);
     assert.ok(!text.includes('Danach hier: workspace remote ssh join'));
 });
 
@@ -492,6 +494,169 @@ test('Suchordner: Remote-Ordner hinzufügen, auch wenn die Anmeldung noch nicht 
     assert.match(infos[1], /Gespeichert, aber die Suche ist fehlgeschlagen/);
     assert.match(infos[1], /⚠︎ Permission denied \(publickey\)\./);
     assert.match(infos[1], /Geführte Einrichtung/);                          // sagt, wie man die Anmeldung einrichtet
+});
+
+test('Suchordner: der Host des verbundenen Macs ist vorbelegt (auch ein Tailscale-Name), außer bei einem anderen Port', () => {
+    const asked = (mac) => flowRun({ state: Object.assign(withFolders(), { ssh: Object.assign({}, SSH, { mac }) }), dashboard: [{ action: 'addRemoteFolder' }, back], askRemoteFolder: [null] })
+        .filter((c) => c[0] === 'askRemoteFolder');
+    assert.deepEqual(asked({ user: 'user', host: 'remote-mac.example-tailnet.ts.net', port: 22 }),
+        [['askRemoteFolder', '', 'user@remote-mac.example-tailnet.ts.net']]);
+    assert.deepEqual(asked({ user: '', host: '100.64.0.5', port: 22 }), [['askRemoteFolder', '', '100.64.0.5']]);
+    assert.deepEqual(asked({ user: 'user', host: '100.64.0.5', port: 2222 }), [['askRemoteFolder', '']]);   // ein Port passt nicht in den Host-Text
+    assert.deepEqual(asked(null), [['askRemoteFolder', '']]);
+});
+
+// ------------------------------------------------------------------ Tailscale
+
+const TS = (extra = {}) => Object.assign({ available: true, variant: 'cli', state: 'running', name: 'remote-mac.example-tailnet.ts.net',
+    ip: '100.64.0.5', tailnet: 'example-tailnet.ts.net', auto: false, autoError: '', ours: false, devices: [] }, extra);
+
+test('Übersicht: der Tailscale-Bereich zeigt je Zustand Punkt, Text und genau die passenden Knöpfe', () => {
+    const rows = (tailscale) => JSON.parse(widgets(`return JSON.stringify(dashboardModel(Object.assign({}, STATE, { tailscale: ${JSON.stringify(tailscale)} })));`));
+    const item = (tailscale) => rows(tailscale).find((row) => row.type === 'item' && row.title === 'Tailscale');
+    const cases = [
+        ['missing', 'off', 'nicht installiert', ['Einrichten…']],
+        ['daemon-down', 'warn', 'Dienst antwortet nicht', ['Einrichten…']],
+        ['denied', 'warn', 'Zugriff verweigert', ['Einrichten…']],
+        ['needs-login', 'warn', 'nicht angemeldet', ['Anmelden…']],
+        ['needs-approval', 'warn', 'wartet auf Freigabe im Tailnet', []],
+        ['starting', 'warn', 'verbindet …', []],
+        ['stopped', 'off', 'getrennt', ['Verbinden', 'Abmelden…']],
+        ['running', 'ok', 'verbunden', ['Trennen', 'Geräte…', 'Abmelden…']],
+        ['etwas-neues', 'warn', 'Status unbekannt', []],
+    ];
+    cases.forEach(([state, level, text, buttons]) => {
+        const row = item(TS({ state }));
+        assert.equal(row.level, level, state);
+        assert.ok(row.detail.startsWith(text), `${state}: ${row.detail}`);
+        assert.deepEqual(row.buttons.map((b) => b.label), buttons, state);
+        // „Aktualisieren“ gibt es in jedem Zustand, als Fußzeile des Bereichs: nach dem Einrichten im Terminal oder der Anmeldung im
+        // Browser liest die Übersicht den Stand sonst nicht neu (so blieb „nicht installiert“ stehen, obwohl alles fertig war).
+        const footers = rows(TS({ state })).filter((r) => r.type === 'footer' && r.buttons.some((b) => b.label === 'Aktualisieren'));
+        assert.equal(footers.length, 1, state);
+        assert.deepEqual(footers[0].buttons[0].action, { action: 'tailscaleRefresh' });
+    });
+    const running = item(TS({ ours: true }));
+    assert.equal(running.detail, 'verbunden · Kommandozeile · von VibeCode gestartet · 100.64.0.5 · remote-mac.example-tailnet.ts.net');
+    assert.match(item(TS({ state: 'stopped', variant: 'app' })).detail, /getrennt · App$/);
+    assert.ok(!/100\.64/.test(item(TS({ state: 'stopped' })).detail));               // Name und Adresse nur, solange verbunden
+});
+
+test('Übersicht: der Schalter „Mit VibeCode starten und beenden“ ist ein Kästchen und sagt, was er tut', () => {
+    const rows = (tailscale) => JSON.parse(widgets(`return JSON.stringify(dashboardModel(Object.assign({}, STATE, { tailscale: ${JSON.stringify(tailscale)} })));`));
+    const sw = (tailscale) => rows(tailscale).find((row) => row.title === 'Mit VibeCode starten und beenden');
+    const off = sw(TS());
+    assert.deepEqual(off.buttons.map((b) => [b.label, b.checkbox, b.checked]), [['Aktiv', true, false]]);
+    assert.deepEqual(off.buttons[0].action, { action: 'tailscaleAuto', enabled: true });
+    assert.equal(off.level, 'off');
+    const on = sw(TS({ auto: true }));
+    assert.deepEqual(on.buttons[0].action, { action: 'tailscaleAuto', enabled: false });
+    assert.match(on.detail, /Startet mit jedem Workspace, endet nach dem letzten VibeCode-Editor-Fenster/);
+    assert.ok(sw(TS({ state: 'missing' })));                                          // auch vor der Einrichtung einstellbar
+    assert.ok(rows(TS({ autoError: 'tailscale.json ist ungültig.' })).some((row) => row.type === 'note' && /⚠︎ tailscale\.json ist ungültig/.test(row.text)));
+});
+
+test('Übersicht: SSH und Tailscale stehen in einem Bereich „Remote“, SSH zuerst', () => {
+    const rows = JSON.parse(widgets(`return JSON.stringify(dashboardModel(Object.assign({}, STATE, { ssh: ${JSON.stringify(SSH)}, tailscale: ${JSON.stringify(TS())} })));`));
+    const sections = rows.filter((row) => row.type === 'section').map((row) => row.text);
+    assert.equal(sections.filter((name) => name === 'Remote').length, 1);                 // genau eine Überschrift
+    assert.ok(!sections.includes('SSH') && !sections.includes('Tailscale'));               // die alten Überschriften gibt es nicht mehr
+    const start = rows.findIndex((row) => row.type === 'section' && row.text === 'Remote');
+    const end = rows.findIndex((row, index) => index > start && row.type === 'section');
+    const inside = rows.slice(start + 1, end);
+    const titles = inside.filter((row) => row.type === 'item').map((row) => row.title);
+    assert.ok(titles.includes('Tailscale') && titles.includes('Mit VibeCode starten und beenden'));
+    const footerLabels = inside.filter((row) => row.type === 'footer').map((row) => row.buttons.map((b) => b.label));
+    assert.deepEqual(footerLabels, [['Neue Verbindung…', 'Diesen Mac freigeben…'], ['Aktualisieren']]);   // SSH-Knöpfe vor dem Tailscale-Teil
+    assert.ok(inside.findIndex((row) => row.title === 'Tailscale') > inside.findIndex((row) => row.type === 'footer'));
+    // Nur Tailscale (ohne SSH-Modul) oder nur SSH: weiter ein Bereich „Remote“.
+    const only = (extra) => JSON.parse(widgets(`return JSON.stringify(dashboardModel(Object.assign({}, STATE, ${extra})));`))
+        .filter((row) => row.type === 'section').map((row) => row.text);
+    assert.ok(only(`{ tailscale: ${JSON.stringify(TS())} }`).includes('Remote'));
+    assert.ok(only(`{ ssh: ${JSON.stringify(SSH)} }`).includes('Remote'));
+});
+
+test('Übersicht: ohne Remote-Modul gibt es keinen Tailscale-Bereich, ein Lesefehler zeigt nur eine Warnung', () => {
+    const rows = (tailscale) => JSON.parse(widgets(`return JSON.stringify(dashboardModel(Object.assign({}, STATE, ${tailscale === undefined ? '{}' : `{ tailscale: ${JSON.stringify(tailscale)} }`})));`));
+    assert.ok(!rows({ available: false }).some((row) => row.text === 'Remote'));          // ohne SSH und ohne Tailscale gibt es den Bereich nicht
+    assert.ok(!rows(undefined).some((row) => row.text === 'Remote'));                 // ältere Antwort ohne Feld
+    const broken = rows({ available: true, error: 'Tailscale: Ungültige Antwort' });
+    assert.ok(broken.some((row) => row.type === 'section' && row.text === 'Remote'));
+    assert.deepEqual(broken.filter((row) => row.type === 'note' && /Ungültige Antwort/.test(row.text)).map((row) => row.level), ['warn']);
+    assert.ok(!broken.some((row) => row.title === 'Tailscale'));
+    assert.ok(broken.some((row) => row.type === 'footer' && row.buttons[0].label === 'Aktualisieren'));         // auch ein Lesefehler lässt sich neu laden
+});
+
+test('Tailscale: Einrichten bestätigt zuerst, öffnet dann nur das Terminal und bricht ohne Ja ab', () => {
+    const state = STATE({ tailscale: TS({ state: 'missing', variant: 'missing' }) });
+    const calls = flowRun({ state, dashboard: [{ action: 'tailscaleSetup' }, { action: 'tailscaleSetup' }, back], confirmTailscale: [false, true],
+        tailscaleResults: ['Terminal geöffnet. Dort wird Tailscale eingerichtet.'] });
+    assert.deepEqual(calls.filter((c) => c[0] === 'confirmTailscale'), [['confirmTailscale', 'setup'], ['confirmTailscale', 'setup']]);
+    assert.deepEqual(calls.filter((c) => c[0] === 'tailscale'), [['tailscale', 'setup']]);               // nur beim Ja
+    assert.deepEqual(calls.filter((c) => c[0] === 'info').map((c) => c[1]), ['Terminal geöffnet. Dort wird Tailscale eingerichtet.']);
+});
+
+test('Tailscale: Verbinden, Trennen und der Schalter rufen genau ihre feste Aktion auf', () => {
+    const calls = flowRun({ state: STATE({ tailscale: TS() }), tailscaleResults: ['ok', 'ok', 'ok', 'ok'],
+        dashboard: [{ action: 'tailscaleUp' }, { action: 'tailscaleDown' }, { action: 'tailscaleAuto', enabled: true },
+            { action: 'tailscaleAuto', enabled: false }, { action: 'tailscaleRefresh' }, back] });
+    assert.deepEqual(calls.filter((c) => c[0] === 'tailscale').map((c) => c[1]), ['up', 'down', 'auto-on', 'auto-off']);
+    assert.equal(kinds(calls).filter((k) => k === 'dashboard').length, 6);                               // danach liest die Übersicht neu
+});
+
+test('Tailscale: Anmelden sagt vorher Bescheid, nennt den geöffneten Link und kennt „schon angemeldet“', () => {
+    const url = 'https://login.example.invalid/a/abc123';
+    const calls = flowRun({ state: STATE({ tailscale: TS({ state: 'needs-login' }) }), dashboard: [{ action: 'tailscaleLogin' }, { action: 'tailscaleLogin' }, back],
+        tailscaleResults: [JSON.stringify({ url }), JSON.stringify({ url: '' })] });
+    const order = kinds(calls);
+    assert.deepEqual(order.slice(order.indexOf('notify'), order.indexOf('notify') + 3), ['notify', 'tailscale', 'info']);   // erst der Hinweis, dann die Aktion
+    assert.match(calls.find((c) => c[0] === 'notify')[1], /Anmelde-Link/);
+    const infos = calls.filter((c) => c[0] === 'info').map((c) => c[1]);
+    assert.match(infos[0], /im Browser geöffnet/);
+    assert.match(infos[0], /Aktualisieren/);
+    assert.ok(infos[0].endsWith(url));
+    assert.match(infos[1], /schon bei Tailscale angemeldet/);
+});
+
+test('Tailscale: Fehler der Aktionen erscheinen lesbar und das Fenster bleibt', () => {
+    const calls = flowRun({ state: STATE({ tailscale: TS({ state: 'stopped' }) }), dashboard: [{ action: 'tailscaleUp' }, { action: 'tailscaleLogin' }, back],
+        tailscaleResults: [{ throw: 'execution error: VibeCode: Tailscale ist nicht angemeldet. (1)' }, 'kein json'] });
+    const errors = calls.filter((c) => c[0] === 'error').map((c) => c[1]);
+    assert.equal(errors[0], 'Tailscale ist nicht angemeldet. (1)');
+    assert.equal(errors[1], 'Die Antwort von Tailscale war nicht lesbar.');
+    assert.equal(kinds(calls).filter((k) => k === 'dashboard').length, 3);
+});
+
+test('Tailscale: Abmelden fragt zuerst, ändert ohne Ja nichts und Geräte zeigt die Liste lesbar', () => {
+    const devices = [{ name: 'laptop', dns: 'laptop.example-tailnet.ts.net', ip: '100.64.0.9', os: 'macOS', online: true, lastSeen: '' },
+        { name: 'phone', dns: 'phone.example-tailnet.ts.net', ip: '100.64.0.8', os: 'iOS', online: false, lastSeen: '2026-11-20T10:00:00Z' }];
+    const calls = flowRun({ state: STATE({ tailscale: TS({ devices }) }), confirmTailscale: [false, true], tailscaleResults: ['abgemeldet'],
+        dashboard: [{ action: 'tailscaleLogout' }, { action: 'tailscaleLogout' }, { action: 'tailscaleDevices' }, back] });
+    assert.deepEqual(calls.filter((c) => c[0] === 'confirmTailscale'), [['confirmTailscale', 'logout'], ['confirmTailscale', 'logout']]);
+    assert.deepEqual(calls.filter((c) => c[0] === 'tailscale'), [['tailscale', 'logout']]);              // nur nach dem Ja
+    const text = calls.filter((c) => c[0] === 'info').map((c) => c[1])[0];
+    assert.equal(text, ['Dieser Mac: remote-mac.example-tailnet.ts.net · 100.64.0.5', '', 'Weitere Geräte in example-tailnet.ts.net (2):',
+        '● laptop · 100.64.0.9 · macOS', '○ phone · 100.64.0.8 · iOS · zuletzt 2026-11-20'].join('\n'));
+    const empty = flowRun({ state: STATE({ tailscale: TS({ state: 'running', devices: [] }) }), dashboard: [{ action: 'tailscaleDevices' }, back] });
+    assert.match(empty.find((c) => c[0] === 'info')[1], /Keine weiteren Geräte im Tailnet gefunden/);
+});
+
+test('Tailscale: der echte Bestätigungsdialog nennt Passwort, Terminal und die Folgen des Abmeldens', () => {
+    const out = JSON.parse(widgets(`
+        const texts = {};
+        ['setup', 'logout'].forEach((kind) => {
+            let built;
+            const ui = nativeUi({});
+            ui.confirmTailscale(kind);
+        });
+        return JSON.stringify(texts);`.replace('ui.confirmTailscale(kind);', `
+            const original = present;
+            present = (alert) => { texts[kind] = [ObjC.unwrap(alert.messageText), ObjC.unwrap(alert.informativeText),
+                alert.buttons.count > 1 ? ObjC.unwrap(alert.buttons.objectAtIndex(0).title) : ''].join('|'); return $.NSAlertFirstButtonReturn; };
+            ui.confirmTailscale(kind);
+            present = original;`)));
+    assert.match(out.setup, /^Tailscale einrichten\?\|.*Admin-Passwort.*VibeCode sieht es nie.*\|Terminal öffnen$/);
+    assert.match(out.logout, /^Von Tailscale abmelden\?\|.*Remote-Sitzungen.*brechen ab\.\|Abmelden$/);
 });
 
 test('Suchordner: ungültiger Host oder Abbruch beenden das Fenster nicht', () => {
@@ -744,7 +909,7 @@ const MODEL_STATE = Object.assign(ssh(), {
 test('Übersicht: alles Eingerichtete steht direkt da, nichts hinter "Mehr…"', () => {
     const rows = JSON.parse(widgets(`return JSON.stringify(dashboardModel(${JSON.stringify(MODEL_STATE)}));`));
     const sections = rows.filter((row) => row.type === 'section').map((row) => row.text);
-    assert.deepEqual(sections, ['Workspaces', 'SSH', 'App-Einstellungen']);
+    assert.deepEqual(sections, ['Workspaces', 'Remote', 'App-Einstellungen']);
     const items = rows.filter((row) => row.type === 'item');
     assert.deepEqual(items.map((row) => row.title), [
         'Demo', 'Alt', 'spark', 'user@remote-mac.local', 'Wachhalten & Apps', 'Local Dev']);
@@ -780,9 +945,9 @@ test('Übersicht: leerer Zustand sagt klar, dass nichts eingerichtet ist', () =>
 test('Übersicht: der SSH-Bereich erscheint nur, wenn ein Modul SSH anbietet', () => {
     const sections = (extra) => JSON.parse(widgets(`return JSON.stringify(dashboardModel(Object.assign({}, STATE, ${extra}))
         .filter((row) => row.type === 'section').map((row) => row.text));`));
-    assert.ok(!sections('{}').includes('SSH'));
-    assert.ok(!sections('{ ssh: { available: false, hosts: [], mac: null, errors: [] } }').includes('SSH'));
-    assert.ok(sections(`{ ssh: ${SSH_JSON} }`).includes('SSH'));
+    assert.ok(!sections('{}').includes('Remote'));
+    assert.ok(!sections('{ ssh: { available: false, hosts: [], mac: null, errors: [] } }').includes('Remote'));
+    assert.ok(sections(`{ ssh: ${SSH_JSON} }`).includes('Remote'));
 });
 
 test('Übersicht: echte Knöpfe lösen beim Klick genau die Aktion ihrer Zeile aus', () => {
@@ -1044,6 +1209,35 @@ test('Freigabe-Dialog: Kopieren fehlgeschlagen und unlesbarer Host-Schlüssel we
     assert.doesNotMatch(out.fine, /⚠︎/);
 });
 
+test('Freigabe-Dialog: sagt, ob die Zeile auch unterwegs gilt (Tailscale) oder nur im selben Netz', () => {
+    const out = JSON.parse(widgets(`
+        const text = (share) => ObjC.unwrap(buildShare(share).alert.informativeText);
+        return JSON.stringify({ away: text(${JSON.stringify(SHARE({ via: 'tailscale', tailscale: 'running', localLine: 'x' }))}),
+            noName: text(${JSON.stringify(SHARE({ via: 'local', tailscale: 'running' }))}),
+            off: text(${JSON.stringify(SHARE({ via: 'local', tailscale: 'off' }))}),
+            missing: text(${JSON.stringify(SHARE({ via: 'local', tailscale: 'missing' }))}),
+            old: text(${JSON.stringify(SHARE())}) });`));
+    assert.match(out.away, /Tailscale: verbunden ✓ Die Zeile gilt auch unterwegs/);
+    assert.match(out.noName, /verbunden, aber ohne nutzbaren Namen\. Die Zeile gilt nur im selben Netz/);
+    assert.match(out.off, /installiert, aber nicht verbunden\. Die Zeile gilt nur im selben Netz/);
+    assert.match(out.missing, /nicht installiert\. .*Tailscale auf beiden Macs installieren/);
+    assert.doesNotMatch(out.old, /Tailscale/);                                          // ein älteres Modul meldet nichts: dann auch keine Zeile
+});
+
+// Die neuen Zeilen (Tailnet-Name, 100.x-Adresse) müssen sich wie die alten aus der Zwischenablage vorbelegen lassen.
+test('Neue Verbindung: join-Zeilen mit Tailnet-Namen und 100.x-Adresse werden erkannt, Fremdes nicht', () => {
+    const FPR = 'SHA256:' + 'A'.repeat(43);
+    const out = JSON.parse(widgets(`return JSON.stringify([
+        joinLineFrom('workspace remote ssh join user@remote-mac.example-tailnet.ts.net ${FPR}'),
+        joinLineFrom('workspace remote ssh join user@100.64.0.5 ${FPR}'),
+        joinLineFrom('workspace remote ssh join user@remote-mac.local'),
+        joinLineFrom('rm -rf / ; workspace remote ssh join user@100.64.0.5')]);`));
+    assert.equal(out[0], `workspace remote ssh join user@remote-mac.example-tailnet.ts.net ${FPR}`);
+    assert.equal(out[1], `workspace remote ssh join user@100.64.0.5 ${FPR}`);
+    assert.equal(out[2], 'workspace remote ssh join user@remote-mac.local');
+    assert.equal(out[3], '');
+});
+
 test('Freigabe-Dialog: Entfernte Anmeldung aus zeigt nur das Eine, was fehlt, und „Erneut prüfen“', () => {
     const off = SHARE({ remoteLogin: false, line: '', fingerprint: false, copied: false, settingsOpened: true });
     const out = JSON.parse(widgets(`
@@ -1187,7 +1381,7 @@ test('Übersicht: Repository-Suche zeigt jeden Ordner mit Zahl und Warnung, zwis
     const rows = JSON.parse(widgets(`return JSON.stringify(dashboardModel(${JSON.stringify(
         Object.assign(ssh(), { folders: FOLDERS }))}));`));
     assert.deepEqual(rows.filter((row) => row.type === 'section').map((row) => row.text),
-        ['Workspaces', 'Repository-Suche', 'SSH', 'App-Einstellungen']);
+        ['Workspaces', 'Repository-Suche', 'Remote', 'App-Einstellungen']);
     const start = rows.findIndex((row) => row.text === 'Repository-Suche');
     const items = rows.slice(start).filter((row) => row.type === 'item').slice(0, 6);
     assert.deepEqual(items.map((row) => [row.title, row.detail, row.level]), [
@@ -1694,9 +1888,9 @@ test('Übersicht: Presets pro Repository zeigen, was gilt, und was nach einem Um
     const rows = JSON.parse(widgets(`return JSON.stringify(dashboardModel(${JSON.stringify(
         Object.assign(ssh(), { folders: FOLDERS, presets: PRESETS }))}));`));
     assert.deepEqual(rows.filter((row) => row.type === 'section').map((row) => row.text),
-        ['Workspaces', 'Repository-Suche', 'Presets pro Repository', 'SSH', 'App-Einstellungen']);
+        ['Workspaces', 'Repository-Suche', 'Presets pro Repository', 'Remote', 'App-Einstellungen']);
     const start = rows.findIndex((row) => row.text === 'Presets pro Repository');
-    const after = rows.slice(start + 1, rows.findIndex((row) => row.text === 'SSH'));
+    const after = rows.slice(start + 1, rows.findIndex((row) => row.text === 'Remote'));
     assert.equal(after[0].title, 'Allgemeiner Standard');
     const items = after.filter((row) => row.type === 'item');
     assert.deepEqual(items.map((row) => [row.title, row.detail, row.level]), [

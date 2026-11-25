@@ -77,7 +77,7 @@ These tests never inspect or close the user's real Terminal windows.
 
 ## The overview window
 
-One real `NSWindow` (not an `NSAlert`) with sections **Workspaces**, **Repository-Suche**, **Presets pro Repository**, **SSH**,
+One real `NSWindow` (not an `NSAlert`) with sections **Workspaces**, **Repository-Suche**, **Presets pro Repository**, **Remote** (SSH rows first, then Tailscale: one section header, `tailscaleRows()` has none of its own),
 **App-Einstellungen** (module-specific controls only appear if their module is present). Every row shows
 its status (a coloured dot: green ok, orange warn, grey off) and has its own buttons, so nothing is hidden behind a menu.
 The dialogs for editing a workspace, entering a pasted line and confirming a key are still `NSAlert`s.
@@ -201,6 +201,17 @@ modules is present, so a removed module only hides what it provided.
   `share-recheck` = `--no-open`, so System Settings is not opened again on every check) and, when it is on, the status, the join line
   in its own selectable field and the two steps. No terminal commands (`sudo systemsetup`, `--wake`) in the mask. A reply that is not
   JSON is reported, never rendered.
+- **Tailscale section.** `state()['tailscale']` is `tailscale_info()` (`remote tailscale show`, run in the same thread pool as the module
+  statuses; `{'available': False}` without the remote module, `{'available': True, 'error'}` when unreadable, never an exception). The
+  window only triggers `TAILSCALE_ACTIONS` (`up down login logout auto-on auto-off setup`) through `vibecode.py tailscale ACTION`; `setup`
+  just opens a Terminal with the module's fixed script. `tailscale_autostart(names)` runs before **every** workspace launch (`run_workspace`,
+  `start_workspace`, `open_workspace`, `open_folder`, the one-off `launch` entry both as `open launch` and directly) and never opens or
+  fails anything itself; it waits up to 10 s only for `[SSH: …]` projects or an unknown selection. Opening the overview does **not**
+  trigger it. Tests replace the hook in `setUp` (`self.autostart`) and set `VIBECODE_TAILSCALE=''`; `REAL_AUTOSTART` tests the real one.
+  Window model: `tailscaleRows()` with the state table `TAILSCALE_STATES`; an unknown state offers no guessed buttons. **"Aktualisieren" is a footer row in every state** (also after a read error): the overview reads the state only when it is built, so after the setup Terminal or the browser login nothing changes until it is clicked (a user once saw "nicht installiert" although the install had finished).
+- **Tailscale in the share mask.** `share --json` also carries `via`, `localLine` and `tailscale` (see the remote-ssh skill). `buildShare`
+  adds one status line about how far the line reaches and shows nothing for an older module that does not send them. The
+  *Remote-Ordner hinzufügen…* dialog is prefilled with the saved Mac's `user@host` (port 22 only), so the host is spelled the same everywhere.
 - Pasted lines are parsed in Python (`line_tokens`: `shlex`, then every `--option` is dropped) and validated again
   by `remote.py`. `allow` goes through `allow --check` (name + fingerprint as JSON, writes nothing) and an explicit
   confirmation in the window before `allow --yes`.

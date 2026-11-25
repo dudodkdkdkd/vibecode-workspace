@@ -1,6 +1,9 @@
 const vscode = require("vscode");
 const http = require("node:http");
 const https = require("node:https");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
 
 // Dev-Server wie Storybook brauchen deutlich länger als Vite. Der Tab zeigt
 // solange einen Hinweis und lädt die Seite, sobald der Server antwortet.
@@ -361,7 +364,54 @@ async function chooseTerminalLocations(settings, projects) {
     return choice;
 }
 
+// „Tailscale mit VibeCode starten und beenden“: Solange ein von VibeCode geöffnetes Fenster lebt, berührt es alle 15 Sekunden eine
+// Datei im Ordner tailscale-sessions des Remote-Moduls. Der Wächter dort trennt Tailscale erst, wenn keine Datei mehr frisch ist.
+// Gemeldet wird nur, wenn dieser Ordner existiert (die Funktion ist an) und das Fenster einen VibeCode-Workspace zeigt
+// (~/.vibe-workspaces/…). Fehlt die Meldung aus irgendeinem Grund, bleibt Tailscale an: im Zweifel wird nie getrennt.
+const HEARTBEAT_INTERVAL_MS = 15000;
+let stopHeartbeat = () => {};
+
+function sessionsFolder() {
+    const base = process.env.VIBECODE_REMOTE_DIR || path.join(os.homedir(), ".config", "vibecode-workspace", "remote");
+    return path.join(base, "tailscale-sessions");
+}
+
+function isVibeCodeWindow() {
+    // Auch ein SSH-Fenster: der Launcher öffnet dafür eine lokale …-SSH-….code-workspace-Datei mit remoteAuthority, VS Code kann ihre
+    // Adresse aber mit dem Remote-Schema liefern. Darum zählt nur der Ordner im Pfad, nicht das Schema.
+    const file = vscode.workspace.workspaceFile;
+    const where = file && (file.path || file.fsPath);
+    return typeof where === "string" && where.split(/[\\/]/).includes(".vibe-workspaces");
+}
+
+function startHeartbeat(context) {
+    stopHeartbeat();
+    if (!isVibeCodeWindow()) return;
+    const folder = sessionsFolder();
+    const file = path.join(folder, `${process.pid}.json`);
+    const beat = () => {
+        try {
+            if (fs.existsSync(folder)) fs.writeFileSync(file, JSON.stringify({ pid: process.pid, at: Date.now() }));
+        } catch {
+            // Eine fehlende Meldung heißt nur: Tailscale bleibt an.
+        }
+    };
+    beat();
+    const timer = setInterval(beat, HEARTBEAT_INTERVAL_MS);
+    stopHeartbeat = () => {
+        clearInterval(timer);
+        try {
+            fs.unlinkSync(file);
+        } catch {
+            // schon weg
+        }
+        stopHeartbeat = () => {};
+    };
+    context.subscriptions.push({ dispose: () => stopHeartbeat() });
+}
+
 async function activate(context) {
+    startHeartbeat(context);                      // vor allem Warten (Vertrauensfrage, Terminals): jedes Fenster meldet sich sofort
     const urls = vscode.workspace.getConfiguration("vibecodeWorkspace").get("autoOpenUrls", []);
     for (const url of Array.isArray(urls) ? urls : []) {
         if (typeof url !== "string" || !url.trim()) continue;
@@ -459,4 +509,8 @@ async function activate(context) {
     else context.subscriptions.push(vscode.workspace.onDidGrantWorkspaceTrust(start));
 }
 
-module.exports = { activate };
+function deactivate() {
+    stopHeartbeat();
+}
+
+module.exports = { activate, deactivate };

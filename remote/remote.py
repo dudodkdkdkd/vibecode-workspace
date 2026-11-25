@@ -3,6 +3,7 @@
 import datetime as dt
 import fcntl
 import getpass
+import ipaddress
 import json
 import math
 import os
@@ -413,6 +414,515 @@ SHARING_PANE = 'x-apple.systempreferences:com.apple.Sharing-Settings.extension'
 JOIN_USAGE = 'Aufruf: workspace remote ssh join benutzer@host [SHA256:…] [port]'
 
 
+# --- Tailscale ---------------------------------------------------------------------------------------------------
+# `<name>.local` (Bonjour) only exists in the same network. While Tailscale runs, the join line carries the tailnet host instead,
+# which also works away from home (and at home). Only the existing sshd + pinned host key flow is used, never `tailscale ssh`.
+TAILSCALE_CLIS = ('/Applications/Tailscale.app/Contents/MacOS/Tailscale', '/opt/homebrew/bin/tailscale', '/usr/local/bin/tailscale')
+TAILNET_ADDRESSES = ipaddress.ip_network('100.64.0.0/10')
+
+
+def tailscale_cli():
+    """Path of the Tailscale CLI or None. VIBECODE_TAILSCALE replaces the search (tests, unusual installs); empty means none."""
+    override = os.environ.get('VIBECODE_TAILSCALE')
+    candidates = [override] if override is not None else [shutil.which('tailscale'), *TAILSCALE_CLIS]
+    return next((c for c in candidates if c and Path(c).is_file() and os.access(c, os.X_OK)), None)
+
+
+def ipv4(value):
+    try:
+        return str(ipaddress.IPv4Address(value))
+    except ValueError:
+        return ''
+
+
+def tailnet_node(node):
+    """(DNS name without the trailing dot, first IPv4) of a node from `tailscale status --json`; '' for anything unusable.
+    IPv6 is ignored on purpose: host names may not contain ':' here."""
+    name = node.get('DNSName')
+    name = name.rstrip('.') if isinstance(name, str) else ''
+    if not SSH_HOST.fullmatch(name) or ':' in name:
+        name = ''
+    addresses = node.get('TailscaleIPs')
+    return name, next((ip for ip in map(ipv4, addresses if isinstance(addresses, list) else []) if ip), '')
+
+
+def tailscale_query():
+    """(info, data, problem) from `tailscale status --json`. Never raises.
+
+    `info` is what tailscale_state() returns, `data` the parsed status object ({} if unreadable) and `problem` is '' or
+    'denied' (the daemon refuses this user: the operator is not set, see TAILSCALE_SETUP) or 'daemon' (no answer: not running)."""
+    info = {'cli': tailscale_cli(), 'state': '', 'magic': False, 'name': '', 'ip': '', 'peers': []}
+    if not info['cli']:
+        return info, {}, ''
+    try:
+        # TAILSCALE_BE_CLI: the App Store build is the GUI app itself and would otherwise start it instead of answering.
+        result = subprocess.run([info['cli'], 'status', '--json'], capture_output=True, text=True, timeout=4,
+                                env={**os.environ, 'TAILSCALE_BE_CLI': '1'})
+    except (OSError, subprocess.SubprocessError):
+        return info, {}, 'daemon'
+    try:
+        data = json.loads(result.stdout)
+    except ValueError:
+        data = None
+    if not isinstance(data, dict):
+        text = (result.stderr + result.stdout).lower()
+        return info, {}, 'denied' if 'access denied' in text or 'permission denied' in text else 'daemon'
+    state, tailnet, me, peers = (data.get('BackendState'), data.get('CurrentTailnet'), data.get('Self'), data.get('Peer'))
+    info['state'] = state if isinstance(state, str) else ''
+    info['magic'] = isinstance(tailnet, dict) and tailnet.get('MagicDNSEnabled') is True
+    if isinstance(me, dict):
+        info['name'], info['ip'] = tailnet_node(me)
+    for peer in peers.values() if isinstance(peers, dict) else []:
+        if isinstance(peer, dict):
+            name, ip = tailnet_node(peer)
+            names = [name.lower(), name.split('.')[0].lower()] if name else []
+            info['peers'].append({'names': names, 'ip': ip, 'online': peer.get('Online') is True})
+    return info, data, ''
+
+
+def tailscale_state():
+    """What Tailscale on THIS Mac reports (see tailscale_query), without the details only the window needs.
+
+    {'cli': path or None, 'state': BackendState ('' if unknown), 'magic': MagicDNS on, 'name': this Mac's tailnet name,
+     'ip': its 100.x address, 'peers': [{'names': [lowercase full and short name], 'ip', 'online'}]}"""
+    return tailscale_query()[0]
+
+
+def tailscale_host(info):
+    """The host other Macs use for THIS Mac over Tailscale, '' if it is not running. The tailnet name only when MagicDNS is
+    on (it resolves nowhere else); otherwise the 100.x address, which resolves everywhere."""
+    if info['state'] != 'Running':
+        return ''
+    return info['name'] if info['magic'] and info['name'] else info['ip']
+
+
+def tailscale_kind(info):
+    """'running', 'off' (installed, not connected) or 'missing'."""
+    return 'running' if info['state'] == 'Running' else 'off' if info['cli'] else 'missing'
+
+
+def tailscale_reason(host, unresolved=False):
+    """Why a Tailscale host is not reachable, or '' when `host` is not one (then the usual hints apply).
+
+    A host counts as Tailscale's if it ends in .ts.net, is a 100.64/10 address, or is a name Tailscale itself knows. A name without a
+    dot that Tailscale does not know is just some SSH alias or LAN name: no Tailscale claim about it. `unresolved`: the name did not
+    resolve on this Mac."""
+    low = host.lower()
+    try:
+        address = ipaddress.IPv4Address(low) in TAILNET_ADDRESSES
+    except ValueError:
+        address = False
+    tailnet_host = address or low.endswith('.ts.net')
+    if not (tailnet_host or '.' not in low):
+        return ''
+    info = tailscale_state()
+    named = next((p for p in info['peers'] if low in p['names']), None)
+    peer = named or next((p for p in info['peers'] if low == p['ip']), None)
+    if peer is None and not tailnet_host:
+        return ''
+    if not info['cli']:
+        return 'Das Ziel ist ein Tailscale-Gerät, aber Tailscale ist auf diesem Mac nicht installiert.'
+    if info['state'] != 'Running':
+        return (f'Tailscale ist auf diesem Mac nicht verbunden{" (" + info["state"] + ")" if info["state"] else ""}: '
+                'Tailscale in der Menüleiste öffnen, anmelden und verbinden.')
+    if peer is None:
+        return ('Tailscale kennt dieses Gerät in deinem Tailnet nicht. Name oder 100.x-Adresse prüfen (am Remote-Mac: '
+                'workspace remote ssh share) und ob beide Macs im selben Tailscale-Konto angemeldet sind.')
+    asleep = (' Außerdem ist der Remote-Mac im Tailnet offline, vermutlich im Ruhezustand: dort Wachhalten einschalten '
+              '(workspace remote ssh share --wake).') if not peer['online'] else ''
+    if unresolved and named is not None and peer['ip']:
+        return (f'Tailscale kennt den Remote-Mac, aber der Name {host} lässt sich auf diesem Mac nicht auflösen (Tailscale-DNS ist hier '
+                f'wohl nicht aktiv). Als Host die Adresse {peer["ip"]} eintragen (workspace remote ssh join benutzer@{peer["ip"]}).' + asleep)
+    if not peer['online']:
+        return ('Der Remote-Mac ist im Tailnet offline, vermutlich im Ruhezustand: dort Wachhalten einschalten '
+                '(workspace remote ssh share --wake) und den Mac aufwecken.')
+    return ('Tailscale verbindet beide Macs, aber der SSH-Port antwortet nicht: am Remote-Mac „Entfernte Anmeldung“ '
+            'prüfen (workspace remote ssh share).')
+
+
+# --- Tailscale steuern: Status, Verbinden, Anmelden, Geräte, „mit VibeCode starten und beenden“ ----------------------------------
+# Never sudo, never `up` with flags (a flagless `up` just reconnects; flags on a configured node must all be repeated), never a
+# disconnect that the user did not ask for or that VibeCode did not itself cause by starting Tailscale (the "ours" marker).
+TAILSCALE_FILE = 'tailscale.json'            # {"version": 1, "auto": bool}; not config.json (simple_config() rewrites that one)
+TAILSCALE_OURS = 'tailscale-ours.json'       # {"boot", "launched", "seen", "lastSeen"}: VibeCode turned Tailscale on
+TAILSCALE_LOGIN = 'tailscale-login.json'     # {"pid"} of a login `up` that still waits for the browser
+TAILSCALE_SESSIONS = 'tailscale-sessions'    # one heartbeat file per VS Code window VibeCode opened (written by the extension)
+TAILSCALE_WATCH_LOCK = 'tailscale-watch.lock'
+HEARTBEAT_FRESH = 45                          # seconds; the extension touches its file every 15
+# The Homebrew daemon runs as root: without the operator setting a normal user is refused. Steps live in one place, the window's
+# "Einrichten…" opens a Terminal with them (the password is typed there; VibeCode never runs sudo).
+TAILSCALE_SETUP_HINT = ('Tailscale verweigert diesem Konto den Zugriff (der Dienst läuft als root). Einmal „Einrichten…“ ausführen: '
+                        'das setzt `sudo tailscale set --operator="$USER"`.')
+TAILSCALE_SETUP = r"""
+set -u
+BREW=""
+for candidate in /opt/homebrew/bin/brew /usr/local/bin/brew; do
+  [ -x "$candidate" ] && BREW="$candidate" && break
+done
+if [ -d /Applications/Tailscale.app ]; then
+  echo "Die Tailscale-App ist installiert. Zwei Tailscale-Dienste auf einem Mac stören sich: nutze die App oder entferne sie zuerst."
+  exit 1
+fi
+if [ -z "$BREW" ]; then
+  echo "Homebrew fehlt. Installation: https://brew.sh  Danach „Einrichten…“ noch einmal wählen."
+  exit 1
+fi
+"$BREW" list tailscale >/dev/null 2>&1 || "$BREW" install tailscale || exit 1
+echo "Gleich fragt macOS nach deinem Passwort (sudo): der Tailscale-Dienst läuft als Systemdienst."
+sudo "$BREW" services start tailscale || exit 1
+TAILSCALE="$("$BREW" --prefix)/bin/tailscale"
+for attempt in 1 2 3 4 5 6 7 8; do
+  "$TAILSCALE" status >/dev/null 2>&1 && break
+  sleep 1
+done
+sudo "$TAILSCALE" set --operator="$USER" || exit 1
+echo
+echo "Fertig. Im VibeCode-Fenster jetzt „Anmelden…“ wählen."
+printf "Zum Schließen Enter drücken: "
+read -r _
+"""
+
+
+def clean_text(value, limit=80):
+    """Text from Tailscale that the window will show: control characters out, length capped."""
+    return re.sub(r'[\x00-\x1f\x7f]', '', value)[:limit] if isinstance(value, str) else ''
+
+
+def tailscale_variant(cli):
+    return 'missing' if not cli else 'app' if str(cli).startswith('/Applications/Tailscale.app/') else 'cli'
+
+
+def tailscale_settings():
+    """{'auto': bool}. A corrupt file raises (never read as "off"), like every other file of ours."""
+    try:
+        saved = read(TAILSCALE_FILE)
+    except ValueError:
+        raise ValueError(f'{TAILSCALE_FILE} ist ungültig. Datei prüfen oder löschen.') from None
+    if saved is None:
+        return {'auto': False}
+    if (not isinstance(saved, dict) or set(saved) - {'version', 'auto'} or saved.get('version', 1) != 1
+            or type(saved.get('auto', False)) is not bool):
+        raise ValueError(f'{TAILSCALE_FILE} ist ungültig. Datei prüfen oder löschen.')
+    return {'auto': saved.get('auto', False)}
+
+
+def tailscale_auto(args):
+    if args not in (['on'], ['off']):
+        raise ValueError('Aufruf: workspace remote tailscale auto on|off')
+    settings = tailscale_settings()
+    settings['auto'] = args == ['on']
+    write(TAILSCALE_FILE, {'version': 1, 'auto': settings['auto']})
+    print('Tailscale startet und endet jetzt mit VibeCode.' if settings['auto'] else 'Tailscale wird nicht mehr von VibeCode gestartet.')
+
+
+def boot_id():
+    return run('/usr/sbin/sysctl', '-n', 'kern.boottime', check=False).stdout.strip()
+
+
+def tailscale_marker():
+    """The "VibeCode turned Tailscale on" marker, or None. A marker from before a reboot is void: the daemon comes back with its
+    old state by itself, and that would not be ours."""
+    try:
+        marker = read(TAILSCALE_OURS)
+    except ValueError:
+        marker = None
+    if isinstance(marker, dict) and marker.get('boot') == boot_id() and isinstance(marker.get('launched'), (int, float)):
+        return marker
+    (BASE / TAILSCALE_OURS).unlink(missing_ok=True)
+    return None
+
+
+def clear_ours():
+    (BASE / TAILSCALE_OURS).unlink(missing_ok=True)
+
+
+def tailscale_devices(data):
+    """Other devices of the tailnet for the window: online first, then by name. Every string is cleaned and capped."""
+    peers = data.get('Peer')
+    devices = []
+    for peer in peers.values() if isinstance(peers, dict) else []:
+        if not isinstance(peer, dict):
+            continue
+        name, ip = tailnet_node(peer)
+        seen = clean_text(peer.get('LastSeen'), 40)
+        devices.append({'name': clean_text(peer.get('HostName'), 60) or name.split('.')[0], 'dns': name, 'ip': ip,
+                        'os': clean_text(peer.get('OS'), 20), 'online': peer.get('Online') is True,
+                        'lastSeen': '' if seen.startswith('0001-') else seen})
+    return sorted(devices, key=lambda d: (not d['online'], d['name'].casefold()))[:200]
+
+
+def tailscale_show():
+    """One JSON object for the window: {variant, state, name, ip, tailnet, auto, autoError, ours, devices}.
+
+    state: missing | daemon-down | denied | needs-login | needs-approval | starting | stopped | running | unknown."""
+    info, data, problem = tailscale_query()
+    auto, auto_error = False, ''
+    try:
+        auto = tailscale_settings()['auto']
+    except ValueError as exc:
+        auto_error = str(exc)
+    if not info['cli']:
+        state = 'missing'
+    elif problem:
+        state = 'daemon-down' if problem == 'daemon' else problem
+    else:
+        state = {'Running': 'running', 'Stopped': 'stopped', 'NeedsLogin': 'needs-login', 'NeedsMachineAuth': 'needs-approval',
+                 'Starting': 'starting'}.get(info['state'], 'unknown')
+    tailnet = data.get('CurrentTailnet')
+    print(json.dumps({'variant': tailscale_variant(info['cli']), 'state': state, 'name': info['name'], 'ip': info['ip'],
+                      'tailnet': clean_text(tailnet.get('Name'), 80) if isinstance(tailnet, dict) else '',
+                      'auto': auto, 'autoError': auto_error, 'ours': tailscale_marker() is not None,
+                      'devices': tailscale_devices(data)}, ensure_ascii=False))
+
+
+def tailscale_command(cli, *args, timeout=20):
+    """Run the CLI once; a readable ValueError for a refusal or a timeout. Always as CLI (TAILSCALE_BE_CLI=1)."""
+    try:
+        result = subprocess.run([cli, *args], capture_output=True, text=True, timeout=timeout,
+                                env={**os.environ, 'TAILSCALE_BE_CLI': '1'})
+    except subprocess.TimeoutExpired:
+        raise ValueError(f'Tailscale „{args[0]}“ hat nicht rechtzeitig geantwortet.') from None
+    except OSError as exc:
+        raise ValueError(f'Tailscale konnte nicht gestartet werden: {exc}') from None
+    if result.returncode:
+        text = (result.stderr or result.stdout).strip()
+        if 'access denied' in text.lower() or 'permission denied' in text.lower():
+            raise ValueError(TAILSCALE_SETUP_HINT)
+        raise ValueError(clean_text((text.splitlines() or [f'Exit {result.returncode}'])[-1], 200))
+    return result
+
+
+def tailscale_ready():
+    """(cli, info, data) once Tailscale can be controlled, else a ValueError that says what is missing."""
+    info, data, problem = tailscale_query()
+    if not info['cli']:
+        raise ValueError('Tailscale ist nicht installiert. „Einrichten…“ zeigt die Schritte.')
+    if problem == 'denied':
+        raise ValueError(TAILSCALE_SETUP_HINT)
+    if problem:
+        raise ValueError('Der Tailscale-Dienst antwortet nicht. CLI-Variante: „Einrichten…“ startet ihn; App-Variante: die '
+                         'Tailscale-App öffnen.')
+    return info['cli'], info, data
+
+
+def tailscale_up():
+    """Connect (flagless `up`). A manual choice, so a VibeCode-started marker is dropped: the watcher must not undo it."""
+    cli, info, _ = tailscale_ready()
+    if info['state'] == 'NeedsLogin':
+        raise ValueError('Tailscale ist auf diesem Mac nicht angemeldet. Zuerst „Anmelden…“.')
+    if info['state'] != 'Running':
+        tailscale_command(cli, 'up', timeout=30)
+    clear_ours()
+    print('Tailscale ist verbunden.')
+
+
+def tailscale_down():
+    cli, info, _ = tailscale_ready()
+    if info['state'] == 'Running':
+        tailscale_command(cli, 'down')
+    clear_ours()
+    print('Tailscale ist getrennt.')
+
+
+def tailscale_logout():
+    cli, _, _ = tailscale_ready()
+    tailscale_command(cli, 'logout')
+    clear_ours()
+    print('Von Tailscale abgemeldet. „Anmelden…“ meldet diesen Mac wieder an.')
+
+
+def detached(command, out=subprocess.DEVNULL, env=None):
+    """Start `command` in a session of its own with no terminal, so it never keeps a Terminal tab open or dies with it."""
+    return subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=out, stderr=out, start_new_session=True, env=env)
+
+
+def pid_runs(pid, needle):
+    """True if process `pid` is still ours: its command line contains `needle` (a recycled pid is never signalled)."""
+    return needle in run('/bin/ps', '-p', str(pid), '-o', 'command=', check=False).stdout
+
+
+def tailscale_login(wait=15, sleep=time.sleep, clock=time.time):
+    """Start the browser login: a detached `up` waits for it, its AuthURL (from `status --json`) is opened and printed as JSON.
+
+    {"url": "https://…"} or {"url": ""} when this Mac is connected already. Only an https URL is ever opened."""
+    cli, info, data = tailscale_ready()
+    if info['state'] == 'Running':
+        print(json.dumps({'url': ''}))
+        return
+    try:
+        previous = read(TAILSCALE_LOGIN)
+    except ValueError:
+        previous = None
+    if isinstance(previous, dict) and isinstance(previous.get('pid'), int) and pid_runs(previous['pid'], f'{cli} up'):
+        os.kill(previous['pid'], signal.SIGTERM)                               # a login that nobody finished
+    BASE.mkdir(parents=True, exist_ok=True)
+    with (BASE / 'tailscale-login.log').open('w') as log:
+        child = detached([cli, 'up'], log, {**os.environ, 'TAILSCALE_BE_CLI': '1'})
+    write(TAILSCALE_LOGIN, {'pid': child.pid})
+    deadline = clock() + wait
+    while True:
+        _, data, problem = tailscale_query()
+        url = data.get('AuthURL')
+        if not url:
+            # Fallback: `up` schreibt „To authenticate, visit: https://…“ selbst, falls der Status den Link (noch) nicht nennt.
+            found = re.search(r'https://\S+', (BASE / 'tailscale-login.log').read_text(errors='replace')) if (BASE / 'tailscale-login.log').exists() else None
+            url = found.group(0) if found else url
+        if isinstance(url, str) and url.startswith('https://') and len(url) < 2000 and not re.search(r'[\x00-\x20\x7f]', url):
+            run('/usr/bin/open', url, check=False)
+            print(json.dumps({'url': url}))
+            return
+        if data.get('BackendState') == 'Running':
+            print(json.dumps({'url': ''}))
+            return
+        if problem == 'denied':
+            raise ValueError(TAILSCALE_SETUP_HINT)
+        if clock() >= deadline:
+            raise ValueError('Tailscale hat keinen Anmelde-Link geliefert. Läuft der Dienst? „Einrichten…“ prüft das.')
+        sleep(1)
+
+
+def live_sessions(now):
+    """Heartbeat files of VS Code windows VibeCode opened that were touched recently."""
+    folder = BASE / TAILSCALE_SESSIONS
+    live = []
+    for file in folder.glob('*.json') if folder.is_dir() else []:
+        try:
+            if 0 <= now - file.stat().st_mtime < HEARTBEAT_FRESH:
+                live.append(file)
+        except OSError:
+            pass
+    return live
+
+
+def watcher_running():
+    BASE.mkdir(parents=True, exist_ok=True)
+    with (BASE / TAILSCALE_WATCH_LOCK).open('a+') as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        fcntl.flock(lock, fcntl.LOCK_UN)
+        return False
+
+
+def spawn_watcher():
+    """Start the watcher once. Detached with its own session and no terminal, so it never keeps a Terminal tab open."""
+    (BASE / TAILSCALE_SESSIONS).mkdir(parents=True, exist_ok=True)      # the extension reports only while this folder exists
+    if watcher_running():
+        return
+    with (BASE / 'tailscale-watch.log').open('a') as log:
+        detached([sys.executable, str(Path(__file__).resolve()), 'tailscale', 'watch'], log)
+
+
+def tailscale_ensure(wait=0):
+    """VibeCode starts a workspace: connect Tailscale if "mit VibeCode starten und beenden" is on. Never raises, never blocks long.
+
+    Only a Tailscale that VibeCode itself turned on is ever turned off again later; one that was running already is left alone."""
+    try:
+        try:
+            if not tailscale_settings()['auto']:
+                return 'aus'
+        except ValueError:
+            return 'aus'                                                    # a corrupt settings file never makes a launch fail
+        info, _, problem = tailscale_query()
+        if not info['cli'] or problem or info['state'] == 'NeedsLogin':
+            return 'übersprungen'
+        now = time.time()
+        if info['state'] == 'Running':
+            marker = tailscale_marker()
+            if marker is None:
+                return 'lief schon'
+            write(TAILSCALE_OURS, dict(marker, launched=now, seen=False))      # a new launch: wait for its window again
+        else:
+            write(TAILSCALE_OURS, {'boot': boot_id(), 'launched': now, 'seen': False, 'lastSeen': 0})
+            if wait > 0:
+                try:
+                    subprocess.run([info['cli'], 'up'], capture_output=True, timeout=wait,
+                                   env={**os.environ, 'TAILSCALE_BE_CLI': '1'})
+                except subprocess.TimeoutExpired:
+                    pass                                                    # still connecting: the watcher goes on regardless
+            else:
+                detached([info['cli'], 'up'], env={**os.environ, 'TAILSCALE_BE_CLI': '1'})
+        spawn_watcher()
+        return 'verbunden' if wait > 0 else 'wird verbunden'
+    except (ValueError, OSError, subprocess.SubprocessError) as exc:
+        print(f'Tailscale-Autostart: {exc}', file=sys.stderr)
+        return 'Fehler'
+
+
+def tailscale_watch(poll=15, grace=60, patience=600, clock=time.time, sleep=time.sleep):
+    """Disconnect Tailscale once the last VS Code window VibeCode opened is gone — and only then.
+
+    All must hold: the marker says VibeCode turned it on, a heartbeat was seen since the last launch, none has been live for
+    `grace` seconds and Tailscale is still running. No heartbeat within `patience` (old extension, cancelled dialog): the marker is
+    dropped and Tailscale stays on. In doubt it stays on. A Mac that slept freezes the watcher and the windows alike: when the clock
+    jumped between two polls, the old heartbeats prove nothing, so `lastSeen` restarts and the windows get `grace` to report again
+    (otherwise opening the lid would disconnect Tailscale while Remote-SSH reconnects). Returns what happened, for the log and the tests."""
+    BASE.mkdir(parents=True, exist_ok=True)
+    with (BASE / TAILSCALE_WATCH_LOCK).open('a+') as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return 'läuft schon'
+        try:
+            last_poll = clock()
+            while True:
+                marker = tailscale_marker()
+                if marker is None:
+                    return 'keine Marke'
+                info = tailscale_state()
+                if info['state'] != 'Running':
+                    clear_ours()
+                    return 'nicht mehr verbunden'
+                now = clock()
+                woke, last_poll = now - last_poll > poll + 30, now
+                if live_sessions(now):
+                    write(TAILSCALE_OURS, dict(marker, seen=True, lastSeen=now))
+                elif woke:
+                    if marker.get('seen'):
+                        write(TAILSCALE_OURS, dict(marker, lastSeen=now))
+                elif marker.get('seen') and now - marker.get('lastSeen', 0) >= grace:
+                    tailscale_command(info['cli'], 'down')
+                    clear_ours()
+                    return 'getrennt'
+                elif not marker.get('seen') and now - marker['launched'] > patience:
+                    clear_ours()
+                    return 'keine Fenstermeldung'
+                sleep(poll)
+        finally:
+            folder = BASE / TAILSCALE_SESSIONS
+            for file in folder.glob('*') if folder.is_dir() else []:
+                file.unlink(missing_ok=True)
+            if folder.is_dir():
+                folder.rmdir()
+
+
+def tailscale_main(args):
+    sub, rest = (args[0] if args else 'show'), args[1:]
+    if sub == 'show' and not rest:
+        tailscale_show()
+    elif sub == 'up' and not rest:
+        tailscale_up()
+    elif sub == 'down' and not rest:
+        tailscale_down()
+    elif sub == 'login' and not rest:
+        tailscale_login()
+    elif sub == 'logout' and not rest:
+        tailscale_logout()
+    elif sub == 'auto':
+        tailscale_auto(rest)
+    elif sub == 'ensure':
+        if rest and not (len(rest) == 2 and rest[0] == '--wait' and rest[1].isdigit()):
+            raise ValueError('Aufruf: workspace remote tailscale ensure [--wait SEKUNDEN]')
+        print(tailscale_ensure(min(int(rest[1]), 30) if rest else 0))
+    elif sub == 'setup' and not rest:
+        os.execv('/bin/sh', ['/bin/sh', '-c', TAILSCALE_SETUP])
+    elif sub == 'watch' and not rest:
+        print(tailscale_watch())
+    else:
+        raise ValueError('tailscale-Befehle: show | up | down | login | logout | auto on|off | ensure [--wait N] | setup | watch')
+
+
 def ssh_target(value, port=22):
     """Validate "[benutzer@]host" plus port; reject anything ssh could parse as an option."""
     user, at, host = value.rpartition('@')
@@ -491,12 +1001,14 @@ def ssh_require_reachable(target):
     if reason is None:
         return
     unknown_name = 'nodename nor servname' in reason or 'not known' in reason
+    tailscale = tailscale_reason(target['host'], unknown_name)
+    # The general "Tailscale would help" tip only when nothing more specific is known: it would contradict a Tailscale-specific reason.
+    tip = (' Der Name wird nicht gefunden: sind beide Macs im selben Netz? Unterwegs hilft Tailscale auf beiden Macs: '
+           'als Host dann den Tailscale-Namen oder die 100.x-Adresse des Remote-Macs verwenden.') if unknown_name and not tailscale else ''
     raise ValueError(
         f'{target["host"]}:{target["port"]} nicht erreichbar ({reason}). Prüfen: Remote-Mac '
         'an und wach (dort: workspace remote on), Entfernte Anmeldung aktiv (dort: '
-        'workspace remote ssh info), gleiches Netz bzw. Tailscale läuft.' +
-        (' Der Name wird nicht gefunden: sind beide Macs im selben Netz? Unterwegs hilft Tailscale auf beiden Macs: '
-         'als Host dann den Tailscale-Namen oder die 100.x-Adresse des Remote-Macs verwenden.' if unknown_name else ''))
+        'workspace remote ssh info), gleiches Netz bzw. Tailscale läuft.' + tip + (' ' + tailscale if tailscale else ''))
 
 
 def ssh_connect(remote=None):
@@ -570,14 +1082,23 @@ def ssh_facts(waking=False):
     """What the other Mac needs to know about THIS Mac as an SSH target.
 
     {'listening': Remote Login on, 'awake': keep-awake on, 'fingerprint': sshd host key ('' if unreadable),
-     'line': the join line for the other Mac ('' while Remote Login is off)}"""
+     'line': the join line for the other Mac ('' while Remote Login is off),
+     'via': 'tailscale' if the line carries the tailnet host (works away from home), else 'local' (.local, same network only),
+     'localLine': the .local variant when `line` uses Tailscale (for the home network), else '',
+     'tailscale': 'running' | 'off' (installed, not connected) | 'missing'}"""
     name = run('/usr/sbin/scutil', '--get', 'LocalHostName', check=False).stdout.strip()
-    host = (name or socket.gethostname().split('.')[0]) + '.local'
+    local = (name or socket.gethostname().split('.')[0]) + '.local'
+    tailnet = tailscale_state()
+    host = tailscale_host(tailnet) or local
     listening, awake = ssh_listening(), waking or wake_active()
     fingerprint = host_fingerprint() if listening else ''
-    line = ' '.join(['workspace remote ssh join', f'{getpass.getuser()}@{host}'] +
-                    ([fingerprint] if fingerprint else [])) if listening else ''
-    return {'listening': listening, 'awake': awake, 'fingerprint': fingerprint, 'line': line}
+
+    def join_line(target):
+        return ' '.join(['workspace remote ssh join', f'{getpass.getuser()}@{target}'] +
+                        ([fingerprint] if fingerprint else [])) if listening else ''
+    via = 'local' if host == local else 'tailscale'
+    return {'listening': listening, 'awake': awake, 'fingerprint': fingerprint, 'line': join_line(host), 'via': via,
+            'localLine': join_line(local) if via == 'tailscale' else '', 'tailscale': tailscale_kind(tailnet)}
 
 
 def ssh_info(output=print, waking=False):
@@ -587,6 +1108,9 @@ def ssh_info(output=print, waking=False):
     output('SSH-ZUGANG DIESES MACS')
     output(f'Entfernte Anmeldung  {"AN (Port 22)" if listening else "AUS"}')
     output(f'Wachhalten           {"AN" if awake else "AUS (Mac kann einschlafen, dann ist SSH nicht erreichbar)"}')
+    output('Tailscale            ' + {'running': 'verbunden: dieser Mac ist auch unterwegs erreichbar',
+                                      'off': 'installiert, aber nicht verbunden: nur im selben Netz erreichbar',
+                                      'missing': 'nicht installiert: nur im selben Netz erreichbar (unterwegs: Tailscale auf beiden Macs)'}[facts['tailscale']])
     if not listening:
         output('Aktivieren: Systemeinstellungen → Allgemein → Teilen → Entfernte Anmeldung')
         output('            (oder im Terminal: sudo systemsetup -setremotelogin on)')
@@ -598,6 +1122,9 @@ def ssh_info(output=print, waking=False):
         output('Host-Schlüssel nicht lesbar: der andere Mac kann den Fingerprint nicht prüfen.')
     output('Auf dem anderen Mac ausführen:')
     output('  ' + facts['line'])
+    if facts['localLine']:
+        output('Nur im selben Netz geht auch:')
+        output('  ' + facts['localLine'])
     return facts['line']
 
 
@@ -632,7 +1159,8 @@ def ssh_share(args):
         else:
             copied = clipboard(facts['line'])
         print(json.dumps({'remoteLogin': facts['listening'], 'awake': facts['awake'], 'line': facts['line'],
-                          'fingerprint': bool(facts['fingerprint']), 'copied': copied, 'settingsOpened': opened},
+                          'fingerprint': bool(facts['fingerprint']), 'copied': copied, 'settingsOpened': opened,
+                          'via': facts['via'], 'localLine': facts['localLine'], 'tailscale': facts['tailscale']},
                          ensure_ascii=False))
         return
     line = ssh_info(print, waking)
@@ -1225,6 +1753,8 @@ def main(args):
             raise ValueError('ssh-Befehle: ssh share [--wake] | ssh join benutzer@host [SHA256:…] | '
                              'ssh allow \'<schlüssel>\' | ssh run -- <befehl> | ssh | ssh pair | '
                              'ssh set benutzer@host [port] | ssh info')
+    elif cmd == 'tailscale':
+        tailscale_main(args[1:])
     elif cmd == 'summary':
         summary()
     elif cmd == 'wake-state':
@@ -1241,7 +1771,7 @@ def main(args):
         PLIST.unlink(missing_ok=True)
         print('Remote-Dienst entfernt. Konfiguration bleibt erhalten.')
     else:
-        raise ValueError('Befehle: control | on | off | status | ssh | install | uninstall')
+        raise ValueError('Befehle: control | on | off | status | ssh | tailscale | install | uninstall')
 
 
 if __name__ == '__main__':

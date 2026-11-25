@@ -62,6 +62,8 @@ function makeBackend(app, python, core) {
         // Suchordner: {message, warning}; Fehler kommen als Ausnahme mit lesbarem Grund.
         folder: (action, options) => JSON.parse(call("folders", action, "--json",
             ...Object.keys(options || {}).filter((key) => options[key]).map((key) => `--${key}=${options[key]}`))),
+        // Tailscale: eine feste Aktion (up, down, login, logout, auto-on, auto-off, setup); die Antwort ist Text, bei "login" JSON {url}.
+        tailscale: (action) => call("tailscale", action),
         // Ergebnis ist immer {code, out, err}: Exit-Code 2 von "join" heißt "noch nicht freigegeben".
         ssh: (action, line) => JSON.parse(call("_ssh", action, ...(line === undefined ? [] : [`--line=${line}`]))),
     };
@@ -239,13 +241,13 @@ function newConnection(ui, backend, ssh) {
     const result = backend.ssh("join", answer.line);
     if (result.code === 0) {
         const connected = /Verbunden mit (.+?)\. Befehle/.exec(result.out);
-        ui.info(connected ? `Verbunden mit ${connected[1]} ✓\n\nIm Bereich SSH kannst du jetzt auf „Verbinden“ klicken.` : result.out);
+        ui.info(connected ? `Verbunden mit ${connected[1]} ✓\n\nIm Bereich Remote kannst du jetzt auf „Verbinden“ klicken.` : result.out);
     } else if (result.code === 2) {
         const allow = allowLine(result.out);
         ui.infoWithCopy("Noch nicht freigegeben: Der andere Mac muss dich noch freigeben.\n\n" +
-            "1. Dort: VibeCode Workspace → Bereich SSH → Diesen Mac freigeben… → Schlüssel eintragen… und diese Zeile einfügen " +
+            "1. Dort: VibeCode Workspace → Bereich Remote → Diesen Mac freigeben… → Schlüssel eintragen… und diese Zeile einfügen " +
             "(sie liegt in der Zwischenablage):\n\n" + allow +
-            "\n\n2. Danach hier im Bereich SSH auf „Verbinden“ klicken.", allow);
+            "\n\n2. Danach hier im Bereich Remote auf „Verbinden“ klicken.", allow);
     } else {
         ui.error(result.err || result.out);
     }
@@ -280,7 +282,7 @@ function allowFlow(ui, backend) {
     }
     if (!ui.confirmAllow(key.name, key.fingerprint)) return;
     const done = backend.ssh("allow", line);
-    if (done.code === 0) ui.info(`Freigegeben: ${key.name}.\n\nAuf dem anderen Mac jetzt im Bereich SSH auf Verbinden klicken.`);
+    if (done.code === 0) ui.info(`Freigegeben: ${key.name}.\n\nAuf dem anderen Mac jetzt im Bereich Remote auf Verbinden klicken.`);
     else ui.error(done.err || done.out);
 }
 
@@ -367,11 +369,14 @@ function perform(ui, backend, state, choice) {
         return false;
     }
     case "addRemoteFolder": {
-        const entry = ui.askRemoteFolder("");
+        // Der Host des verbundenen Macs ist vorbelegt (derselbe Text wie im SSH-Ziel, also auch ein Tailscale-Name): so steht er überall
+        // gleich geschrieben, und Remote-Projekte heißen „… [SSH: host]“. Nur bei Port 22, denn ein Port passt nicht in den Host-Text.
+        const mac = state.ssh && state.ssh.mac;
+        const entry = ui.askRemoteFolder("", mac && (mac.port || 22) === 22 ? `${mac.user ? mac.user + "@" : ""}${mac.host}` : undefined);
         if (!entry) return false;
         const result = backend.folder("add-remote", { host: entry.host, root: entry.root });
         ui.info(result.message + (result.warning
-            ? `\n\n⚠︎ ${result.warning}\n\nDie Anmeldung ohne Passwort richtest du im Bereich SSH unter „Neue Verbindung…“ → Geführte Einrichtung ein.`
+            ? `\n\n⚠︎ ${result.warning}\n\nDie Anmeldung ohne Passwort richtest du im Bereich Remote unter „Neue Verbindung…“ → Geführte Einrichtung ein.`
             : ""));
         return false;
     }
@@ -422,6 +427,39 @@ function perform(ui, backend, state, choice) {
             backend.preset("move", { path: choice.path, to: choice.to });
         }
         return false;
+    case "tailscaleSetup":
+        if (ui.confirmTailscale("setup")) ui.info(backend.tailscale("setup"));
+        return false;
+    case "tailscaleUp":
+    case "tailscaleDown":
+        backend.tailscale(choice.action === "tailscaleUp" ? "up" : "down");
+        return false;
+    case "tailscaleAuto":
+        backend.tailscale(choice.enabled ? "auto-on" : "auto-off");
+        return false;
+    case "tailscaleLogin": {
+        // Der Anmelde-Link kann bis zu 15 Sekunden brauchen und während der Aktion ist das Fenster weg: erst ein Hinweis.
+        ui.notify("Hole den Anmelde-Link von Tailscale …");
+        let result;
+        try {
+            result = JSON.parse(backend.tailscale("login"));
+        } catch (error) {
+            if (error instanceof SyntaxError) throw new Error("Die Antwort von Tailscale war nicht lesbar.");
+            throw error;
+        }
+        ui.info(result.url
+            ? "Der Anmelde-Link wurde im Browser geöffnet. Melde dich dort an und klicke danach im Bereich Remote auf „Aktualisieren“.\n\n" + result.url
+            : "Dieser Mac ist schon bei Tailscale angemeldet und verbunden.");
+        return false;
+    }
+    case "tailscaleLogout":
+        if (ui.confirmTailscale("logout")) backend.tailscale("logout");
+        return false;
+    case "tailscaleDevices":
+        ui.info(tailscaleDevicesText(state.tailscale));
+        return false;
+    case "tailscaleRefresh":
+        return false;                                   // die Übersicht liest den Stand ohnehin neu
     case "sshNew":
         return newConnection(ui, backend, state.ssh);
     case "sshShare":
@@ -449,6 +487,75 @@ function flow(ui, backend) {
             ui.error(cleanMessage(error));
         }
     }
+}
+
+// ---------------------------------------------------------------- Tailscale (Modell, ohne Widgets)
+
+// Je Zustand: Punkt, Text, Knöpfe. Ohne Zustand zu raten: ein unbekannter Zustand bietet nur „Aktualisieren“ an.
+const TAILSCALE_STATES = {
+    missing: { level: "off", text: "nicht installiert", buttons: ["setup"],
+        note: "„Einrichten…“ öffnet ein Terminal: Homebrew, einmal dein Admin-Passwort." },
+    "daemon-down": { level: "warn", text: "Dienst antwortet nicht", buttons: ["setup"],
+        note: "„Einrichten…“ startet den Dienst (Kommandozeile), oder die Tailscale-App öffnen." },
+    denied: { level: "warn", text: "Zugriff verweigert", buttons: ["setup"],
+        note: "„Einrichten…“ erlaubt diesem Konto die Steuerung (einmal sudo im Terminal)." },
+    "needs-login": { level: "warn", text: "nicht angemeldet", buttons: ["login"] },
+    "needs-approval": { level: "warn", text: "wartet auf Freigabe im Tailnet", buttons: [],
+        note: "Ein Administrator deines Tailnets muss dieses Gerät erst freigeben." },
+    starting: { level: "warn", text: "verbindet …", buttons: [] },
+    stopped: { level: "off", text: "getrennt", buttons: ["up", "logout"] },
+    running: { level: "ok", text: "verbunden", buttons: ["down", "devices", "logout"] },
+    unknown: { level: "warn", text: "Status unbekannt", buttons: [] },
+};
+
+const TAILSCALE_BUTTONS = {
+    setup: { label: "Einrichten…", action: { action: "tailscaleSetup" } },
+    login: { label: "Anmelden…", action: { action: "tailscaleLogin" } },
+    up: { label: "Verbinden", action: { action: "tailscaleUp" } },
+    down: { label: "Trennen", action: { action: "tailscaleDown" } },
+    devices: { label: "Geräte…", action: { action: "tailscaleDevices" } },
+    logout: { label: "Abmelden…", action: { action: "tailscaleLogout" } },
+};
+
+// Die Übersicht liest den Stand nur beim Aufbau. Nach dem Einrichten im Terminal oder der Anmeldung im Browser zeigt sie ihn erst
+// nach einem Klick hierauf; darum gibt es den Knopf in jedem Zustand (auch bei einem Lesefehler).
+const TAILSCALE_REFRESH = { type: "footer", buttons: [{ label: "Aktualisieren", action: { action: "tailscaleRefresh" } }] };
+
+function tailscaleRows(tailscale) {
+    const rows = [];                       // ohne eigene Überschrift: der Bereich heißt „Remote“
+    if (tailscale.error) {
+        rows.push({ type: "note", text: `⚠︎ ${tailscale.error}`, level: "warn" }, TAILSCALE_REFRESH);
+        return rows;
+    }
+    const known = TAILSCALE_STATES[tailscale.state] || TAILSCALE_STATES.unknown;
+    // Das Wichtige zuerst: der lange Tailnet-Name steht hinten, denn dort wird die Zeile gekürzt.
+    const detail = [known.text];
+    if (tailscale.variant === "app" || tailscale.variant === "cli") detail.push(tailscale.variant === "app" ? "App" : "Kommandozeile");
+    if (tailscale.ours) detail.push("von VibeCode gestartet");
+    if (tailscale.state === "running") detail.push(...[tailscale.ip, tailscale.name].filter(Boolean));
+    rows.push({ type: "item", title: "Tailscale", detail: detail.join(" · "), level: known.level,
+        buttons: known.buttons.map((name) => TAILSCALE_BUTTONS[name]) });
+    if (known.note) rows.push({ type: "note", text: known.note });
+    // Der Schalter: Tailscale startet mit einem Workspace und endet, wenn dessen letztes Editor-Fenster zu ist.
+    rows.push({ type: "item", title: "Mit VibeCode starten und beenden", level: tailscale.auto ? "ok" : "off",
+        detail: tailscale.auto
+            ? "Startet mit jedem Workspace, endet nach dem letzten VibeCode-Editor-Fenster."
+            : "Aus. Tailscale bleibt, wie du es eingestellt hast.",
+        buttons: [{ label: "Aktiv", checkbox: true, checked: Boolean(tailscale.auto),
+            action: { action: "tailscaleAuto", enabled: !tailscale.auto } }] });
+    if (tailscale.autoError) rows.push({ type: "note", text: `⚠︎ ${tailscale.autoError}`, level: "warn" });
+    rows.push(TAILSCALE_REFRESH);
+    return rows;
+}
+
+function tailscaleDevicesText(tailscale) {
+    const lines = [`Dieser Mac: ${[tailscale.name, tailscale.ip].filter(Boolean).join(" · ") || "unbekannt"}`];
+    const devices = tailscale.devices || [];
+    lines.push("", devices.length ? `Weitere Geräte${tailscale.tailnet ? ` in ${tailscale.tailnet}` : ""} (${devices.length}):`
+        : "Keine weiteren Geräte im Tailnet gefunden.");
+    devices.forEach((device) => lines.push([`${device.online ? "●" : "○"} ${device.name}`, device.ip, device.os,
+        device.online || !device.lastSeen ? "" : `zuletzt ${device.lastSeen.slice(0, 10)}`].filter(Boolean).join(" · ")));
+    return lines.join("\n");
 }
 
 // ---------------------------------------------------------------- Übersicht (Modell, ohne Widgets)
@@ -562,8 +669,11 @@ function dashboardModel(state) {
         }
     }
 
-    if (state.ssh && state.ssh.available) {
-        rows.push({ type: "section", text: "SSH" });
+    // Ein Bereich „Remote“: SSH-Verbindungen und Tailscale gehören zusammen (Tailscale ist der Weg zum anderen Mac, SSH die Verbindung).
+    const hasSsh = Boolean(state.ssh && state.ssh.available);
+    const hasTailscale = Boolean(state.tailscale && state.tailscale.available);
+    if (hasSsh || hasTailscale) rows.push({ type: "section", text: "Remote" });
+    if (hasSsh) {
         const items = sshItems(state.ssh);
         if (!items.length) rows.push({ type: "note", text: "Noch keine Verbindung eingerichtet." });
         items.forEach((item) => rows.push({
@@ -575,6 +685,8 @@ function dashboardModel(state) {
         if (state.ssh.share) footer.push({ label: "Diesen Mac freigeben…", action: { action: "sshShare" } });
         rows.push({ type: "footer", buttons: footer });
     }
+
+    if (hasTailscale) tailscaleRows(state.tailscale).forEach((row) => rows.push(row));
 
     const wake = state.settings && state.settings.wake;
     if (wake || state.entries.length) {
@@ -813,6 +925,13 @@ function buildShare(share, notice) {
         const status = (notice ? [notice] : []).concat(["Bereit: Dieser Mac nimmt SSH-Verbindungen an. ✓",
             share.awake ? "Wachhalten: an ✓" : "Wachhalten: aus. Der Mac kann einschlafen, dann ist er per SSH nicht erreichbar."]);
         if (!share.fingerprint) status.push("⚠︎ Der Host-Schlüssel ist nicht lesbar: der andere Mac kann den Fingerprint nicht prüfen.");
+        // Wie weit die Zeile reicht: über Tailscale auch unterwegs, über den .local-Namen nur im selben Netz (ältere Module melden nichts).
+        const reach = { running: share.via === "tailscale"
+                ? "Tailscale: verbunden ✓ Die Zeile gilt auch unterwegs. Der andere Mac braucht Tailscale im selben Konto."
+                : "Tailscale: verbunden, aber ohne nutzbaren Namen. Die Zeile gilt nur im selben Netz.",
+            off: "Tailscale: installiert, aber nicht verbunden. Die Zeile gilt nur im selben Netz.",
+            missing: "Tailscale: nicht installiert. Die Zeile gilt nur im selben Netz. Für unterwegs Tailscale auf beiden Macs installieren." }[share.tailscale];
+        if (reach) status.push(reach);
         alert.informativeText = $(`${status.join("\n")}\n\n1. Auf dem anderen Mac: VibeCode → SSH → Neue Verbindung… → ` +
             `„Mit der Zeile eines anderen Macs verbinden“ und diese Zeile einfügen ` +
             `${share.copied ? "(sie liegt in der Zwischenablage):" : "(das Kopieren hat nicht geklappt, markiere sie und kopiere sie selbst):"}`);
@@ -1140,9 +1259,9 @@ function nativeUi(app) {
                 throw error;
             }
         },
-        askRemoteFolder(note) {
+        askRemoteFolder(note, suggestedHost) {
             let message = note;
-            let draft = { host: "", root: "" };
+            let draft = { host: suggestedHost || "", root: "" };
             for (;;) {
                 const built = buildRemoteFolder(message, draft);
                 const response = present(built.alert, built);
@@ -1151,6 +1270,21 @@ function nativeUi(app) {
                 if (draft.host) return draft;
                 message = "Gib den SSH-Host an, zum Beispiel spark oder benutzer@server.";
             }
+        },
+        confirmTailscale(kind) {
+            const texts = {
+                setup: ["Tailscale einrichten?", "Ein Terminal öffnet sich und installiert Tailscale als reines Kommandozeilenprogramm " +
+                    "(Homebrew) und startet den Systemdienst. Dafür fragt macOS dort einmal nach deinem Admin-Passwort; VibeCode sieht es nie. " +
+                    "Die Tailscale-App wird dafür nicht gebraucht.", "Terminal öffnen"],
+                logout: ["Von Tailscale abmelden?", "Dieser Mac verlässt dein Tailnet und ist nicht mehr erreichbar, bis du dich wieder " +
+                    "anmeldest. Laufende Verbindungen, auch Remote-Sitzungen im Editor, brechen ab.", "Abmelden"],
+            }[kind];
+            const alert = $.NSAlert.alloc.init;
+            alert.messageText = $(texts[0]);
+            alert.informativeText = $(texts[1]);
+            alert.addButtonWithTitle($(texts[2]));
+            alert.addButtonWithTitle($("Abbrechen"));
+            return isButton(present(alert, null), $.NSAlertFirstButtonReturn);
         },
         confirmRemoveFolder(label) {
             const alert = $.NSAlert.alloc.init;

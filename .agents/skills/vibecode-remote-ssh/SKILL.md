@@ -18,7 +18,7 @@ across (it is also copied to the clipboard, so Universal Clipboard usually does 
 W="$(git rev-parse --show-toplevel)/workspaces/workspace"   # do not assume `workspace` is on PATH
 ```
 
-The user can do all of this without an agent in the app window (Bereich **SSH** → *Diesen Mac freigeben…* /
+The user can do all of this without an agent in the app window (Bereich **Remote** → *Diesen Mac freigeben…* /
 *Neue Verbindung…*). Same commands underneath, so what follows applies to both. For a window-less check,
 `ssh show` prints the saved target as JSON and `ssh allow --check '<key>'` prints name, fingerprint and whether the key
 is already authorized, without writing anything.
@@ -56,8 +56,8 @@ To take access away again, delete that key's line from `~/.ssh/authorized_keys` 
    |------|---------|------|
    | 0 | `✔ Verbunden` | do the task with `ssh run` |
    | 2 | not authorized yet; it printed `workspace remote ssh allow '<key>'` | give that line to the user for the remote Mac (Role A step 4), then `join` again |
-   | 1, `nicht erreichbar … nodename nor servname` | the name did not resolve (another network, or no Bonjour across subnets). The probe is `/usr/bin/nc` on purpose: python.org's Python cannot resolve `.local` names on some Macs (`[Errno 8]`) while `ssh` can, so never switch it back to `socket.create_connection` | use the remote Mac's IP (`ipconfig getifaddr en0`, Wi-Fi `en1`) or its Tailscale name / 100.x address in the `join` line |
-   | 1, `nicht erreichbar` | remote Mac asleep, Remote Login off, other network | ask the user to run `share` on the remote Mac; away from home both Macs need Tailscale and the host must be its Tailscale name/IP, not `*.local` |
+   | 1, `nicht erreichbar … nodename nor servname` | the name did not resolve (another network, or no Bonjour across subnets). The probe is `/usr/bin/nc` on purpose: python.org's Python cannot resolve `.local` names on some Macs (`[Errno 8]`) while `ssh` can, so never switch it back to `socket.create_connection` | run `share` on the remote Mac again (with Tailscale running it prints the tailnet host), or use the remote Mac's IP (`ipconfig getifaddr en0`, Wi-Fi `en1`) or its Tailscale name / 100.x address in the `join` line |
+   | 1, `nicht erreichbar` | remote Mac asleep, Remote Login off, other network | ask the user to run `share` on the remote Mac; away from home both Macs need Tailscale and the host must be its Tailscale name/IP, not `*.local`. For a Tailscale host the message already names the reason (Tailscale missing/not connected here, peer offline = asleep, unknown device, or Remote Login not answering): relay it, do not guess |
    | 1, `stimmt NICHT mit dem Fingerprint überein` | wrong machine or someone in between | **stop**, tell the user, do not retry or bypass |
    | 1, `Host-Schlüssel unbekannt oder geändert` | host key missing or changed | ask for a fresh `join` line from `share`; never edit `known_hosts` or use `StrictHostKeyChecking=no` |
 
@@ -104,6 +104,46 @@ own check; anything else belongs to the remote command.
   must start with a key type (no `command="…"` prefix); the host key is pinned only when its
   fingerprint matches; `allow` refuses without `--yes` when there is no terminal; corrupt
   `ssh.json` raises instead of defaulting.
+- **Tailscale** (`tailscale_state`, `tailscale_host`, `tailscale_reason` in `remote.py`): `share` puts the tailnet host in the join line
+  while `BackendState` is `Running` — the MagicDNS name only if `CurrentTailnet.MagicDNSEnabled` is true, otherwise the IPv4 `100.x`
+  address (a name would not resolve without MagicDNS); IPv6 and names that do not match `SSH_HOST` are ignored. The CLI is found in
+  `PATH`, `/Applications/Tailscale.app/Contents/MacOS/Tailscale` (that is the GUI binary, so it is always run with
+  `TAILSCALE_BE_CLI=1`), then the Homebrew paths; `VIBECODE_TAILSCALE` replaces the search (empty = none). Everything about Tailscale is
+  read through `status --json` with a 4 s timeout and **never raises**: no CLI, a stopped daemon or garbage output falls back to `.local`.
+  `ssh_facts` adds `via` (`tailscale`|`local`), `localLine` (the `.local` line for the home network) and `tailscale`
+  (`running`|`off`|`missing`); `share --json` passes them on and the window shows how far the line reaches. `.local` targets never
+  start the CLI. Tests set `VIBECODE_TAILSCALE=''` in `setUp` and use a stub script with synthetic names (`*.example-tailnet.ts.net`,
+  `100.64.0.5`); never copy real `tailscale status` output anywhere. **Not verified against a real Tailscale.**
+- **Controlling Tailscale** (`remote.py tailscale show|up|down|login|logout|auto on|off|ensure [--wait N]|setup|watch`; the window and
+  `vibecode.py tailscale ACTION` call these, `TAILSCALE_ACTIONS` is a fixed list):
+  - `up` is **bare** (flags on a configured node must all be repeated); it is refused while `NeedsLogin` (it would block forever). A manual
+    `up`/`down`/`logout` deletes the `tailscale-ours.json` marker so the watcher never undoes a manual choice.
+  - `login` starts a detached `up`, polls `status --json` for the top-level `AuthURL` and opens it only if it starts with `https://`; a stale
+    login pid is signalled only after `pid_runs` confirms its command line is `<cli> up`. If the status does not carry `AuthURL` (yet) the https link that `up` prints into `tailscale-login.log` is used.
+    Against the real CLI (1.104.7, Homebrew) verified: logged out = `BackendState` `NeedsLogin`, `AuthURL` exists (empty), `Peer` is `null`.
+  - The Homebrew daemon runs as root: a normal user gets *Access denied* until `sudo tailscale set --operator="$USER"` ran once. That is why
+    `setup` exists; it is a fixed `/bin/sh` script (`TAILSCALE_SETUP`, nothing interpolated, `sudo` only for `services start` and `set --operator`),
+    run in Terminal, and refuses when `/Applications/Tailscale.app` exists. VibeCode itself never runs sudo.
+  - Settings live in `tailscale.json` (`{"version": 1, "auto": bool}`), **not** `config.json`. A corrupt file raises in `show` (the window warns)
+    but `ensure` treats it as off and never fails a launch.
+  - `ensure` (called by core before every workspace launch, `tailscale_autostart`) only acts when `auto` is on and Tailscale is controllable
+    (not NeedsLogin/denied/daemon down). If Tailscale was **already running** and there is no marker it does nothing and stays out of the way.
+    Otherwise it writes the marker `{boot, launched, seen, lastSeen}` (`boot` = `kern.boottime`, so a marker from before a reboot is void),
+    runs `up` (detached, or waited for with `--wait N`, capped 30) and starts the watcher once (`tailscale-watch.lock` flock, `detached()` =
+    own session, no terminal, so it never keeps a Terminal tab open).
+  - The watcher disconnects only if **all** hold: marker is ours, a heartbeat was seen since the last launch, none has been live for 60 s
+    (`HEARTBEAT_FRESH` = 45 s), and Tailscale is still `Running`. No heartbeat within 10 minutes: drop the marker and leave Tailscale on.
+    In doubt it stays on. **Sleep/wake:** a Mac that slept pauses the watcher and the extension alike, so when the clock jumped by more than
+    `poll + 30` s between two polls the old heartbeats prove nothing: `lastSeen` restarts and the windows get a full grace period to report
+    again (without this, opening the lid would disconnect Tailscale while Remote-SSH reconnects; two tests pin it). A watcher that exits at the
+    moment a new launch starts can leave that launch without a watcher: Tailscale then stays on (fail-safe, known limitation). The heartbeats are files in `tailscale-sessions/` written by the `auto-open-tabs` extension (>= 0.0.7) only for
+    windows whose workspace file lives in `~/.vibe-workspaces/` and only while that folder exists (`spawn_watcher` creates it).
+  - Tests use a fake CLI script (`fake_tailscale`), `detached`/`spawn_watcher` patched, a fake clock for the watcher; never a real
+    `up`, `down`, `logout` or browser. Verified once with real processes against the fake CLI (detached watcher, `down` after the heartbeat
+    stopped). **Not verified against a real Tailscale or a real VS Code window.**
+- The host string must be written identically in `ssh.json`, `known_hosts` (`join` pins that exact string) and `remote-hosts.json`
+  (repo search; the window prefills it from the saved target). Remote projects are named `<folder> [SSH: <host>]`, so changing the host
+  renames them and saved workspaces show them as missing.
 - Only one target is supported. Several would need a name → target map in `ssh.json`.
 - Tests: `python3 -m unittest tests.test_remote` (uses real `ssh-keygen`, never touches
   `~/.ssh`: tests patch `SSH_DIR`). `tests/test_local_dev.py` has 3 failing tests on a clean

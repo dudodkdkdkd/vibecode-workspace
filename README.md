@@ -31,7 +31,7 @@ nichts ist hinter einem Menü versteckt, und jede Zeile hat ihren Status und ihr
 | **Workspaces** | jeder gespeicherte Workspace mit Projekten und Schreibtisch-Shortcut (⚠︎ wenn ein Projekt fehlt), spontane Projektauswahl | Kästchen **Quick-Öffnen**, **Starten**, **Bearbeiten…**, **Workspace anlegen…**, **Einmaliger Workspace…**, **Shortcuts erneuern** |
 | **Repository-Suche** | alle Ordner, in denen VibeCode nach Git-Repositories sucht, lokal und auf SSH-Hosts, mit Zahl der Funde | Kästchen **Quick-Öffnen** (lokale Ordner), **Ordner hinzufügen…**, **Remote-Ordner hinzufügen…**, **Entfernen** |
 | **Presets pro Repository** | der allgemeine Standard (gilt ohne eigenes Preset) und welche Terminals und Browser-Tabs je Repository starten; Presets von verschobenen Repositories | **Festlegen…**, **Bearbeiten…**, **Zurücksetzen**, **Übernehmen**, **Preset anlegen…** |
-| **SSH** | deine SSH-Hosts mit Zahl der gefundenen Repositories, dazu der gespeicherte Mac (siehe unten) | **Verbinden**, **Neue Verbindung…**, **Diesen Mac freigeben…** |
+| **Remote** | oben SSH: deine SSH-Hosts mit Zahl der gefundenen Repositories, dazu der gespeicherte Mac (siehe unten). Darunter Tailscale: Zustand (verbunden, getrennt, nicht angemeldet, nicht installiert …), App oder Kommandozeile, und der Schalter „Mit VibeCode starten und beenden“ | SSH: **Verbinden**, **Neue Verbindung…**, **Diesen Mac freigeben…**. Tailscale: **Einrichten…**, **Anmelden…**, **Verbinden** / **Trennen**, **Geräte…**, **Abmelden…**, Kästchen **Aktiv**, **Aktualisieren** |
 | **App-Einstellungen** | Wachhalten mit ausgewählten Apps, Local Dev mit Status | **Einschalten** / **Ausschalten**, **Apps wählen…**, Local Dev: **Einstellen…** und **Öffnen** |
 
 Der Punkt vor einer Zeile zeigt den Zustand: grün = eingerichtet und in Ordnung, orange = braucht Aufmerksamkeit
@@ -159,7 +159,7 @@ beim nächsten Start der Projektterminals. Sind alle Projektterminals geschlosse
 
 ### SSH im Fenster
 
-Der Bereich **SSH** zeigt deine eingerichteten Verbindungen: die SSH-Hosts mit Repository-Suche (mit der Anzahl der zuletzt
+Im Bereich **Remote** zeigt der obere Teil (SSH) deine eingerichteten Verbindungen: die SSH-Hosts mit Repository-Suche (mit der Anzahl der zuletzt
 gefundenen Repositories) und den gespeicherten Remote-Mac. Den Bereich gibt es nur, wenn ein Modul SSH anbietet.
 Die Übersicht fragt dabei **keinen Host per SSH** an, sie zeigt den zuletzt gefundenen Stand.
 
@@ -174,13 +174,60 @@ Zwischen zwei Macs, jeweils mit dieser App: auf dem **Remote-Mac** *Diesen Mac f
 einfügen, Fingerprint prüfen, bestätigen; auf dem **Client-Mac** *Verbinden*. *Wach halten* startet auch die gewählten Apps
 (wie `remote on`); ohne Wachhalten kann der Remote-Mac einschlafen und ist dann nicht erreichbar.
 
-**Unterwegs:** `.local`-Namen und die Heimnetz-Adressen (192.168.…) gibt es nur im selben Netz. Von außerhalb braucht es
-[Tailscale](https://tailscale.com) auf **beiden** Macs (gleiches Konto): als Host in der `join`-Zeile dann den Tailscale-Namen oder die
-100.x-Adresse des Remote-Macs verwenden. Tailscale legt nur eine private Verbindung zwischen deinen eigenen Geräten an. Das normale Internet
-läuft weiter über die eigene Leitung jedes Macs (außer du schaltest ausdrücklich einen „Exit Node“ ein). Die Agenten laufen auf dem
-Remote-Mac und nutzen dessen Internetanschluss, sie verlieren also nichts. Der Remote-Mac muss dafür wach sein (Wach halten).
-Meldet `join` „nicht erreichbar … nodename nor servname“, wird der Name nicht gefunden (anderes Netz): dann die IP-Adresse des Remote-Macs
-nehmen (`ipconfig getifaddr en0`, bei WLAN `en1`) oder Tailscale.
+**Unterwegs (Tailscale):** `.local`-Namen und die Heimnetz-Adressen (192.168.…) gibt es nur im selben Netz. Von außerhalb braucht es
+[Tailscale](https://tailscale.com) auf **beiden** Macs (gleiches Konto). Tailscale legt nur eine private Verbindung zwischen deinen
+eigenen Geräten an. Das normale Internet läuft weiter über die eigene Leitung jedes Macs (außer du schaltest ausdrücklich einen
+„Exit Node“ ein). Die Agenten laufen auf dem Remote-Mac und nutzen dessen Internetanschluss, sie verlieren also nichts. Der
+Remote-Mac muss dafür wach sein (Wach halten).
+
+- **Die Zeile kommt von selbst richtig heraus.** Läuft Tailscale auf dem Remote-Mac, steht in der `join`-Zeile von *Diesen Mac
+  freigeben…* der Tailscale-Host statt `<Mac>.local`, und die Zeile gilt dann auch zu Hause und unterwegs. Ist MagicDNS im Tailnet an,
+  ist das der Name (`mac.dein-tailnet.ts.net`), sonst die 100.x-Adresse, die immer auflöst. Läuft Tailscale nicht, bleibt es bei
+  `.local`. Die Maske sagt, wie weit die Zeile reicht („gilt auch unterwegs“ oder „nur im selben Netz“); im Terminal zeigt
+  `workspace remote ssh share` zusätzlich die `.local`-Zeile fürs Heimnetz.
+- **Dieselbe Verbindung, nur ein anderer Name.** Es bleibt das normale SSH mit Fingerprint-Prüfung (`join` / `allow`), kein
+  `tailscale ssh`. Auf dem Client-Mac läuft die Tailscale-App ebenfalls, sonst ist der Tailscale-Host nicht erreichbar.
+- **Klare Fehlermeldungen.** Ist ein Tailscale-Ziel nicht erreichbar, nennt die Meldung den Grund: Tailscale fehlt oder ist nicht
+  verbunden/angemeldet, der Remote-Mac ist im Tailnet offline (vermutlich im Ruhezustand: *Wach halten*), das Gerät ist im Tailnet
+  unbekannt, der Tailscale-Name löst auf diesem Mac nicht auf (dann steht die 100.x-Adresse in der Meldung) oder Tailscale steht, aber „Entfernte
+  Anmeldung“ antwortet nicht. Ein Host ohne Punkt, den Tailscale nicht kennt (z. B. ein SSH-Alias), bekommt keine Tailscale-Aussage.
+- **Projekte des anderen Macs.** Beim **Remote-Ordner hinzufügen…** ist der Host des verbundenen Macs schon eingetragen (derselbe
+  Text wie im SSH-Ziel, nur bei Port 22). Remote-Projekte heißen `<Ordner> [SSH: <Host>]`: **wechselst du den Host** (z. B. von
+  `.local` auf den Tailscale-Namen), heißen sie anders, und gespeicherte Workspaces zeigen „⚠︎ nicht gefunden“. Dann den Workspace
+  einmal neu auswählen.
+- **Eigene Angaben.** Die Tailscale-Programmdatei wird in `PATH`, in `/Applications/Tailscale.app` und in den Homebrew-Ordnern gesucht;
+  mit `VIBECODE_TAILSCALE=/Pfad/zu/tailscale` lässt sie sich festlegen (leer = Tailscale ignorieren).
+
+### Tailscale im Fenster
+
+Der untere Teil des Bereichs **Remote** steuert Tailscale, ohne dass du die Mac-App brauchst. Es genügt die **Kommandozeilen-Variante**
+(`brew install tailscale`: nur die Programme `tailscale` und `tailscaled`). Die App von tailscale.com geht ebenso; VibeCode erkennt, was da ist.
+
+- **Einrichten…** (nur Kommandozeile): öffnet ein Terminal, das Tailscale per Homebrew installiert, den Systemdienst startet
+  (`sudo brew services start tailscale`) und diesem Konto die Steuerung erlaubt (`sudo tailscale set --operator="$USER"`). Du gibst dein
+  Admin-Passwort **dort** ein; VibeCode sieht es nie und führt selbst nie `sudo` aus. Der Dienst läuft als root, deshalb ist dieser
+  einmalige Schritt nötig; ohne ihn lehnt Tailscale `up` und `down` für normale Konten ab (das Fenster sagt dann „Zugriff verweigert“).
+  Ist die Tailscale-App installiert, bricht das Terminal ab: zwei Tailscale-Dienste auf einem Mac stören sich.
+  Tailscale selbst empfiehlt eher die App; die Kommandozeilen-Variante ist weniger getestet und nicht in den macOS-VPN-Einstellungen sichtbar.
+- **Anmelden…**: holt den Anmelde-Link von Tailscale und öffnet ihn im Browser (nur `https://`). Nach der Anmeldung dort auf **Aktualisieren**
+  klicken. **Abmelden…** fragt vorher nach, weil dieser Mac dann nicht mehr erreichbar ist.
+- **Verbinden** / **Trennen** sind ein einfaches `tailscale up` / `tailscale down` (ohne Optionen, damit deine Einstellungen bleiben).
+- **Geräte…** listet die anderen Geräte deines Tailnets: Name, 100.x-Adresse, System, online oder zuletzt gesehen.
+- **Mit VibeCode starten und beenden** (Kästchen **Aktiv**): Startest du einen Workspace (Schreibtisch-Shortcut, **Starten**, Quick-Öffnen,
+  **Einmaliger Workspace…**), verbindet VibeCode Tailscale vorher, falls es getrennt ist. Bei Remote-Projekten (`[SSH: …]`) wartet der
+  Start bis zu 10 Sekunden darauf, damit Remote-SSH sofort eine Verbindung findet. **Beendet** wird so: Sobald das **letzte von VibeCode
+  geöffnete Editor-Fenster** geschlossen ist, trennt ein kleiner Hintergrundprozess Tailscale nach etwa einer Minute. Dafür meldet sich jedes
+  solche Fenster alle 15 Sekunden bei VibeCode (die mitgelieferte Erweiterung ab Version 0.0.7; die Fenster anderer Projekte zählen nicht).
+  Schläft der Mac mit offenem Fenster, bekommt es nach dem Aufwachen eine volle Schonfrist, sich wieder zu melden; geschlossen wird also nie
+  beim Aufklappen des Deckels. Sicherheitsregeln: VibeCode trennt **nur**, was VibeCode selbst verbunden hat (lief Tailscale schon, bleibt es an), nie nach einer
+  Handentscheidung (**Verbinden** und **Trennen** löschen die Marke „von VibeCode gestartet“), und **im Zweifel bleibt Tailscale an**: meldet in zehn Minuten kein Fenster
+  (alte Erweiterung, abgebrochener Dialog), wird nichts getrennt. Das bloße Öffnen der Übersicht startet Tailscale nicht, denn dabei gibt es kein
+  Editor-Fenster, das es wieder beenden könnte.
+- Nach einem Update der Erweiterung läuft sie in einem schon geöffneten VS Code erst nach einem vollständigen Beenden (⌘Q) und neuem Start.
+- Im Terminal: `./VibeCode\ Workspace.command tailscale up|down|login|logout|auto-on|auto-off|setup`.
+
+Meldet `join` „nicht erreichbar … nodename nor servname“, wird der Name nicht gefunden (anderes Netz, kein Tailscale): dann den
+Tailscale-Host oder die IP-Adresse des Remote-Macs nehmen (`ipconfig getifaddr en0`, bei WLAN `en1`).
 
 Auch ohne Fenster:
 
@@ -483,8 +530,8 @@ Alternativ ohne Zeilen-Austausch: `workspace remote ssh set benutzer@host` und d
 `workspace remote ssh pair` (fragt einmal das Passwort des Remote-Macs).
 
 **Von unterwegs:** `remote-mac.local` funktioniert nur im selben Netzwerk. Außerhalb
-installierst du [Tailscale](https://tailscale.com) auf beiden Macs und trägst statt
-`remote-mac.local` den Tailscale-Namen oder die Tailscale-IP ein.
+installierst du [Tailscale](https://tailscale.com) auf beiden Macs. `workspace remote ssh share` gibt dann die Zeile mit dem
+Tailscale-Host aus (Name oder 100.x-Adresse); von Hand: `workspace remote ssh set benutzer@<Tailscale-Host>`.
 
 ---
 

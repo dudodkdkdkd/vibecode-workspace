@@ -148,6 +148,15 @@ Do not replace the regular installation with raw file copies. Check registration
   --list-extensions | grep vibecode
 ```
 
+**The extension also sends a heartbeat** (since 0.0.7) for "Tailscale mit VibeCode starten und beenden": at the very top of `activate()` (before
+the trust wait and before any `await`, or untrusted/slow windows never report) it touches `<remote dir>/tailscale-sessions/<pid>.json`
+every 15 s, only for windows whose `workspaceFile` has a `.vibe-workspaces` path component (the scheme is deliberately ignored: an SSH window
+opens a local `…-SSH-<host>.code-workspace` with `remoteAuthority`, and VS Code may hand its address over with the remote scheme; **which one
+it really is was not verified**, if SSH windows never report, Tailscale simply stays on) and only while that folder exists (the extension never
+creates it). `deactivate()` and the disposable remove the file. Bump the version in **both** `package.json` and `extension.vsixmanifest`
+(0.0.7 now), or the forced install keeps the old code. A VS Code that is already running keeps the old extension until ⌘Q; the watcher is
+fail-safe for that (no heartbeat = Tailscale is never disconnected). Tests: `tests/tailscale-heartbeat.test.js` (mocked `vscode`, fake `setInterval`).
+
 ## Pitfall 5 — VS Code restores stale editor tabs
 
 VS Code persists open editors per workspace and restores them on every reload **and**

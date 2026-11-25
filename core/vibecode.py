@@ -24,9 +24,11 @@ LAUNCHER = REPO / 'workspaces' / 'VibeCode Workspace.command'
 NAME_MAX = 60
 ENTRY_ID = re.compile(r'[a-z][a-z0-9-]*')
 RESERVED = {'run', 'start', 'list', 'save', 'delete', 'open', 'shortcuts', 'projects',
-            'window', 'help', '_state', '_ssh', 'ssh-open', 'folders', 'presets', 'settings', 'open-folder', 'open-workspace', 'workspace-quick', 'local-options', 'local-settings', 'local-default'}
+            'window', 'help', '_state', '_ssh', 'ssh-open', 'folders', 'presets', 'settings', 'open-folder', 'open-workspace', 'workspace-quick', 'local-options', 'local-settings', 'local-default', 'tailscale'}
 # Everything the window may trigger over SSH. Fixed on purpose: no arbitrary commands.
 SSH_ACTIONS = ('share', 'share-wake', 'share-recheck', 'join', 'allow-check', 'allow')
+# Everything the window may do with Tailscale. Fixed on purpose; `setup` only opens a Terminal (VibeCode never runs sudo itself).
+TAILSCALE_ACTIONS = ('up', 'down', 'login', 'logout', 'auto-on', 'auto-off', 'setup')
 
 
 def config_dir():
@@ -571,16 +573,34 @@ def launcher_argv(ws):
     return argv
 
 
+def tailscale_autostart(names=None):
+    """A workspace is about to start: let the remote module connect Tailscale if "mit VibeCode starten und beenden" is on.
+
+    Best effort, it never stops a launch. It waits for the connection only when a remote (`[SSH: …]`) project is part of it, or
+    when the selection is not known yet (the one-off dialog), because then Remote-SSH needs it right away. `names` None = unknown."""
+    if 'remote' not in {e['id'] for e in module_entries()}:
+        return
+    wait = 10 if names is None or any('[SSH: ' in name for name in names) else 0
+    try:
+        call_module('remote', ['tailscale', 'ensure', '--wait', str(wait)], timeout=wait + 20)
+    except (ValueError, OSError, subprocess.SubprocessError):
+        pass
+
+
 def run_workspace(name):
     """Replace this process with the launcher (Desktop shortcuts)."""
-    argv = launcher_argv(require(name))
+    ws = require(name)
+    argv = launcher_argv(ws)
     refresh_home()
+    tailscale_autostart(ws['projects'])
     os.execv(argv[0], argv)
 
 
 def start_workspace(name):
     """Start the launcher detached (main window). Output goes to a log, not into the void."""
-    argv = launcher_argv(require(name))
+    ws = require(name)
+    argv = launcher_argv(ws)
+    tailscale_autostart(ws['projects'])
     log = config_dir() / 'last-start.log'
     log.parent.mkdir(parents=True, exist_ok=True)
     with log.open('w') as out:
@@ -613,6 +633,7 @@ def open_workspace(name):
     if not chosen:
         return []
     argv = launcher_argv({'projects': chosen, 'localDev': ws.get('localDev')})   # Local Dev gehört zum Workspace
+    tailscale_autostart(chosen)
     os.execv(argv[0], argv)
 
 
@@ -627,6 +648,7 @@ def open_folder(path):
     if not chosen:
         return []
     argv = launcher_argv({'projects': chosen})
+    tailscale_autostart(chosen)
     os.execv(argv[0], argv)
 
 
@@ -727,6 +749,41 @@ def ssh_state():
             info['errors'].append(f'{entry_id}: {exc}')
     info['available'] = info['guided'] or info['share'] or bool(info['hosts'])
     return info
+
+
+def tailscale_info():
+    """Tailscale for the window: {'available': False} without the remote module, {'available': True, 'error': …} when it cannot be
+    read, otherwise the module's own `tailscale show` (variant, state, name, ip, auto, ours, devices …). Never raises."""
+    if 'remote' not in {e['id'] for e in module_entries()}:
+        return {'available': False}
+    try:
+        result = call_module('remote', ['tailscale', 'show'], timeout=15)
+        if result['code']:
+            raise ValueError(re.sub(r'^Remote: ', '', result['err'] or result['out'] or f'Status {result["code"]}'))
+        data = json.loads(result['out'])
+        if (not isinstance(data, dict) or not isinstance(data.get('state'), str) or not isinstance(data.get('devices'), list)
+                or type(data.get('auto')) is not bool):
+            raise ValueError('Ungültige Antwort')
+        return dict(data, available=True)
+    except (ValueError, TypeError, subprocess.SubprocessError) as exc:
+        return {'available': True, 'error': f'Tailscale: {exc}'}
+
+
+def tailscale_action(action):
+    """One fixed Tailscale action for the window. Returns the module's output; a refusal raises with a readable reason."""
+    if action not in TAILSCALE_ACTIONS:
+        raise ValueError(f'Unbekannte Tailscale-Aktion „{action}“.')
+    entries = {e['id']: e for e in module_entries()}
+    if 'remote' not in entries:
+        raise ValueError('Das Remote-Modul fehlt.')
+    if action == 'setup':
+        open_in_terminal(entry_argv(entries['remote'], ['tailscale', 'setup']))
+        return 'Terminal geöffnet. Dort wird Tailscale eingerichtet. Ist es fertig, hier im Bereich Remote auf „Aktualisieren“ klicken, dann erscheint „Anmelden…“.'
+    args = {'auto-on': ['auto', 'on'], 'auto-off': ['auto', 'off']}.get(action, [action])
+    result = call_module('remote', ['tailscale'] + args, timeout=60)
+    if result['code']:
+        raise ValueError(re.sub(r'^Remote: ', '', result['err'] or result['out'] or f'Status {result["code"]}'))
+    return result['out']
 
 
 def modules_error(text):
@@ -1015,6 +1072,7 @@ def state():
     known = set(projects)
     menu = [e for e in module_entries() if e.get('menu')]
     with ThreadPoolExecutor(max_workers=4) as pool:      # Modulstatus parallel: das Fenster soll zügig öffnen
+        tailscale = pool.submit(tailscale_info)
         statuses = list(pool.map(entry_status, menu))
     ssh = ssh_state()
     return {
@@ -1028,6 +1086,7 @@ def state():
         'folders': folder_state(ssh['hosts']),
         'presets': presets_state(paths),
         'settings': {'wake': wake_state()},
+        'tailscale': tailscale.result(),
     }
 
 
@@ -1050,6 +1109,7 @@ def usage(entries):
              '  vibecode delete --name N      Workspace samt Shortcut löschen',
              '  vibecode shortcuts sync       Schreibtisch-Shortcuts neu anlegen',
              '  vibecode settings keep-awake on|off',
+             '  vibecode tailscale up|down|login|logout|auto-on|auto-off|setup   Tailscale steuern (Fenster: Bereich Remote)',
              '  vibecode projects             Projekte, die der Launcher kennt',
              '  vibecode open-folder ORDNER   Repositories dieses Ordners zum Ankreuzen zeigen und öffnen (Schreibtisch-Shortcut)',
              '  vibecode open-workspace NAME  Projekte dieses Workspaces zum Ankreuzen zeigen und öffnen (Quick-Shortcut)',
@@ -1095,6 +1155,11 @@ def main(argv):
         parser.add_argument('--line', default='')
         options = parser.parse_args(rest)
         print(json.dumps(ssh_action(options.action, options.line), ensure_ascii=False))
+        return 0
+    if command == 'tailscale':
+        if len(rest) != 1:
+            raise ValueError('Aufruf: vibecode tailscale ' + '|'.join(TAILSCALE_ACTIONS))
+        print(tailscale_action(rest[0]))
         return 0
     if command == 'open-folder':
         if len(rest) != 1:
@@ -1225,9 +1290,13 @@ def main(argv):
     if command == 'open':
         if len(rest) != 1 or rest[0] not in entries:
             raise ValueError('Aufruf: vibecode open MODUL-BEFEHL (' + ', '.join(sorted(entries)) + ')')
+        if rest[0] == 'launch':
+            tailscale_autostart(None)
         open_in_terminal(entry_argv(entries[rest[0]]))
         return 0
     if command in entries:
+        if command == 'launch':
+            tailscale_autostart(None)
         argv_to_run = entry_argv(entries[command], rest)
         os.execvp(argv_to_run[0], argv_to_run)
         return 0

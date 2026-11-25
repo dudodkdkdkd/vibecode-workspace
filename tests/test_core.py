@@ -22,6 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location('vibecode_core', ROOT / 'core' / 'vibecode.py')
 core = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(core)
+REAL_AUTOSTART = core.tailscale_autostart
 
 
 class CoreTests(unittest.TestCase):
@@ -33,9 +34,13 @@ class CoreTests(unittest.TestCase):
         # Ohne Mac-Namen: die Tests lesen die Schreibtisch-Dateien unter ihrem Basisnamen (sonst hinge der echte Computername dran).
         env = patch.dict(os.environ, {'VIBECODE_CONFIG_DIR': str(self.config),
                                       'VIBECODE_DESKTOP_DIR': str(self.desktop),
-                                      'VIBECODE_MAC_LABEL': ''})
+                                      'VIBECODE_MAC_LABEL': '', 'VIBECODE_TAILSCALE': ''})
         env.start()
         self.addCleanup(env.stop)
+        # Kein Start verbindet je ein echtes Tailscale: der Haken ist ersetzt; ein eigener Test prüft die echte Funktion.
+        autostart = patch.object(core, 'tailscale_autostart')
+        self.autostart = autostart.start()
+        self.addCleanup(autostart.stop)
 
     def save(self, name='Demo', projects=('A', 'B'), shortcut=False, rename_from=None):
         return core.save_workspace(name, list(projects), shortcut, rename_from)
@@ -343,6 +348,13 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(call.call_args.args[1], ['ssh', 'share', '--json', '--wake'])
             core.ssh_action('share-recheck')                   # „Erneut prüfen“: die Systemeinstellungen nicht noch einmal öffnen
             self.assertEqual(call.call_args.args[1], ['ssh', 'share', '--json', '--no-open'])
+
+    def test_join_lines_with_a_tailnet_name_or_100_address_reach_the_module_unchanged(self):
+        fp = 'SHA256:' + 'A' * 43
+        with patch.object(core, 'call_module', return_value={'code': 0, 'out': '', 'err': ''}) as call:
+            for host in ('remote-mac.example-tailnet.ts.net', '100.64.0.5'):
+                core.ssh_action('join', f'workspace remote ssh join user@{host} {fp}')
+                self.assertEqual(call.call_args.args, ('remote', ['ssh', 'join', f'user@{host}', fp]))
 
     def test_ssh_actions_are_a_fixed_list_and_bad_lines_are_rejected(self):
         with patch.object(core, 'call_module') as call:
@@ -1193,6 +1205,129 @@ class CoreTests(unittest.TestCase):
             (self.desktop / 'Demo (Mac A)').write_text('meine Datei')
             with self.assertRaisesRegex(ValueError, 'schon „Demo \\(Mac A\\)“'):
                 core.add_shortcut('Demo')
+
+    # --- Tailscale: Anzeige im Fenster, feste Aktionen, „mit VibeCode starten und beenden“ -----------------------------------
+
+    SHOW = {'variant': 'cli', 'state': 'running', 'name': 'remote-mac.example-tailnet.ts.net', 'ip': '100.64.0.5', 'tailnet': 'example-tailnet.ts.net',
+            'auto': False, 'autoError': '', 'ours': False, 'devices': []}
+
+    def module_answer(self, code=0, out='', err=''):
+        return patch.object(core, 'call_module', return_value={'code': code, 'out': out, 'err': err})
+
+    def test_tailscale_info_is_the_modules_answer_and_never_breaks_the_window(self):
+        with self.module_answer(out=json.dumps(self.SHOW)) as call:
+            info = core.tailscale_info()
+        call.assert_called_once_with('remote', ['tailscale', 'show'], timeout=15)
+        self.assertEqual((info['available'], info['state'], info['ip']), (True, 'running', '100.64.0.5'))
+        for label, answer in (('Fehler', dict(code=1, err='Remote: tailscale.json ist ungültig.')), ('kein JSON', dict(out='kaputt')),
+                              ('falsche Form', dict(out='[]')), ('fehlendes Feld', dict(out=json.dumps({'state': 'running'}))),
+                              ('auto kein bool', dict(out=json.dumps(dict(self.SHOW, auto='ja'))))):
+            with self.subTest(label), self.module_answer(**answer):
+                info = core.tailscale_info()
+            self.assertTrue(info['available'])
+            self.assertTrue(info['error'].startswith('Tailscale: '), info)
+            self.assertNotIn('Remote: ', info['error'])
+        with patch.object(core, 'module_entries', return_value=[]):
+            self.assertEqual(core.tailscale_info(), {'available': False})                 # ohne Remote-Modul gibt es den Bereich nicht
+
+    def test_the_window_state_carries_tailscale(self):
+        with patch.object(core, 'tailscale_info', return_value={'available': True, **self.SHOW}), \
+             patch.object(core, 'ssh_state', return_value={'hosts': []}), patch.object(core, 'list_project_paths', return_value=[]), \
+             patch.object(core, 'presets_state', return_value={'available': False}), patch.object(core, 'folder_state', return_value={'local': []}), \
+             patch.object(core, 'wake_state', return_value=None):
+            self.assertEqual(core.state()['tailscale']['state'], 'running')
+
+    def test_tailscale_actions_are_a_fixed_list_and_setup_only_opens_a_terminal(self):
+        with self.module_answer(out='Tailscale ist verbunden.') as call:
+            for action, args in (('up', ['up']), ('down', ['down']), ('login', ['login']), ('logout', ['logout']),
+                                 ('auto-on', ['auto', 'on']), ('auto-off', ['auto', 'off'])):
+                self.assertEqual(core.tailscale_action(action), 'Tailscale ist verbunden.')
+                self.assertEqual(call.call_args.args, ('remote', ['tailscale'] + args))
+            call.reset_mock()
+            for bad in ('exec', 'up; rm -rf ~', '', None, 'setup ', 'UP'):
+                with self.assertRaisesRegex(ValueError, 'Unbekannte Tailscale-Aktion', msg=repr(bad)):
+                    core.tailscale_action(bad)
+            call.assert_not_called()
+        with self.module_answer() as call, patch.object(core, 'open_in_terminal') as terminal:
+            self.assertIn('Terminal geöffnet', core.tailscale_action('setup'))
+        call.assert_not_called()                                                        # kein Hintergrundaufruf, nur das Terminal
+        argv = terminal.call_args.args[0]
+        self.assertEqual((argv[0], argv[1], argv[2:]), ('python3', str(ROOT / 'remote' / 'remote.py'), ['tailscale', 'setup']))
+        with self.module_answer(code=1, err='Remote: Tailscale ist nicht angemeldet.'), self.assertRaisesRegex(ValueError, '^Tailscale ist nicht angemeldet'):
+            core.tailscale_action('up')
+        with patch.object(core, 'module_entries', return_value=[]), self.assertRaisesRegex(ValueError, 'Remote-Modul fehlt'):
+            core.tailscale_action('up')
+
+    def test_the_command_line_runs_tailscale_actions(self):
+        with self.module_answer(out='Tailscale ist getrennt.'):
+            self.assertEqual(self.cli('tailscale', 'down'), (0, 'Tailscale ist getrennt.\n'))
+        for bad in (['tailscale'], ['tailscale', 'up', 'down'], ['tailscale', 'nope']):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                self.cli(*bad)
+        self.assertIn('vibecode tailscale', core.usage([]))
+
+    def test_every_workspace_start_path_asks_for_tailscale_with_what_it_starts(self):
+        self.save('Demo', ['A', 'B [SSH: example-host]'], shortcut=False)
+        self.save('Lokal', ['A'], shortcut=False)
+        with patch.object(core.os, 'execv'):
+            core.run_workspace('Demo')                                                  # Schreibtisch-Shortcut
+        self.autostart.assert_called_once_with(['A', 'B [SSH: example-host]'])
+        self.autostart.reset_mock()
+        with patch.object(core.subprocess, 'Popen'):
+            core.start_workspace('Lokal')                                               # „Starten“ im Fenster
+        self.autostart.assert_called_once_with(['A'])
+        self.autostart.reset_mock()
+        with patch.object(core, 'list_projects', return_value=['A', 'B [SSH: example-host]']), \
+             patch.object(core, 'pick_projects', return_value=['B [SSH: example-host]']), patch.object(core.os, 'execv'):
+            core.open_workspace('Demo')                                                 # Quick-Öffnen: nur die gewählten
+        self.autostart.assert_called_once_with(['B [SSH: example-host]'])
+        self.autostart.reset_mock()
+        folder = self.tmp / 'ordner'
+        with patch.object(core, 'list_project_paths', return_value=[('x', str(folder / 'x'))]), \
+             patch.object(core, 'pick_projects', return_value=['x']), patch.object(core.os, 'execv'):
+            (folder / 'x').mkdir(parents=True)
+            core.open_folder(str(folder))
+        self.autostart.assert_called_once_with(['x'])
+
+    def test_cancelling_a_dialog_never_touches_tailscale(self):
+        self.save('Demo', ['A'], shortcut=False)
+        with patch.object(core, 'list_projects', return_value=['A']), patch.object(core, 'pick_projects', return_value=[]), \
+             patch.object(core.os, 'execv') as execv:
+            core.open_workspace('Demo')
+        execv.assert_not_called()
+        self.autostart.assert_not_called()                                              # nichts gestartet, also auch nichts verbunden
+
+    def test_the_one_off_launch_asks_for_tailscale_before_its_dialog(self):
+        entries = {e['id']: e for e in core.module_entries()}
+        with patch.object(core, 'open_in_terminal') as terminal:
+            core.main(['open', 'launch'])                                               # Einmaliger Workspace… im Fenster
+        self.autostart.assert_called_once_with(None)                                    # Auswahl unbekannt: der Haken wartet kurz
+        terminal.assert_called_once()
+        self.autostart.reset_mock()
+        with patch.object(core.os, 'execvp') as execvp:
+            core.main(['launch'])
+        self.autostart.assert_called_once_with(None)
+        execvp.assert_called_once()
+        self.autostart.reset_mock()
+        with patch.object(core, 'open_in_terminal'):
+            core.main(['open', 'remote'])                                               # andere Module lösen es nicht aus
+        self.autostart.assert_not_called()
+        self.assertIn('launch', entries)
+
+    def test_the_real_autostart_waits_only_for_remote_projects_and_never_fails_a_launch(self):
+        with self.module_answer(out='aus') as call:
+            REAL_AUTOSTART(['A', 'B'])
+            self.assertEqual(call.call_args.args, ('remote', ['tailscale', 'ensure', '--wait', '0']))
+            REAL_AUTOSTART(['A', 'App [SSH: example-host]'])
+            self.assertEqual(call.call_args.args[1], ['tailscale', 'ensure', '--wait', '10'])
+            REAL_AUTOSTART(None)
+            self.assertEqual(call.call_args.args[1], ['tailscale', 'ensure', '--wait', '10'])
+        for failure in (subprocess.TimeoutExpired('x', 1), ValueError('kaputt'), OSError('weg')):
+            with patch.object(core, 'call_module', side_effect=failure):
+                REAL_AUTOSTART(['A'])                                                   # wirft nie
+        with patch.object(core, 'module_entries', return_value=[]), patch.object(core, 'call_module') as call:
+            REAL_AUTOSTART(['A'])
+        call.assert_not_called()                                                        # ohne Remote-Modul gibt es nichts zu tun
 
     def test_projects_in_a_folder_are_the_launchers_names_sorted_and_never_remote_or_siblings(self):
         folder = self.tmp / 'Github'

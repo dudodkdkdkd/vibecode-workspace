@@ -38,6 +38,10 @@ class RemoteTests(unittest.TestCase):
         ssh_dir = patch.object(r, 'SSH_DIR', self.ssh_dir)
         ssh_dir.start()
         self.addCleanup(ssh_dir.stop)
+        # Kein echtes Tailscale: sonst stünde der echte Tailnet-Name in den join-Zeilen (wie VIBECODE_MAC_LABEL im Kern).
+        tailscale = patch.dict(os.environ, {'VIBECODE_TAILSCALE': ''})
+        tailscale.start()
+        self.addCleanup(tailscale.stop)
         username = patch.object(r.getpass, 'getuser', return_value='user')
         username.start()
         self.addCleanup(username.stop)
@@ -728,7 +732,7 @@ class RemoteTests(unittest.TestCase):
         data, run, clip, _ = self.share_json(['--json'])
         line = f'workspace remote ssh join {getpass.getuser()}@Remote-Mac.local {FP}'
         self.assertEqual(data, {'remoteLogin': True, 'awake': True, 'line': line, 'fingerprint': True, 'copied': True,
-                                'settingsOpened': False})
+                                'settingsOpened': False, 'via': 'local', 'localLine': '', 'tailscale': 'missing'})
         clip.assert_called_once_with(line)
         self.assertNotIn(call('/usr/bin/open', r.SHARING_PANE, check=False), run.call_args_list)
 
@@ -765,6 +769,548 @@ class RemoteTests(unittest.TestCase):
         self.assertNotIn(call('/usr/bin/open', r.SHARING_PANE, check=False), run.call_args_list)
         self.assertIn('Entfernte Anmeldung  AUS', text)
         self.assertNotIn('Systemeinstellungen geöffnet', text)
+
+    # --- Tailscale: die join-Zeile nennt den Tailnet-Host, Fehler nennen den Grund ----------------------------------------
+    # Nie das echte Tailscale: eine Attrappe gibt fertiges JSON aus und schreibt Argumente und Umgebung in eine Logdatei.
+
+    TAILNET = 'remote-mac.example-tailnet.ts.net'
+
+    def tailnet_status(self, state='Running', magic=True, name=TAILNET, ips=('100.64.0.5', 'fd7a:115c:a1e0::5'), peers=None):
+        peers = [('laptop.example-tailnet.ts.net', '100.64.0.9', True)] if peers is None else peers
+        return {'BackendState': state, 'CurrentTailnet': {'Name': 'example-tailnet.ts.net', 'MagicDNSEnabled': magic},
+                'Self': {'DNSName': name + '.', 'TailscaleIPs': list(ips), 'Online': True},
+                'Peer': {f'nodekey:{n}': {'DNSName': host + '.', 'TailscaleIPs': [ip, 'fd7a:115c:a1e0::9'], 'Online': online}
+                         for n, (host, ip, online) in enumerate(peers)}}
+
+    def tailscale_stub(self, status=None, raw=None, exit_code=0):
+        """A fake `tailscale`; returns a context manager that points VIBECODE_TAILSCALE at it. self.stub_log has its calls."""
+        base = Path(self.tmp.name)
+        (base / 'status.json').write_text(raw if raw is not None else json.dumps(status))
+        self.stub_log = base / 'stub.log'
+        stub = base / 'tailscale'
+        stub.write_text(f'#!/bin/sh\necho "BE_CLI=$TAILSCALE_BE_CLI $*" >> {shlex.quote(str(self.stub_log))}\n'
+                        f'cat {shlex.quote(str(base / "status.json"))}\nexit {exit_code}\n')
+        stub.chmod(0o755)
+        return patch.dict(os.environ, {'VIBECODE_TAILSCALE': str(stub)})
+
+    def stub_calls(self):
+        return self.stub_log.read_text().splitlines() if self.stub_log.exists() else []
+
+    def test_share_gives_the_tailnet_name_when_tailscale_runs_and_keeps_the_local_line_as_fallback(self):
+        with self.tailscale_stub(self.tailnet_status()):
+            data, _, clip, _ = self.share_json(['--json'])
+        self.assertEqual(data['line'], f'workspace remote ssh join {getpass.getuser()}@{self.TAILNET} {FP}')
+        self.assertEqual(data['localLine'], f'workspace remote ssh join {getpass.getuser()}@Remote-Mac.local {FP}')
+        self.assertEqual((data['via'], data['tailscale']), ('tailscale', 'running'))
+        clip.assert_called_once_with(data['line'])                                            # in die Zwischenablage kommt die Tailnet-Zeile
+        self.assertEqual(self.stub_calls(), ['BE_CLI=1 status --json'])                      # als CLI gestartet, nicht als App
+
+    def test_share_uses_the_100_address_when_magicdns_is_off_and_ignores_ipv6(self):
+        with self.tailscale_stub(self.tailnet_status(magic=False)):
+            data, _, _, _ = self.share_json(['--json'])
+        self.assertEqual(data['line'], f'workspace remote ssh join {getpass.getuser()}@100.64.0.5 {FP}')   # ein Name ginge ohne MagicDNS nirgends auf
+        self.assertEqual(data['via'], 'tailscale')
+
+    def test_share_falls_back_to_the_local_name_whenever_tailscale_gives_nothing_usable(self):
+        broken = [('Stopped', self.tailnet_status(state='Stopped'), 'off'), ('NeedsLogin', self.tailnet_status(state='NeedsLogin'), 'off'),
+                  ('nur IPv6', self.tailnet_status(magic=False, ips=('fd7a:115c:a1e0::5',)), 'running'),
+                  ('Müll', None, 'off'), ('Liste', [], 'off'),
+                  ('Name mit Optionszeichen', self.tailnet_status(magic=True, name='-oProxyCommand=x.ts.net', ips=()), 'running')]
+        for label, status, kind in broken:
+            raw = 'kein json' if label == 'Müll' else None
+            with self.subTest(label), self.tailscale_stub(status, raw=raw):
+                data, _, _, _ = self.share_json(['--json'])
+            self.assertEqual((data['via'], data['localLine'], data['tailscale']), ('local', '', kind))
+            self.assertTrue(data['line'].endswith(f'@Remote-Mac.local {FP}'))
+        with patch.dict(os.environ, {'VIBECODE_TAILSCALE': str(Path(self.tmp.name) / 'gibt-es-nicht')}):
+            self.assertEqual(r.tailscale_kind(r.tailscale_state()), 'missing')
+
+    def test_a_hanging_or_failing_tailscale_never_breaks_share(self):
+        with self.tailscale_stub(self.tailnet_status()):
+            with patch.object(r.subprocess, 'run', side_effect=r.subprocess.TimeoutExpired('tailscale', 4)):
+                state = r.tailscale_state()
+            self.assertEqual((state['state'], state['peers']), ('', []))
+            self.assertEqual(r.tailscale_kind(state), 'off')                                   # installiert, aber keine Antwort
+        with self.tailscale_stub(raw='', exit_code=1):
+            self.assertEqual(r.tailscale_state()['state'], '')                                # Daemon läuft nicht: Exit 1, keine Ausgabe
+
+    def test_info_text_says_how_tailscale_stands_and_offers_both_lines(self):
+        cases = [(self.tailnet_status(), 'verbunden: dieser Mac', True), (self.tailnet_status(state='Stopped'), 'installiert, aber nicht verbunden', False),
+                 (None, 'nicht installiert', False)]
+        for status, expect, tailnet_line in cases:
+            lines = []
+            context = self.tailscale_stub(status) if status else patch.dict(os.environ, {'VIBECODE_TAILSCALE': ''})
+            with self.subTest(expect), context, patch.object(r, 'ssh_listening', return_value=True), \
+                 patch.object(r, 'wake_active', return_value=True), patch.object(r, 'host_fingerprint', return_value=FP), \
+                 patch.object(r, 'run', return_value=Mock(stdout='Remote-Mac\n')):
+                line = r.ssh_info(lines.append)
+            text = '\n'.join(lines)
+            self.assertIn('Tailscale            ' + expect, text)
+            self.assertEqual('Nur im selben Netz geht auch:' in text, tailnet_line)           # die .local-Zeile nur neben einer Tailnet-Zeile
+            self.assertEqual(f'@{self.TAILNET} ' in line, tailnet_line)
+            self.assertEqual('@Remote-Mac.local' in text, True)
+
+    def test_an_unreachable_tailscale_host_names_the_actual_reason(self):
+        offline = [('laptop.example-tailnet.ts.net', '100.64.0.9', True), (self.TAILNET, '100.64.0.5', False)]
+        cases = [
+            (f'user@{self.TAILNET}', self.tailnet_status(peers=offline), 'im Tailnet offline'),                  # Mac schläft
+            ('user@100.64.0.5', self.tailnet_status(peers=offline), 'im Tailnet offline'),                       # dieselbe Prüfung per IP
+            ('user@remote-mac', self.tailnet_status(peers=offline), 'im Tailnet offline'),                       # und per kurzem Namen
+            (f'user@{self.TAILNET}', self.tailnet_status(peers=[(self.TAILNET, '100.64.0.5', True)]), 'SSH-Port antwortet nicht'),
+            ('user@other.example-tailnet.ts.net', self.tailnet_status(), 'kennt dieses Gerät'),
+            (f'user@{self.TAILNET}', self.tailnet_status(state='Stopped'), 'nicht verbunden (Stopped)'),
+            (f'user@{self.TAILNET}', self.tailnet_status(state='NeedsLogin'), 'nicht verbunden (NeedsLogin)'),
+        ]
+        for destination, status, expected in cases:
+            with self.subTest(destination=destination, expected=expected), self.tailscale_stub(status):
+                r.ssh_set([destination])
+                with patch.object(r, 'unreachable_reason', return_value='Operation timed out'), self.assertRaises(ValueError) as caught:
+                    r.ssh_require_reachable(r.saved_ssh_target())
+            self.assertIn(expected, str(caught.exception))
+            self.assertIn('nicht erreichbar (Operation timed out)', str(caught.exception))
+        with patch.dict(os.environ, {'VIBECODE_TAILSCALE': ''}):
+            r.ssh_set([f'user@{self.TAILNET}'])
+            with patch.object(r, 'unreachable_reason', return_value='x'), self.assertRaisesRegex(ValueError, 'Tailscale ist auf diesem Mac nicht installiert'):
+                r.ssh_require_reachable(r.saved_ssh_target())
+
+    def test_a_plain_alias_gets_no_tailscale_claims_unless_tailscale_knows_the_name(self):
+        specific = ('Tailscale-Gerät', 'nicht verbunden', 'kennt dieses Gerät', 'im Tailnet', 'Tailscale kennt')
+        for label, status in (('fehlt', None), ('Stopped', self.tailnet_status(state='Stopped')),
+                              ('läuft ohne Treffer', self.tailnet_status())):
+            context = self.tailscale_stub(status) if status else patch.dict(os.environ, {'VIBECODE_TAILSCALE': ''})
+            with self.subTest(label), context:
+                r.ssh_set(['user@spark'])
+                with patch.object(r, 'unreachable_reason', return_value='Operation timed out'), self.assertRaises(ValueError) as caught:
+                    r.ssh_require_reachable(r.saved_ssh_target())
+            for sentence in specific:
+                self.assertNotIn(sentence, str(caught.exception), msg=label)
+        with self.tailscale_stub(self.tailnet_status(peers=[('spark.example-tailnet.ts.net', '100.64.0.7', False)])):
+            r.ssh_set(['user@spark'])                                                          # kennt Tailscale den kurzen Namen, gilt er als Tailnet-Gerät
+            with patch.object(r, 'unreachable_reason', return_value='Operation timed out'), self.assertRaises(ValueError) as caught:
+                r.ssh_require_reachable(r.saved_ssh_target())
+        self.assertIn('im Tailnet offline', str(caught.exception))
+
+    def test_a_tailnet_name_that_does_not_resolve_points_to_the_100_address_not_to_the_ssh_port(self):
+        unresolved = 'getaddrinfo: nodename nor servname provided, or not known'
+        online = [(self.TAILNET, '100.64.0.5', True)]
+        with self.tailscale_stub(self.tailnet_status(peers=online)):
+            r.ssh_set([f'user@{self.TAILNET}'])
+            with patch.object(r, 'unreachable_reason', return_value=unresolved), self.assertRaises(ValueError) as caught:
+                r.ssh_require_reachable(r.saved_ssh_target())
+        text = str(caught.exception)
+        self.assertIn('lässt sich auf diesem Mac nicht auflösen', text)
+        self.assertIn('100.64.0.5', text)
+        self.assertNotIn('SSH-Port antwortet nicht', text)
+        self.assertNotIn('Unterwegs hilft Tailscale', text)                                    # kein widersprüchlicher Allgemeintipp
+        with self.tailscale_stub(self.tailnet_status(peers=[(self.TAILNET, '100.64.0.5', False)])):
+            with patch.object(r, 'unreachable_reason', return_value=unresolved), self.assertRaises(ValueError) as caught:
+                r.ssh_require_reachable(r.saved_ssh_target())
+        self.assertIn('100.64.0.5', str(caught.exception))
+        self.assertIn('Außerdem ist der Remote-Mac im Tailnet offline', str(caught.exception))   # beides gesagt, nichts verschwiegen
+
+    def test_a_local_name_never_asks_tailscale_and_a_tailnet_line_is_a_valid_target(self):
+        with self.tailscale_stub(self.tailnet_status()):
+            r.ssh_set(['user@remote-mac.local'])
+            with patch.object(r, 'unreachable_reason', return_value='nodename nor servname provided, or not known'), \
+                 self.assertRaises(ValueError) as caught:
+                r.ssh_require_reachable(r.saved_ssh_target())
+            self.assertNotIn('Tailnet', str(caught.exception))
+            self.assertEqual(self.stub_calls(), [])                                           # .local fragt Tailscale gar nicht erst
+        for host in (self.TAILNET, '100.64.0.5'):
+            self.assertEqual(r.ssh_target(f'user@{host}'), {'user': 'user', 'host': host, 'port': 22})
+
+    # --- Tailscale steuern: Anzeige, Verbinden, Anmelden, „mit VibeCode starten und beenden“ -----------------------------
+    # Wieder nur die Attrappe: kein echtes up/down/logout, kein echter Browser, nie sudo.
+
+    def fake_tailscale(self, payload=None, /, **commands):
+        """A fake CLI: `status` prints status.json; any other command prints <cmd>.err, exits with <cmd>.exit and, if
+        <cmd>.after exists, replaces the status (so `up` can turn Stopped into Running). commands: name=(exit, stderr, after)."""
+        base = Path(self.tmp.name) / 'fake-ts'
+        base.mkdir(exist_ok=True)
+        for old in base.iterdir():                                      # every call starts from a clean stub and an empty call log
+            old.unlink()
+        self.fake_dir, self.stub_log = base, base / 'calls.log'
+        (base / 'status.json').write_text(json.dumps(payload) if payload is not None else '')
+        for name, (code, err, after) in commands.items():
+            (base / f'{name}.exit').write_text(str(code))
+            (base / f'{name}.err').write_text(err)
+            if after is not None:
+                (base / f'{name}.after').write_text(json.dumps(after))
+        stub = base / 'tailscale'
+        d = shlex.quote(str(base))
+        stub.write_text(f"""#!/bin/sh
+echo "BE_CLI=$TAILSCALE_BE_CLI $*" >> {d}/calls.log
+if [ "$1" = status ]; then
+  [ -f {d}/status.exit ] && {{ cat {d}/status.err >&2; exit "$(cat {d}/status.exit)"; }}
+  cat {d}/status.json; exit 0
+fi
+[ -f {d}/$1.err ] && cat {d}/$1.err >&2
+[ -f {d}/$1.after ] && cp {d}/$1.after {d}/status.json
+[ -f {d}/$1.exit ] && exit "$(cat {d}/$1.exit)"
+exit 0
+""")
+        stub.chmod(0o755)
+        return patch.dict(os.environ, {'VIBECODE_TAILSCALE': str(stub)})
+
+    def ts_calls(self):
+        """Calls of the fake CLI except `status`."""
+        return [line for line in (self.stub_log.read_text().splitlines() if self.stub_log.exists() else []) if ' status' not in line]
+
+    def ts_show(self):
+        return json.loads(self.out(r.tailscale_main, ['show']))
+
+    def test_show_maps_every_state_and_lists_devices_cleaned_and_online_first(self):
+        peers = [('zeta', '100.64.0.9', False, '2026-11-20T10:00:00Z'), ('alpha\x1b[31m', '100.64.0.8', True, '0001-01-01T00:00:00Z'),
+                 ('beta', '100.64.0.7', True, '')]
+        status = self.tailnet_status(peers=[(f'{n}.example-tailnet.ts.net', ip, on) for n, ip, on, _ in peers])
+        for key, (_, _, _, seen) in zip(status['Peer'], peers):
+            status['Peer'][key].update(HostName='x' * 200 if seen == '' else peers[0][0], OS='macOS\x07', LastSeen=seen)
+        with self.fake_tailscale(status):
+            data = self.ts_show()
+        self.assertEqual((data['variant'], data['state'], data['name'], data['ip'], data['tailnet']),
+                         ('cli', 'running', self.TAILNET, '100.64.0.5', 'example-tailnet.ts.net'))
+        self.assertEqual([d['online'] for d in data['devices']], [True, True, False])                       # online zuerst
+        self.assertTrue(all(len(d['name']) <= 60 and '\x1b' not in d['name'] and '\x07' not in d['os'] for d in data['devices']))
+        self.assertEqual([d['lastSeen'] for d in data['devices']], ['', '', '2026-11-20T10:00:00Z'])       # „0001-…“ ist „nie“
+        for backend, expected in (('Stopped', 'stopped'), ('NeedsLogin', 'needs-login'), ('NeedsMachineAuth', 'needs-approval'),
+                                  ('Starting', 'starting'), ('Seltsam', 'unknown')):
+            with self.subTest(backend), self.fake_tailscale(self.tailnet_status(state=backend)):
+                self.assertEqual(self.ts_show()['state'], expected)
+        with self.fake_tailscale(None, status=(1, 'failed to connect to local tailscaled; it does not appear to be running', None)):
+            self.assertEqual(self.ts_show()['state'], 'daemon-down')
+        with self.fake_tailscale(None, status=(1, 'Access denied: status access denied', None)):
+            self.assertEqual(self.ts_show()['state'], 'denied')
+        with patch.dict(os.environ, {'VIBECODE_TAILSCALE': ''}):
+            data = self.ts_show()
+        self.assertEqual((data['variant'], data['state'], data['devices']), ('missing', 'missing', []))
+
+    def test_the_app_variant_is_told_apart_from_the_cli_one(self):
+        self.assertEqual((r.tailscale_variant('/Applications/Tailscale.app/Contents/MacOS/Tailscale'), r.tailscale_variant('/opt/homebrew/bin/tailscale'),
+                          r.tailscale_variant(None)), ('app', 'cli', 'missing'))
+
+    def test_the_autostart_switch_is_stored_apart_and_a_corrupt_file_is_never_read_as_off(self):
+        self.assertEqual(r.tailscale_settings(), {'auto': False})
+        before = (Path(self.tmp.name) / 'config.json').read_text() if (Path(self.tmp.name) / 'config.json').exists() else None
+        self.out(r.tailscale_main, ['auto', 'on'])
+        self.assertEqual(json.loads((Path(self.tmp.name) / 'tailscale.json').read_text()), {'version': 1, 'auto': True})
+        after = (Path(self.tmp.name) / 'config.json').read_text() if (Path(self.tmp.name) / 'config.json').exists() else None
+        self.assertEqual(before, after)                                                                    # config.json bleibt unberührt
+        self.out(r.tailscale_main, ['auto', 'off'])
+        self.assertEqual(r.tailscale_settings(), {'auto': False})
+        for bad in ('{', '[]', '{"auto": "ja"}', '{"version": 2, "auto": true}', '{"auto": true, "x": 1}'):
+            (Path(self.tmp.name) / 'tailscale.json').write_text(bad)
+            with self.assertRaises(ValueError, msg=bad):
+                r.tailscale_settings()
+            with self.fake_tailscale(self.tailnet_status()):
+                self.assertIn('ungültig', self.ts_show()['autoError'])                                    # das Fenster warnt …
+                self.assertEqual(r.tailscale_ensure(), 'aus')                                            # … und ein Start bricht nicht ab
+                self.assertEqual(self.ts_calls(), [])
+        with self.assertRaises(ValueError):
+            self.out(r.tailscale_main, ['auto', 'vielleicht'])
+
+    def test_connect_is_a_bare_up_and_refuses_when_it_would_hang_or_cannot_work(self):
+        with self.fake_tailscale(self.tailnet_status(state='Stopped'), up=(0, '', self.tailnet_status())):
+            r.write('tailscale-ours.json', {'boot': 'b', 'launched': 1})
+            self.assertIn('verbunden', self.out(r.tailscale_main, ['up']))
+            self.assertEqual(self.ts_calls(), ['BE_CLI=1 up'])                                           # ohne jede Option
+            self.assertFalse((Path(self.tmp.name) / 'tailscale-ours.json').exists())                     # von Hand: nicht mehr „von uns“
+            self.out(r.tailscale_main, ['up'])
+            self.assertEqual(self.ts_calls(), ['BE_CLI=1 up'])                                           # läuft schon: nichts zu tun
+        with self.fake_tailscale(self.tailnet_status(state='NeedsLogin')), self.assertRaisesRegex(ValueError, 'nicht angemeldet'):
+            r.tailscale_up()                                                                             # ein up würde ewig warten
+        self.assertEqual(self.ts_calls(), [])
+        with self.fake_tailscale(None, status=(1, 'Access denied: status access denied', None)), self.assertRaisesRegex(ValueError, 'set --operator'):
+            r.tailscale_up()
+        with self.fake_tailscale(self.tailnet_status(state='Stopped'), up=(1, 'Access denied: checkprefs access denied', None)), \
+             self.assertRaisesRegex(ValueError, 'set --operator'):
+            r.tailscale_up()
+        with patch.dict(os.environ, {'VIBECODE_TAILSCALE': ''}), self.assertRaisesRegex(ValueError, 'nicht installiert'):
+            r.tailscale_down()
+
+    def test_disconnect_and_logout_run_exactly_those_commands(self):
+        with self.fake_tailscale(self.tailnet_status(), down=(0, '', self.tailnet_status(state='Stopped'))):
+            r.write('tailscale-ours.json', {'boot': 'b', 'launched': 1})
+            self.out(r.tailscale_main, ['down'])
+            self.assertEqual(self.ts_calls(), ['BE_CLI=1 down'])
+            self.assertFalse((Path(self.tmp.name) / 'tailscale-ours.json').exists())
+        with self.fake_tailscale(self.tailnet_status(state='Stopped'), logout=(0, '', None)):
+            self.out(r.tailscale_main, ['logout'])
+            self.assertEqual(self.ts_calls(), ['BE_CLI=1 logout'])
+
+    def test_login_opens_only_an_https_auth_link_and_never_waits_forever(self):
+        url = 'https://login.example.invalid/a/abc123'
+        waiting = self.tailnet_status(state='NeedsLogin')
+        waiting['AuthURL'] = url
+        with self.fake_tailscale(waiting), patch.object(r, 'run') as run, patch.object(r, 'detached') as popen:
+            popen.return_value.pid = 4242
+            shown = self.out(r.tailscale_login)
+        self.assertEqual(json.loads(shown), {'url': url})
+        run.assert_called_once_with('/usr/bin/open', url, check=False)
+        self.assertEqual(popen.call_args.args[0][1:], ['up'])                                            # ein ungebundenes up wartet auf den Browser
+        self.assertEqual(r.read('tailscale-login.json'), {'pid': 4242})
+        for bad in ('http://login.example.invalid/a/x', 'javascript:alert(1)', 'https://x y', 'file:///etc/passwd', '', 5):
+            odd = self.tailnet_status(state='NeedsLogin')
+            odd['AuthURL'] = bad
+            with self.subTest(repr(bad)), self.fake_tailscale(odd), patch.object(r, 'run') as run, patch.object(r, 'detached') as popen:
+                popen.return_value.pid = 1
+                with self.assertRaisesRegex(ValueError, 'keinen Anmelde-Link'):
+                    r.tailscale_login(wait=0)
+            self.assertEqual([c for c in run.call_args_list if c.args[0] == '/usr/bin/open'], [])        # nichts wird geöffnet
+        with self.fake_tailscale(self.tailnet_status()), patch.object(r, 'detached') as popen:
+            self.assertEqual(json.loads(self.out(r.tailscale_login)), {'url': ''})                      # schon verbunden: kein up, kein Link
+            popen.assert_not_called()
+
+    def test_login_falls_back_to_the_link_that_up_itself_prints(self):
+        url = 'https://login.example.invalid/a/zzz999'
+
+        def fake_up(command, out, env=None):                                                       # `up` schreibt den Link in sein Log
+            out.write(f'\nTo authenticate, visit:\n\n\t{url}\n\n')
+            out.flush()
+            return Mock(pid=9)
+        waiting = self.tailnet_status(state='NeedsLogin')                                          # der Status nennt ihn (noch) nicht
+        with self.fake_tailscale(waiting), patch.object(r, 'run') as run, patch.object(r, 'detached', side_effect=fake_up):
+            self.assertEqual(json.loads(self.out(r.tailscale_login)), {'url': url})
+        run.assert_any_call('/usr/bin/open', url, check=False)
+        with self.fake_tailscale(waiting), patch.object(r, 'run') as run, patch.object(r, 'detached', side_effect=lambda c, out, env=None: Mock(pid=9)):
+            (Path(self.tmp.name) / 'tailscale-login.log').write_text('')
+            with self.assertRaisesRegex(ValueError, 'keinen Anmelde-Link'):
+                r.tailscale_login(wait=0)
+        self.assertEqual([c for c in run.call_args_list if c.args[0] == '/usr/bin/open'], [])
+
+    def test_a_stale_login_process_is_ended_only_if_it_really_is_our_up(self):
+        waiting = self.tailnet_status(state='NeedsLogin')
+        waiting['AuthURL'] = 'https://login.example.invalid/a/abc'
+        for ours, killed in ((True, True), (False, False)):
+            r.write('tailscale-login.json', {'pid': 777})
+            with self.subTest(ours), self.fake_tailscale(waiting), patch.object(r, 'run'), patch.object(r, 'detached') as popen, \
+                 patch.object(r, 'pid_runs', return_value=ours) as check, patch.object(r.os, 'kill') as kill:
+                popen.return_value.pid = 5
+                self.out(r.tailscale_login)
+            self.assertTrue(check.call_args.args[1].endswith(' up'))
+            self.assertEqual(kill.called, killed)                                                        # eine wiederverwendete pid bleibt unberührt
+
+    def test_ensure_only_acts_when_the_switch_is_on_and_tailscale_can_be_controlled(self):
+        r.tailscale_auto(['on'])
+        stopped, running = self.tailnet_status(state='Stopped'), self.tailnet_status()
+        with patch.object(r, 'spawn_watcher') as spawn, patch.object(r, 'boot_id', return_value='boot-1'):
+            # aus -> nichts
+            r.tailscale_auto(['off'])
+            with self.fake_tailscale(stopped, up=(0, '', running)):
+                self.assertEqual(r.tailscale_ensure(), 'aus')
+                self.assertEqual(self.ts_calls(), [])
+            r.tailscale_auto(['on'])
+            # Stopped -> up mit Wartezeit, Marke, Wächter
+            with self.fake_tailscale(stopped, up=(0, '', running)):
+                self.assertEqual(r.tailscale_ensure(wait=5), 'verbunden')
+                self.assertEqual(self.ts_calls(), ['BE_CLI=1 up'])
+            marker = r.read('tailscale-ours.json')
+            self.assertEqual((marker['boot'], marker['seen']), ('boot-1', False))
+            spawn.assert_called_once_with()
+            # schon an, ohne Marke: nicht unseres -> nichts, kein Wächter
+            spawn.reset_mock()
+            (Path(self.tmp.name) / 'tailscale-ours.json').unlink()
+            with self.fake_tailscale(running):
+                self.assertEqual(r.tailscale_ensure(), 'lief schon')
+                self.assertEqual(self.ts_calls(), [])
+            self.assertFalse((Path(self.tmp.name) / 'tailscale-ours.json').exists())
+            spawn.assert_not_called()
+            # schon an, mit Marke: neuer Start -> Marke frisch, Wächter sicherstellen
+            r.write('tailscale-ours.json', {'boot': 'boot-1', 'launched': 5.0, 'seen': True, 'lastSeen': 6.0})
+            with self.fake_tailscale(running):
+                self.assertEqual(r.tailscale_ensure(), 'wird verbunden')
+            marker = r.read('tailscale-ours.json')
+            self.assertFalse(marker['seen'])
+            self.assertGreater(marker['launched'], 5.0)
+            spawn.assert_called_once_with()
+            # Marke aus einem früheren Start des Macs: ungültig, nicht unseres
+            spawn.reset_mock()
+            r.write('tailscale-ours.json', {'boot': 'boot-0', 'launched': 5.0})
+            with self.fake_tailscale(running):
+                self.assertEqual(r.tailscale_ensure(), 'lief schon')
+            self.assertFalse((Path(self.tmp.name) / 'tailscale-ours.json').exists())
+            # nicht steuerbar oder nicht angemeldet -> überspringen, nichts anfassen, nichts werfen
+            for label, context in (('NeedsLogin', self.fake_tailscale(self.tailnet_status(state='NeedsLogin'))),
+                                   ('Dienst aus', self.fake_tailscale(None, status=(1, 'not running', None))),
+                                   ('verweigert', self.fake_tailscale(None, status=(1, 'Access denied', None))),
+                                   ('fehlt', patch.dict(os.environ, {'VIBECODE_TAILSCALE': ''}))):
+                with self.subTest(label), context:
+                    self.assertEqual(r.tailscale_ensure(), 'übersprungen')
+                    self.assertFalse((Path(self.tmp.name) / 'tailscale-ours.json').exists())
+            spawn.assert_not_called()
+
+    def test_ensure_without_wait_starts_up_detached_and_a_slow_up_does_not_stop_the_watcher(self):
+        r.tailscale_auto(['on'])
+        with self.fake_tailscale(self.tailnet_status(state='Stopped')), patch.object(r, 'spawn_watcher') as spawn, \
+             patch.object(r, 'boot_id', return_value='b'), patch.object(r, 'detached') as popen:
+            self.assertEqual(r.tailscale_ensure(), 'wird verbunden')                                    # kein Warten: der Start bleibt flott
+        self.assertEqual(popen.call_args.args[0][1:], ['up'])
+        spawn.assert_called_once_with()
+        real = subprocess.run
+
+        def slow_up(command, *args, **kwargs):
+            if list(command[1:]) == ['up']:
+                raise subprocess.TimeoutExpired(command, 1)
+            return real(command, *args, **kwargs)
+        with self.fake_tailscale(self.tailnet_status(state='Stopped')), patch.object(r, 'spawn_watcher') as spawn, \
+             patch.object(r, 'boot_id', return_value='b'), patch.object(r.subprocess, 'run', side_effect=slow_up):
+            self.assertEqual(r.tailscale_ensure(wait=1), 'verbunden')
+        spawn.assert_called_once_with()                                                                 # verbindet noch: der Wächter läuft trotzdem
+
+    def heartbeat(self, name, age, now):
+        folder = Path(self.tmp.name) / 'tailscale-sessions'
+        folder.mkdir(exist_ok=True)
+        file = folder / f'{name}.json'
+        file.write_text('{}')
+        os.utime(file, (now - age, now - age))
+        return file
+
+    def watch(self, steps, status=None, marker=True, boot='b', **options):
+        """Run the watcher on a fake clock. `steps` is called after every poll with (clock, advance) and may end the run."""
+        clock = {'now': 1000.0}
+        if marker:
+            r.write('tailscale-ours.json', {'boot': boot, 'launched': 1000.0, 'seen': False, 'lastSeen': 0})
+
+        class Stop(Exception):
+            pass
+
+        def sleep(seconds):
+            clock['now'] += seconds
+            if steps(clock) is False:
+                raise Stop()
+        with self.fake_tailscale(status or self.tailnet_status(), down=(0, '', self.tailnet_status(state='Stopped'))), \
+             patch.object(r, 'boot_id', return_value='b'):
+            try:
+                result = r.tailscale_watch(clock=lambda: clock['now'], sleep=sleep, **options)
+            except Stop:
+                result = 'läuft noch'
+        self.watch_end = clock['now']                                                            # die Uhr beim Ende: wann wurde getrennt?
+        return result
+
+    def test_the_watcher_disconnects_after_the_last_window_closed_and_only_then(self):
+        state = {'closed': False}
+
+        def steps(clock):
+            if clock['now'] < 1100:
+                self.heartbeat('window-1', 5, clock['now'])                                     # ein Fenster meldet sich
+            elif not state['closed']:
+                state['closed'] = True
+                (Path(self.tmp.name) / 'tailscale-sessions' / 'window-1.json').unlink()         # Fenster zu
+        self.assertEqual(self.watch(steps), 'getrennt')
+        self.assertEqual(self.ts_calls(), ['BE_CLI=1 down'])
+        self.assertFalse((Path(self.tmp.name) / 'tailscale-ours.json').exists())
+        self.assertFalse((Path(self.tmp.name) / 'tailscale-sessions').exists())                  # Wächter räumt auf
+
+    def test_the_watcher_waits_for_the_grace_period_and_a_second_window_keeps_tailscale_on(self):
+        calls = {'n': 0}
+
+        def steps(clock):
+            calls['n'] += 1
+            if calls['n'] < 4:
+                self.heartbeat('window-1', 5, clock['now'])
+            elif calls['n'] < 40:
+                self.heartbeat('window-2', 5, clock['now'])                                      # Fenster 1 zu, Fenster 2 lebt
+            else:
+                return False
+        self.assertEqual(self.watch(steps), 'läuft noch')
+        self.assertEqual(self.ts_calls(), [])
+        self.assertTrue((Path(self.tmp.name) / 'tailscale-ours.json').exists())
+        self.assertFalse((Path(self.tmp.name) / 'tailscale-sessions').exists() and any((Path(self.tmp.name) / 'tailscale-sessions').iterdir()))
+
+    def test_waking_from_sleep_never_disconnects_while_the_windows_reconnect(self):
+        state = {'phase': 0, 'jumped': False}
+
+        def steps(clock):
+            if state['phase'] < 3:
+                state['phase'] += 1
+                self.heartbeat('window-1', 5, clock['now'])                                     # vor dem Schlaf: ein Fenster meldet sich
+            elif not state['jumped']:
+                state['jumped'] = True
+                clock['now'] += 3600                                                            # Deckel zu, eine Stunde später: alles pausierte
+            elif clock['now'] < 1000 + 3600 + 40:
+                pass                                                                            # der Wächter ist vor der Erweiterung wach: keine frische Datei
+            elif clock['now'] < 1000 + 3600 + 100:
+                self.heartbeat('window-1', 2, clock['now'])                                     # die Erweiterung meldet sich wieder
+            else:
+                return False
+        self.assertEqual(self.watch(steps), 'läuft noch')
+        self.assertEqual(self.ts_calls(), [])                                                   # kein down, obwohl lastSeen eine Stunde alt war
+
+    def test_a_window_closed_during_sleep_is_noticed_after_a_full_grace_period_not_at_once(self):
+        state = {'polls': 0, 'jumped_at': None}
+
+        def steps(clock):
+            state['polls'] += 1
+            if state['polls'] <= 3:
+                self.heartbeat('window-1', 5, clock['now'])
+            elif state['polls'] == 4:
+                (Path(self.tmp.name) / 'tailscale-sessions' / 'window-1.json').unlink()         # das Fenster ist im Schlaf zugegangen
+                clock['now'] += 3600
+                state['jumped_at'] = clock['now']
+        self.assertEqual(self.watch(steps), 'getrennt')
+        self.assertEqual(self.ts_calls(), ['BE_CLI=1 down'])
+        self.assertGreaterEqual(self.watch_end - state['jumped_at'], 60)                        # erst nach einer vollen Schonfrist, nicht sofort
+
+    def test_the_watcher_never_disconnects_when_no_window_ever_reported(self):
+        self.assertEqual(self.watch(lambda clock: None, patience=300), 'keine Fenstermeldung')
+        self.assertEqual(self.ts_calls(), [])                                                    # im Zweifel bleibt Tailscale an
+        self.assertFalse((Path(self.tmp.name) / 'tailscale-ours.json').exists())
+
+    def test_the_watcher_leaves_foreign_stale_and_manually_changed_states_alone(self):
+        self.assertEqual(self.watch(lambda clock: False, marker=False), 'keine Marke')           # nicht von uns gestartet
+        self.assertEqual(self.watch(lambda clock: False, boot='anderer-start'), 'keine Marke')   # Marke aus einem früheren Start
+        self.assertEqual(self.watch(lambda clock: False, status=self.tailnet_status(state='Stopped')), 'nicht mehr verbunden')
+        self.assertFalse((Path(self.tmp.name) / 'tailscale-ours.json').exists())
+        self.assertEqual(self.ts_calls(), [])                                                    # keiner dieser Fälle ruft down auf
+
+    def test_a_stale_heartbeat_counts_as_closed_and_a_new_launch_starts_the_wait_again(self):
+        now = 5000.0
+        folder = Path(self.tmp.name) / 'tailscale-sessions'
+        self.assertEqual(r.live_sessions(now), [])
+        self.heartbeat('alt', r.HEARTBEAT_FRESH + 1, now)
+        self.heartbeat('neu', 3, now)
+        self.heartbeat('zukunft', -500, now)                                                     # Uhrfehler: nie „lebendig“
+        self.assertEqual([f.name for f in r.live_sessions(now)], ['neu.json'])
+        (folder / 'notiz.txt').write_text('x')
+        self.assertEqual([f.name for f in r.live_sessions(now)], ['neu.json'])
+        # nach einem neuen Start steht „gesehen“ wieder auf aus: ohne neue Meldung wird nicht getrennt
+        r.write('tailscale-ours.json', {'boot': 'b', 'launched': 1000.0, 'seen': False, 'lastSeen': 900.0})
+        with patch.object(r, 'boot_id', return_value='b'):
+            self.assertEqual(self.watch(lambda clock: False if clock['now'] > 1200 else None, marker=False, patience=10000), 'läuft noch')
+        self.assertEqual(self.ts_calls(), [])
+
+    def test_only_one_watcher_runs_and_it_starts_detached_without_a_terminal(self):
+        import fcntl
+        with (Path(self.tmp.name) / 'tailscale-watch.lock').open('a+') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.assertTrue(r.watcher_running())
+            self.assertEqual(r.tailscale_watch(sleep=lambda s: None), 'läuft schon')
+            with patch.object(r, 'detached') as popen:
+                r.spawn_watcher()
+            popen.assert_not_called()
+        self.assertFalse(r.watcher_running())
+        with patch.object(r, 'detached') as popen:
+            r.spawn_watcher()
+        self.assertEqual(popen.call_args.args[0][1:], [str(Path(r.__file__).resolve()), 'tailscale', 'watch'])
+        self.assertTrue((Path(self.tmp.name) / 'tailscale-sessions').is_dir())                   # ab jetzt melden sich die Fenster
+        with patch.object(r.subprocess, 'Popen') as popen:
+            r.detached(['/bin/echo'])
+        self.assertTrue(popen.call_args.kwargs['start_new_session'])
+        self.assertEqual((popen.call_args.kwargs['stdin'], popen.call_args.kwargs['stdout']), (subprocess.DEVNULL, subprocess.DEVNULL))   # kein Terminal
+
+    def test_the_setup_script_is_valid_sh_runs_sudo_only_for_the_two_steps_and_interpolates_nothing(self):
+        script = Path(self.tmp.name) / 'setup.sh'
+        script.write_text(r.TAILSCALE_SETUP)
+        self.assertEqual(subprocess.run(['/bin/sh', '-n', str(script)]).returncode, 0)
+        sudo_lines = [line.strip() for line in r.TAILSCALE_SETUP.splitlines() if line.strip().startswith('sudo ')]
+        self.assertEqual(sudo_lines, ['sudo "$BREW" services start tailscale || exit 1', 'sudo "$TAILSCALE" set --operator="$USER" || exit 1'])
+        self.assertIn('/Applications/Tailscale.app', r.TAILSCALE_SETUP)                          # die App und der Dienst vertragen sich nicht
+        self.assertIn('brew.sh', r.TAILSCALE_SETUP)
+        with patch.object(r.os, 'execv') as execv:
+            self.out(r.tailscale_main, ['setup'])
+        execv.assert_called_once_with('/bin/sh', ['/bin/sh', '-c', r.TAILSCALE_SETUP])
+        for bad in (['show', 'x'], ['gibt-es-nicht'], ['ensure', '--wait'], ['ensure', '--wait', 'x'], ['auto']):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                self.out(r.tailscale_main, bad)
 
     def test_summary_is_one_json_line_for_the_window(self):
         self.c.update(apps=['Codex', 'Claude'])
