@@ -201,6 +201,19 @@ modules is present, so a removed module only hides what it provided.
   `share-recheck` = `--no-open`, so System Settings is not opened again on every check) and, when it is on, the status, the join line
   in its own selectable field and the two steps. No terminal commands (`sudo systemsetup`, `--wake`) in the mask. A reply that is not
   JSON is reported, never rendered.
+- **Invitations** ("Gerät aus Tailscale freigeben…" in the share mask, "Einladungen abholen" in the Tailscale footer): `SSH_ACTIONS` gained `invite`,
+  `inbox`, `accept`, `grant-check`, `grant`; `ssh_action` passes a device (invite) or exactly one 32-hex code (the others) and nothing else.
+  `shareFlow(ui, backend, tailscale)` hands `canInvite` to `ui.share` as a **separate argument** (tests compare the backend's share object strictly,
+  so it must not be mutated); `inviteFlow`/`inboxFlow` live next to `allowFlow`. The inbox is read **only on the click**, never in `state()`.
+- **Agents** (`agents_local()` / `agents_remote()`, window section "Agenten" right below Workspaces): `core/agent_scan.py` is one stdlib file that
+  reads the END of Claude Code (`~/.claude/projects/*/*.jsonl`) and Codex (`~/.codex/sessions/**/rollout-*.jsonl`) session files and prints JSON
+  `{agent, cwd, branch, state, age}` — **never message text** (a test plants secret-like text and asserts it is absent). States are estimates: Claude
+  from the last non-sidechain `user`/`assistant` record (`end_turn` = ready, unanswered `tool_use` > 20 s = tool_wait, recent unfinished = working,
+  silent > 90 s = stalled), Codex from the last turn event (`task_complete`/`turn_aborted` = ready). `map_agent_sessions()` keeps only sessions inside a
+  known project (longest path wins, `realpath` locally, `normpath` for a remote Mac) and sanitizes every string. Roots are configurable
+  (`VIBECODE_CLAUDE_PROJECTS`, `VIBECODE_CODEX_SESSIONS`, `$CODEX_HOME`, `$CLAUDE_CONFIG_DIR`); `test_core` points them at empty folders so no test ever reads real
+  transcripts. **`state()` only scans locally**; the other Mac is asked only when the dialog's "Auf <Mac> prüfen" is clicked (`agents remote`), so the
+  overview never waits on SSH. Not verified: the heuristics against every agent version; Codex "waiting for approval" is not modelled.
 - **Tailscale section.** `state()['tailscale']` is `tailscale_info()` (`remote tailscale show`, run in the same thread pool as the module
   statuses; `{'available': False}` without the remote module, `{'available': True, 'error'}` when unreadable, never an exception). The
   window only triggers `TAILSCALE_ACTIONS` (`up down login logout auto-on auto-off setup`) through `vibecode.py tailscale ACTION`; `setup`

@@ -141,6 +141,40 @@ own check; anything else belongs to the remote command.
   - Tests use a fake CLI script (`fake_tailscale`), `detached`/`spawn_watcher` patched, a fake clock for the watcher; never a real
     `up`, `down`, `logout` or browser. Verified once with real processes against the fake CLI (detached watcher, `down` after the heartbeat
     stopped). **Not verified against a real Tailscale or a real VS Code window.**
+- **Own tailnet device as target** (`ssh tailnet user@device`, window: "Gerät per SSH verbinden…"): no lines between the Macs. `tailnet_peer()` accepts
+  a host only if Tailscale is `Running`, lists it as a peer, its `UserID` equals this Mac's, `ShareeNode` is not true and it has a 100.64/10 address
+  (otherwise a ValueError and **nothing** is read, written or saved). Only then `pin_tailnet_host_key()` trusts its ed25519 key on first use,
+  scanned from the peer's **100.x address** and written to `known_hosts` for **both** name and address (`name,100.x ssh-ed25519 …`) so ssh, `join`
+  and the editor's Remote-SSH all match; a host already known is never overwritten (same rule as `pin_host_key`). The saved host is the MagicDNS name
+  only if `magic` is on, else the address. Exit codes like `join`: 0 connected, 2 = the device does not know our key yet. `probe_login()` is the
+  shared "try the login" step (also used by `join`). `ssh pair --verify` (window: Terminal) runs `ssh-copy-id` as a child (not `execv`) and then probes,
+  so the Terminal ends with a result; plain `ssh pair` still replaces the process. `--verify` first runs `ensure_client_key()` (a fresh Mac has no key: interactive
+  `ssh-keygen -t ed25519`, comment "VibeCode Workspace", the user picks the passphrase) and, if the probe is still denied and the key needs a passphrase
+  (`key_needs_passphrase`), one `ssh-add --apple-use-keychain` plus one re-probe. If the name does not resolve on this Mac (tailnet has MagicDNS, this Mac
+  does not use Tailscale DNS) `ssh_tailnet` retries with the 100.x address and saves that. **Tailscale SSH is deliberately not used** (default "check" policy asks
+  for re-authentication, the GUI variants have no server). Verified against the real CLI only: `Self`/`Peer` carry `UserID`, `ShareeNode` is absent for
+  own nodes. **Not verified:** the whole flow with a second real Mac.
+- **Invitation from the sharing Mac** (`ssh invite DEVICE` → `ssh inbox` → `ssh accept CODE` → `ssh grant --check|--yes CODE`; window: share mask
+  "Gerät aus Tailscale freigeben…" and the Remote footer "Einladungen abholen"): Taildrop is the only agent-free channel between the Macs. The
+  sharing Mac sends `vibecode-invite-<nonce>.json` (`{version, nonce, host, user, hostKey, expires}`, 1 h); the other Mac checks the host is an own
+  tailnet device (`tailnet_peer`) and that the scanned key over the peer's 100.x **equals** the invitation's, saves the target and answers with
+  `vibecode-answer-<nonce>.json` (only its PUBLIC key); the sharing Mac enters it only after `grant --yes`, which the window calls after the
+  `confirmAllow` fingerprint dialog (Taildrop is unauthenticated at file level; the repo invariant is that a key is authorized only after an explicit
+  confirmation). State lives in `taildrop.json` (`sent`, `invites`, `answers`; corrupt = raises, expired entries dropped; the name shown for an answer
+  comes from the pending record, never from the file). **`tailscale file get` empties the WHOLE inbox**: `taildrop_collect` fetches into a private temp
+  dir with `--wait=false --conflict=rename`, reads only the two exact names (<= 16 KB, strict schema, nonce in name == nonce inside) and moves
+  everything else UNCHANGED to `~/Downloads` (numbered on a clash; `VIBECODE_DOWNLOADS` overrides for tests), counts it and the window says so. A valid
+  answer nobody asked for is dropped (`unknown`), an invitation from a device that is not yours is dropped too (`rejected`, it never reaches
+  Downloads); `inbox` also reports `variant`, and with the **app** variant and nothing found the window says Taildrop may need switching on and files may
+  land in Downloads by themselves, pointing to `ssh tailnet`. `ssh_invite` loads `taildrop.json` BEFORE sending, so a corrupt file fails with nothing sent. Never call a real `file cp`/`file get` from tests or an agent: tests use a fake CLI per simulated Mac
+  (`two_macs`/`as_mac`) whose `file cp` copies into the other Mac's inbox. Exit 4 of `accept` = this Mac has no SSH key (window opens `ssh keygen`
+  in a Terminal). Verified against the real CLI: Taildrop targets exist, `file get` on an empty inbox prints `moved 0/0 files` and exits 0.
+  **Not verified:** a real transfer between two Macs, and the Tailscale **app** variant (its receiving behaviour differs; fall back to `ssh tailnet`).
+- **Agents on the saved Mac** (`ssh agents`): runs `core/agent_scan.py` over stdin with `BatchMode`, 45 s timeout, after a fixed preflight
+  (`AGENT_REMOTE`: on macOS refuse when `xcode-select -p` fails, because the python3 shim would pop up an installer; `command -v python3`; exit 3 =
+  "python3 fehlt"). Read-only on the other Mac. Only on an explicit click in the window, never when the overview opens. Over a non-interactive ssh the PATH is minimal, so
+  the other Mac runs `/usr/bin/python3` (3.9): the scanner and everything it imports must stay 3.9-compatible (no `match`, no `X | Y` types); the shell
+  end-to-end test pins that PATH.
 - The host string must be written identically in `ssh.json`, `known_hosts` (`join` pins that exact string) and `remote-hosts.json`
   (repo search; the window prefills it from the saved target). Remote projects are named `<folder> [SSH: <host>]`, so changing the host
   renames them and saved workspaces show them as missing.

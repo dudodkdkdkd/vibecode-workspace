@@ -14,6 +14,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch, Mock, call
 
@@ -593,6 +594,8 @@ class RemoteTests(unittest.TestCase):
 
     def fake_host(self, known=False, scan=True):
         """Replace ssh-keygen -F / ssh-keyscan; returns (host key line, its fingerprint)."""
+        for name in ('host_key', 'host_key.pub'):
+            (self.ssh_dir / name).unlink(missing_ok=True)               # ssh-keygen would ask before overwriting and wait forever
         host_key = self.make_key('host_key', 'root@remote-mac')
         kind, blob = host_key.split()[:2]
 
@@ -775,12 +778,15 @@ class RemoteTests(unittest.TestCase):
 
     TAILNET = 'remote-mac.example-tailnet.ts.net'
 
-    def tailnet_status(self, state='Running', magic=True, name=TAILNET, ips=('100.64.0.5', 'fd7a:115c:a1e0::5'), peers=None):
+    def tailnet_status(self, state='Running', magic=True, name=TAILNET, ips=('100.64.0.5', 'fd7a:115c:a1e0::5'), peers=None, owner=1001):
+        """Peers are (name, ip, online) plus optionally the owner's user id and True if the node was shared in from another account."""
         peers = [('laptop.example-tailnet.ts.net', '100.64.0.9', True)] if peers is None else peers
+        nodes = {}
+        for n, (host, ip, online, *extra) in enumerate(peers):
+            nodes[f'nodekey:{n}'] = {'DNSName': host + '.', 'TailscaleIPs': [ip, 'fd7a:115c:a1e0::9'], 'Online': online,
+                                     'UserID': extra[0] if extra else owner, **({'ShareeNode': True} if len(extra) > 1 and extra[1] else {})}
         return {'BackendState': state, 'CurrentTailnet': {'Name': 'example-tailnet.ts.net', 'MagicDNSEnabled': magic},
-                'Self': {'DNSName': name + '.', 'TailscaleIPs': list(ips), 'Online': True},
-                'Peer': {f'nodekey:{n}': {'DNSName': host + '.', 'TailscaleIPs': [ip, 'fd7a:115c:a1e0::9'], 'Online': online}
-                         for n, (host, ip, online) in enumerate(peers)}}
+                'Self': {'DNSName': name + '.', 'TailscaleIPs': list(ips), 'Online': True, 'UserID': owner}, 'Peer': nodes}
 
     def tailscale_stub(self, status=None, raw=None, exit_code=0):
         """A fake `tailscale`; returns a context manager that points VIBECODE_TAILSCALE at it. self.stub_log has its calls."""
@@ -907,6 +913,521 @@ class RemoteTests(unittest.TestCase):
                 r.ssh_require_reachable(r.saved_ssh_target())
         self.assertIn('100.64.0.5', str(caught.exception))
         self.assertIn('Außerdem ist der Remote-Mac im Tailnet offline', str(caught.exception))   # beides gesagt, nichts verschwiegen
+
+    # --- Gerät aus dem eigenen Tailnet als SSH-Ziel: ohne Zeilen, Host-Schlüssel per Tailscale bestätigt ---------------------
+
+    STUDIO = 'studio.example-tailnet.ts.net'
+
+    def own_device(self, **options):
+        peers = options.pop('peers', [(self.STUDIO, '100.64.0.9', True)])
+        return self.tailscale_stub(self.tailnet_status(peers=peers, **options))
+
+    def known_hosts_text(self):
+        file = self.ssh_dir / 'known_hosts'
+        return file.read_text() if file.exists() else None
+
+    def connect_tailnet(self, destination, probe='ok', **options):
+        """Run `ssh tailnet` against the fake CLI; returns (output, host key line, its fingerprint)."""
+        with self.own_device(**options):
+            entry, fingerprint = self.fake_host()
+            with patch.object(r, 'unreachable_reason', return_value=None), patch.object(r, 'probe_login', return_value=probe):
+                return self.out(r.ssh_tailnet, [destination]), entry, fingerprint
+
+    def test_tailnet_connect_trusts_an_own_device_and_writes_name_and_address(self):
+        for destination, magic, saved_host, written_names in (
+                ('user@100.64.0.9', True, self.STUDIO, f'{self.STUDIO},100.64.0.9'),          # nach Adresse gewählt, MagicDNS an: der Name
+                ('user@studio', True, self.STUDIO, f'{self.STUDIO},100.64.0.9'),               # kurzer Name
+                ('user@100.64.0.9', False, '100.64.0.9', '100.64.0.9')):                       # ohne MagicDNS löst ein Name nirgends auf
+            with self.subTest(destination=destination, magic=magic):
+                (self.ssh_dir / 'known_hosts').unlink(missing_ok=True)
+                shown, entry, fingerprint = self.connect_tailnet(destination, magic=magic)
+                kind, blob = entry.split()[1:3]
+                self.assertEqual(r.read('ssh.json'), {'user': 'user', 'host': saved_host, 'port': 22})
+                self.assertEqual(self.known_hosts_text(), f'{written_names} {kind} {blob}\n')    # beide Schreibweisen: ssh, join und der Editor finden sie
+                self.assertIn(fingerprint, shown)
+                self.assertIn('Tailscale hat das Gerät als dein eigenes bestätigt', shown)
+                self.assertIn(f'✔ Verbunden mit user@{saved_host}', shown)
+
+    def test_tailnet_connect_refuses_what_is_not_your_own_online_tailscale_device(self):
+        stranger = [(self.STUDIO, '100.64.0.9', True, 2002)]                                     # anderes Konto im selben Tailnet
+        shared = [(self.STUDIO, '100.64.0.9', True, 1001, True)]                                  # von außen hereingeteiltes Gerät
+        elsewhere = [(self.STUDIO, '192.0.2.5', True)]                                            # keine Tailscale-Adresse
+        cases = [('fremdes Konto', dict(peers=stranger), 'user@100.64.0.9', 'gehört nicht zu deinem Tailscale-Konto'),
+                 ('geteilt', dict(peers=shared), 'user@100.64.0.9', 'gehört nicht zu deinem Tailscale-Konto'),
+                 ('unbekannt', dict(), 'user@100.64.0.77', 'kennt Tailscale in deinem Tailnet nicht'),
+                 ('keine 100.x-Adresse', dict(peers=elsewhere), 'user@192.0.2.5', 'keine Tailscale-Adresse'),
+                 ('Tailscale aus', dict(state='Stopped'), 'user@100.64.0.9', 'nicht verbunden'),
+                 ('ohne Konto-Kennung', dict(owner=None), 'user@100.64.0.9', 'gehört nicht zu deinem Tailscale-Konto')]
+        for label, options, destination, expected in cases:
+            with self.subTest(label):
+                status = self.tailnet_status(peers=options.get('peers', [(self.STUDIO, '100.64.0.9', True)]),
+                                             state=options.get('state', 'Running'), owner=options.get('owner', 1001))
+                if label == 'ohne Konto-Kennung':
+                    del status['Self']['UserID']
+                with self.tailscale_stub(status), patch.object(r, 'probe_login') as probe, patch.object(r, 'run') as run:
+                    with self.assertRaisesRegex(ValueError, expected):
+                        r.ssh_tailnet([destination])
+                probe.assert_not_called()
+                run.assert_not_called()                                                          # kein Schlüssel wird gelesen oder eingetragen
+                self.assertIsNone(self.known_hosts_text())
+                self.assertIsNone(r.read('ssh.json'))                                            # und nichts als Ziel gespeichert
+
+    def test_tailnet_connect_never_overwrites_a_known_host_and_reports_a_missing_key(self):
+        with self.own_device(), patch.object(r, 'unreachable_reason', return_value=None), patch.object(r, 'probe_login', return_value='ok'):
+            self.fake_host(known=True)
+            shown = self.out(r.ssh_tailnet, ['user@100.64.0.9'])
+        self.assertIsNone(self.known_hosts_text())                                               # bekannt: unangetastet
+        self.assertNotIn('Host-Schlüssel von', shown)
+        self.assertEqual(r.read('ssh.json')['host'], self.STUDIO)
+        with self.assertRaises(SystemExit) as caught:                                            # Gerät kennt unseren Schlüssel noch nicht
+            shown = self.connect_tailnet('user@100.64.0.9', probe='denied')
+        self.assertEqual(caught.exception.code, 2)
+
+    def test_tailnet_connect_exit_2_says_how_to_install_the_key(self):
+        shown = io.StringIO()
+        with self.own_device(), patch.object(r, 'unreachable_reason', return_value=None), patch.object(r, 'probe_login', return_value='denied'):
+            self.fake_host()
+            with self.assertRaises(SystemExit) as caught, contextlib.redirect_stdout(shown):
+                r.ssh_tailnet(['user@100.64.0.9'])
+        self.assertEqual(caught.exception.code, 2)
+        self.assertIn('ssh pair --verify', shown.getvalue())
+        self.assertEqual(r.read('ssh.json')['user'], 'user')                                     # das Ziel ist gespeichert, nur der Schlüssel fehlt
+
+    def test_tailnet_connect_rejects_bad_arguments_before_touching_anything(self):
+        with self.tailscale_stub(self.tailnet_status()):
+            for bad in ([], ['100.64.0.9'], ['user@100.64.0.9', 'x'], ['-oProxyCommand=x@100.64.0.9'], ['user@-oProxyCommand=x'], ['@100.64.0.9']):
+                with self.subTest(bad), patch.object(r, 'run') as run, self.assertRaises(ValueError):
+                    r.ssh_tailnet(bad)
+                run.assert_not_called()
+        self.assertEqual(self.ts_calls(), [])
+        self.assertIsNone(r.read('ssh.json'))
+
+    def test_pair_with_verify_ends_with_a_clear_result_and_plain_pair_still_replaces_the_process(self):
+        r.ssh_set(['user@studio.example-tailnet.ts.net'])
+        with patch.object(r, 'unreachable_reason', return_value=None), patch.object(r.os, 'execv') as execv, \
+             patch.object(r.subprocess, 'run') as run:
+            r.main(['ssh', 'pair'])
+        execv.assert_called_once()
+        run.assert_not_called()                                                                  # ohne --verify unverändert: kein zweites Programm
+        for copy_status, probe, expected in ((0, 'ok', '✔ Verbunden mit user@studio'), (0, 'denied', 'Permission denied'), (1, 'ok', None)):
+            with self.subTest(copy_status=copy_status, probe=probe), patch.object(r, 'unreachable_reason', return_value=None), \
+                 patch.object(r, 'ensure_client_key'), patch.object(r, 'key_needs_passphrase', return_value=False), \
+                 patch.object(r, 'own_public_key', return_value=(self.ssh_dir / 'id_ed25519.pub', 'ssh-ed25519 AAAA x', FP)), patch.object(r.os, 'execv') as execv, patch.object(r.subprocess, 'run', return_value=Mock(returncode=copy_status)) as run, \
+                 patch.object(r, 'probe_login', return_value=probe):
+                if expected is None:
+                    with self.assertRaises(SystemExit) as caught:
+                        r.main(['ssh', 'pair', '--verify'])
+                    self.assertEqual(caught.exception.code, 1)                                    # ssh-copy-id scheiterte: derselbe Status
+                elif probe == 'denied':
+                    with self.assertRaisesRegex(ValueError, expected):
+                        r.main(['ssh', 'pair', '--verify'])
+                else:
+                    self.assertIn(expected, self.out(r.main, ['ssh', 'pair', '--verify']))
+            execv.assert_not_called()
+            self.assertEqual(run.call_args.args[0][:3], ['/usr/bin/ssh-copy-id', '-p', '22'])
+        with self.assertRaises(ValueError):
+            r.main(['ssh', 'pair', '--anders'])
+        with self.assertRaises(ValueError):
+            r.main(['ssh', 'tailnet'])
+
+    def pair_run(self, probes, needs_passphrase=False, keygen_ok=True, have_key=True, copy_status=0):
+        """Run `ssh pair --verify` with every program stubbed; returns (outcome, the programs that were started in order)."""
+        r.ssh_set(['user@studio.example-tailnet.ts.net'])
+        started = []
+        public = self.ssh_dir / 'id_ed25519.pub'
+        self.ssh_dir.mkdir(exist_ok=True)
+        public.unlink(missing_ok=True)
+        if have_key:
+            public.write_text('ssh-ed25519 AAAA user@client\n')
+
+        def fake_own_key():
+            if not public.is_file():
+                raise ValueError('Kein SSH-Schlüssel gefunden.')
+            return public, 'ssh-ed25519 AAAA user@client', FP
+
+        def fake_run(command, *args, **kwargs):
+            tool = command[0].rsplit('/', 1)[-1]
+            started.append(tool + (' ' + command[1] if tool == 'ssh-add' else ''))
+            if tool == 'ssh-keygen' and '-y' in command:
+                return Mock(returncode=1 if needs_passphrase else 0, stdout='', stderr='incorrect passphrase supplied to decrypt private key')
+            if tool == 'ssh-keygen':
+                if keygen_ok:
+                    public.write_text('ssh-ed25519 AAAA VibeCode Workspace\n')
+                return Mock(returncode=0 if keygen_ok else 1)
+            return Mock(returncode=copy_status)
+        sequence = list(probes)
+        with patch.object(r, 'unreachable_reason', return_value=None), patch.object(r.subprocess, 'run', side_effect=fake_run), \
+             patch.object(r, 'own_public_key', side_effect=fake_own_key), patch.object(r, 'probe_login', side_effect=lambda target: sequence.pop(0)):
+            try:
+                return self.out(r.ssh_pair, True), started
+            except (ValueError, SystemExit) as exc:
+                return exc, started
+
+    def test_pair_creates_a_missing_key_first_so_a_fresh_mac_works_in_the_same_terminal(self):
+        outcome, started = self.pair_run(['ok'], have_key=False)
+        self.assertEqual(started, ['ssh-keygen', 'ssh-copy-id'])                                  # erst der Schlüssel, dann das Eintragen
+        self.assertIn('✔ Verbunden', outcome)
+        outcome, started = self.pair_run(['ok'], have_key=True)
+        self.assertEqual(started, ['ssh-copy-id'])                                                 # ein vorhandener Schlüssel wird nie neu erzeugt
+        outcome, started = self.pair_run(['ok'], have_key=False, keygen_ok=False)
+        self.assertIsInstance(outcome, ValueError)
+        self.assertIn('nicht erzeugt', str(outcome))
+        self.assertEqual(started, ['ssh-keygen'])                                                  # ohne Schlüssel wird nichts eingetragen
+
+    def test_pair_asks_for_the_passphrase_once_when_the_copy_worked_but_the_login_is_still_refused(self):
+        outcome, started = self.pair_run(['denied', 'ok'], needs_passphrase=True)
+        self.assertEqual(started, ['ssh-copy-id', 'ssh-keygen', 'ssh-add --apple-use-keychain'])
+        self.assertIn('✔ Verbunden', outcome)
+        outcome, started = self.pair_run(['denied', 'denied'], needs_passphrase=True)              # auch danach nicht: klare Meldung, kein Dauerlauf
+        self.assertIsInstance(outcome, ValueError)
+        self.assertEqual(started.count('ssh-add --apple-use-keychain'), 1)
+        outcome, started = self.pair_run(['denied'], needs_passphrase=False)                       # ohne Passphrase ist es etwas anderes: nicht ssh-add
+        self.assertIsInstance(outcome, ValueError)
+        self.assertIn('Entfernte Anmeldung', str(outcome))
+        self.assertNotIn('ssh-add --apple-use-keychain', started)
+
+    def test_tailnet_connect_falls_back_to_the_address_when_the_name_does_not_resolve_here(self):
+        reasons = iter(['nodename nor servname provided, or not known', None])
+        with self.own_device(), patch.object(r, 'unreachable_reason', side_effect=lambda host, port, timeout=5: next(reasons)), \
+             patch.object(r, 'probe_login', return_value='ok'):
+            self.fake_host()
+            shown = self.out(r.ssh_tailnet, ['user@100.64.0.9'])
+        self.assertEqual(r.read('ssh.json')['host'], '100.64.0.9')                                # gespeichert wird die Adresse, die geht immer
+        self.assertIn('✔ Verbunden mit user@100.64.0.9', shown)
+        self.assertEqual(self.known_hosts_text().split()[0], '100.64.0.9')
+        with self.own_device(), patch.object(r, 'unreachable_reason', return_value='Operation timed out'), patch.object(r, 'probe_login') as probe:
+            self.fake_host()
+            with self.assertRaisesRegex(ValueError, 'nicht erreichbar'):                               # andere Gründe: kein Ausweichen
+                r.ssh_tailnet(['user@100.64.0.9'])
+        probe.assert_not_called()
+
+    def test_show_gives_the_dialog_the_local_user_and_the_query_knows_owner_and_sharing(self):
+        shared = [('a.example-tailnet.ts.net', '100.64.0.7', True, 1001, True), ('b.example-tailnet.ts.net', '100.64.0.8', True, 2002)]
+        with self.tailscale_stub(self.tailnet_status(peers=shared)):
+            self.assertEqual(self.ts_show()['localUser'], 'user')
+            info = r.tailscale_state()
+        self.assertEqual(info['owner'], 1001)
+        self.assertEqual([(p['name'], p['owner'], p['shared']) for p in info['peers']],
+                         [('a.example-tailnet.ts.net', 1001, True), ('b.example-tailnet.ts.net', 2002, False)])
+
+    # --- Agenten auf dem anderen Mac: das feste Skript per SSH, nur lesend ----------------------------------------------------------
+
+    def test_the_agent_scan_runs_on_the_saved_mac_over_stdin_in_batch_mode(self):
+        r.ssh_set(['user@studio.example-tailnet.ts.net'])
+        report = json.dumps({'sessions': [{'agent': 'claude', 'cwd': '/srv/git/app', 'branch': 'main', 'state': 'ready', 'age': 5}]})
+        with patch.object(r, 'unreachable_reason', return_value=None), \
+             patch.object(r.subprocess, 'run', return_value=Mock(returncode=0, stdout=report, stderr='')) as run:
+            shown = self.out(r.main, ['ssh', 'agents'])
+        self.assertEqual(json.loads(shown), json.loads(report))
+        command = run.call_args.args[0]
+        self.assertIn('BatchMode=yes', command)                                                    # nie auf eine Passwortabfrage warten
+        self.assertEqual(command[-2], 'user@studio.example-tailnet.ts.net')
+        self.assertTrue(command[-1].startswith('/bin/sh -c '))
+        self.assertEqual(run.call_args.kwargs['input'], r.AGENT_SCRIPT.read_text(encoding='utf-8'))   # genau dieses Skript, über stdin
+        self.assertIn('xcode-select -p', command[-1])                                              # erst prüfen, dann python3 (kein Installationsdialog)
+
+    def test_agent_scan_problems_say_what_is_wrong(self):
+        r.ssh_set(['user@studio.example-tailnet.ts.net'])
+        cases = [('python3 fehlt', Mock(returncode=3, stdout='', stderr='python3 fehlt (Command Line Tools: xcode-select --install)\n'), 'Command Line Tools'),
+                 ('ssh scheitert', Mock(returncode=255, stdout='', stderr='ssh: connect to host x port 22: Operation timed out\n'), 'antwortet nicht lesbar'),
+                 ('kein JSON', Mock(returncode=0, stdout='Willkommen!', stderr=''), 'kein Agenten-Bericht'),
+                 ('falsche Form', Mock(returncode=0, stdout='{"sessions": 5}', stderr=''), 'kein Agenten-Bericht')]
+        for label, outcome, expected in cases:
+            with self.subTest(label), patch.object(r, 'unreachable_reason', return_value=None), patch.object(r.subprocess, 'run', return_value=outcome):
+                with self.assertRaisesRegex(ValueError, expected):
+                    r.ssh_agents()
+        with patch.object(r, 'unreachable_reason', return_value='down'), patch.object(r.subprocess, 'run') as run:
+            with self.assertRaisesRegex(ValueError, 'nicht erreichbar'):
+                r.ssh_agents()
+        run.assert_not_called()                                                                    # ein schlafender Mac wird nicht erst versucht
+        with self.assertRaises(ValueError):
+            r.main(['ssh', 'agents', 'extra'])
+        (Path(self.tmp.name) / 'ssh.json').unlink()
+        with self.assertRaisesRegex(ValueError, 'Kein SSH-Ziel'):
+            r.ssh_agents()
+
+    def test_the_remote_agent_command_is_valid_sh_and_works_end_to_end_with_a_synthetic_session(self):
+        script = Path(self.tmp.name) / 'remote.sh'
+        script.write_text(r.AGENT_REMOTE)
+        self.assertEqual(subprocess.run(['/bin/sh', '-n', str(script)]).returncode, 0)
+        if subprocess.run(['/usr/bin/xcode-select', '-p'], capture_output=True).returncode:
+            self.skipTest('Command Line Tools fehlen: dort würde python3 einen Installationsdialog öffnen')
+        projects = Path(self.tmp.name) / 'claude'
+        folder = projects / '-Users-example-work-app'
+        folder.mkdir(parents=True)
+        (folder / 'one.jsonl').write_text(json.dumps({'type': 'assistant', 'cwd': '/Users/example/work/app', 'gitBranch': 'main',
+                                                      'message': {'role': 'assistant', 'stop_reason': 'end_turn',
+                                                                  'content': [{'type': 'text', 'text': 'GEHEIMER-TEXT'}]}}) + '\n')
+        # Wie bei einem SSH-Befehl ohne Terminal: nur der Standard-PATH, also das System-Python (3.9), nicht das aus dem Test.
+        env = dict(os.environ, PATH='/usr/bin:/bin:/usr/sbin:/sbin', VIBECODE_CLAUDE_PROJECTS=str(projects),
+                   VIBECODE_CODEX_SESSIONS=str(Path(self.tmp.name) / 'keine'))
+        result = subprocess.run(['/bin/sh', '-c', r.AGENT_REMOTE], input=r.AGENT_SCRIPT.read_text(encoding='utf-8'),
+                                capture_output=True, text=True, timeout=30, env=env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        sessions = json.loads(result.stdout)['sessions']
+        self.assertEqual([(s['agent'], s['state'], s['cwd'], s['branch']) for s in sessions], [('claude', 'ready', '/Users/example/work/app', 'main')])
+        self.assertNotIn('GEHEIMER-TEXT', result.stdout)
+
+    # --- Einladung per Taildrop (der freigebende Mac wählt das Gerät): zwei simulierte Macs ---------------------------------------
+    # Ein Attrappen-Tailscale pro Mac: `file cp` legt die Datei in den Posteingang des anderen, `file get` leert den eigenen in einen Ordner.
+
+    BOOK = 'book.example-tailnet.ts.net'
+
+    def two_macs(self):
+        root = Path(self.tmp.name) / 'macs'
+        names = {'studio': ('100.64.0.9', self.STUDIO, 'studio_user'), 'book': ('100.64.0.5', self.BOOK, 'book_user')}
+        self.macs = {}
+        for name, (ip, dns, user) in names.items():
+            folder = root / name
+            for sub in ('inbox', 'base', 'downloads'):
+                (folder / sub).mkdir(parents=True)
+            (folder / 'ssh').mkdir(mode=0o700)
+            self.macs[name] = {'dir': folder, 'ip': ip, 'dns': dns, 'user': user}
+        # echte Schlüssel: der Host-Schlüssel des Studios und der Benutzerschlüssel des MacBooks
+        for key, where, comment in (('studio_host', root / 'studio', 'root@studio'), ('id_ed25519', root / 'book' / 'ssh', 'user@book')):
+            subprocess.run(['/usr/bin/ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-C', comment, '-f', str(where / key)], check=True)
+        self.macs['studio']['host_key_file'] = root / 'studio' / 'studio_host.pub'
+        for name, other in (('studio', 'book'), ('book', 'studio')):
+            mac, peer = self.macs[name], self.macs[other]
+            status = self.tailnet_status(name=mac['dns'], ips=(mac['ip'],), peers=[(peer['dns'], peer['ip'], True)])
+            (mac['dir'] / 'status.json').write_text(json.dumps(status))
+            script = mac['dir'] / 'tailscale'
+            script.write_text(f"""#!/bin/sh
+echo "$*" >> {shlex.quote(str(mac['dir'] / 'calls.log'))}
+case "$1" in
+  status) cat {shlex.quote(str(mac['dir'] / 'status.json'))} ;;
+  file)
+    if [ "$2" = cp ]; then cp "$3" {shlex.quote(str(peer['dir'] / 'inbox'))}/; fi
+    if [ "$2" = get ]; then
+      for a; do dest="$a"; done
+      for f in {shlex.quote(str(mac['dir'] / 'inbox'))}/*; do [ -e "$f" ] && mv "$f" "$dest"/; done
+      echo "moved"
+    fi ;;
+esac
+exit 0
+""")
+            script.chmod(0o755)
+            mac['cli'] = script
+
+    @contextlib.contextmanager
+    def as_mac(self, name):
+        mac = self.macs[name]
+        with patch.object(r, 'BASE', mac['dir'] / 'base'), patch.object(r, 'SSH_DIR', mac['dir'] / 'ssh'), \
+             patch.object(r.getpass, 'getuser', return_value=mac['user']), \
+             patch.dict(os.environ, {'VIBECODE_TAILSCALE': str(mac['cli']), 'VIBECODE_DOWNLOADS': str(mac['dir'] / 'downloads')}):
+            studio_key = self.macs['studio']['host_key_file']
+            kind, blob = studio_key.read_text().split()[:2]
+
+            def fake_run(*args, check=True):
+                if args[1] == '-F':
+                    return Mock(returncode=1, stdout='')
+                return Mock(returncode=0, stdout=f'{self.macs["studio"]["ip"]} {kind} {blob}\n')
+            with patch.object(r, 'run', side_effect=fake_run), patch.object(r, 'HOST_KEY_FILE', studio_key), \
+                 patch.object(r, 'ssh_listening', return_value=(name == 'studio')):
+                yield mac
+
+    def inbox_json(self):
+        return json.loads(self.out(r.ssh_inbox))
+
+    def test_the_whole_invitation_works_between_two_macs_and_ends_with_exactly_one_confirmed_key(self):
+        self.two_macs()
+        book_key = (self.macs['book']['dir'] / 'ssh' / 'id_ed25519.pub').read_text().strip()
+        with self.as_mac('studio'):
+            self.assertIn('Einladung an book geschickt', self.out(r.ssh_invite, ['100.64.0.5']))
+            self.assertEqual(len(r.read('taildrop.json')['sent']), 1)
+        sent = list((self.macs['book']['dir'] / 'inbox').glob('vibecode-invite-*.json'))
+        self.assertEqual(len(sent), 1)
+        (self.macs['book']['dir'] / 'inbox' / 'urlaub.jpg').write_bytes(b'\xff\xd8 ein Foto, das nichts mit uns zu tun hat')
+        with self.as_mac('book'):
+            found = self.inbox_json()
+            self.assertEqual((found['foreign'], found['invalid'], len(found['answers'])), (1, 0, 0))
+            self.assertEqual([(i['device'], i['user'], i['host']) for i in found['invites']], [('studio', 'studio_user', self.STUDIO)])
+            code = found['invites'][0]['nonce']
+            shown = self.out(r.ssh_accept, [code])
+            self.assertIn('✔ Einladung von studio angenommen', shown)
+            self.assertEqual(r.read('ssh.json'), {'user': 'studio_user', 'host': self.STUDIO, 'port': 22})
+            known = (self.macs['book']['dir'] / 'ssh' / 'known_hosts').read_text().split()
+            self.assertEqual((known[0], known[1]), (f'{self.STUDIO},100.64.0.9', 'ssh-ed25519'))             # Name und Adresse
+            self.assertEqual(r.read('taildrop.json')['invites'], {})                                       # die Einladung ist verbraucht
+        self.assertEqual((self.macs['book']['dir'] / 'downloads' / 'urlaub.jpg').read_bytes()[:2], b'\xff\xd8')   # das fremde Foto: unverändert
+        with self.as_mac('studio'):
+            found = self.inbox_json()
+            self.assertEqual([(a['nonce'], a['device']) for a in found['answers']], [(code, 'book')])
+            check = json.loads(self.out(r.ssh_grant, ['--check', code]))
+            self.assertEqual((check['name'], check['known'], check['comment']), ('book', False, 'user@book'))
+            self.assertEqual(check['fingerprint'], r.keygen_fingerprint(' '.join(book_key.split()[:2])))
+            self.assertFalse((self.macs['studio']['dir'] / 'ssh' / 'authorized_keys').exists())              # prüfen schreibt nichts
+            self.assertIn('Freigegeben: book', self.out(r.ssh_grant, ['--yes', code]))
+            keys = (self.macs['studio']['dir'] / 'ssh' / 'authorized_keys').read_text().splitlines()
+            self.assertEqual(keys, [book_key])                                                             # genau dieser eine Schlüssel
+            with self.assertRaisesRegex(ValueError, 'keine offene Einladung'):                              # ein Code gilt nur einmal
+                r.ssh_grant(['--yes', code])
+            self.assertEqual(r.read('taildrop.json'), {'version': 1, 'sent': {}, 'invites': {}, 'answers': {}})
+
+    def test_inviting_refuses_foreign_offline_or_unprepared_cases_and_sends_nothing(self):
+        self.two_macs()
+        with self.as_mac('studio'):
+            for label, patches, args, expected in (
+                    ('fremdes Gerät', [], ['100.64.0.77'], 'kennt Tailscale in deinem Tailnet nicht'),
+                    ('Entfernte Anmeldung aus', [patch.object(r, 'ssh_listening', return_value=False)], ['100.64.0.5'], 'Entfernte Anmeldung'),
+                    ('ohne Argument', [], [], 'Aufruf'), ('zwei Argumente', [], ['a', 'b'], 'Aufruf')):
+                with self.subTest(label), contextlib.ExitStack() as stack:
+                    for each in patches:
+                        stack.enter_context(each)
+                    with self.assertRaisesRegex(ValueError, expected):
+                        r.ssh_invite(args)
+            status = self.tailnet_status(name=self.STUDIO, ips=('100.64.0.9',), peers=[(self.BOOK, '100.64.0.5', False)])
+            (self.macs['studio']['dir'] / 'status.json').write_text(json.dumps(status))
+            with self.assertRaisesRegex(ValueError, 'book ist offline'):
+                r.ssh_invite(['100.64.0.5'])
+            self.assertEqual(list((self.macs['book']['dir'] / 'inbox').iterdir()), [])                      # nichts verschickt
+            self.assertIsNone(r.read('taildrop.json'))                                                      # und nichts vorgemerkt
+
+    def test_the_inbox_sets_everything_it_does_not_understand_aside_and_never_deletes_other_files(self):
+        self.two_macs()
+        inbox = self.macs['book']['dir'] / 'inbox'
+        code = 'a' * 32
+        now = int(time.time())
+        good = {'version': 1, 'nonce': code, 'host': self.STUDIO, 'user': 'studio_user', 'expires': now + 600,
+                'hostKey': 'ssh-ed25519 ' + 'A' * 68}
+        files = {'dokument.pdf': b'%PDF fremd', f'vibecode-invite-{"b" * 32}.json': b'{kaputt', f'vibecode-invite-{"c" * 32}.json': b'x' * 20000,
+                 f'vibecode-invite-{"d" * 32}.json': json.dumps(dict(good, nonce='e' * 32)).encode(),                 # Name und Inhalt passen nicht zusammen
+                 f'vibecode-invite-{"f" * 32}.json': json.dumps(dict(good, nonce='f' * 32, expires=now - 5)).encode(),  # abgelaufen
+                 f'vibecode-invite-{"1" * 32}.json': json.dumps(dict(good, nonce='1' * 32, extra='x')).encode(),        # fremdes Feld
+                 f'vibecode-invite-{"2" * 32}.json': json.dumps(dict(good, nonce='2' * 32, host='-oProxyCommand=x')).encode(),
+                 f'vibecode-invite-{"3" * 32}.json': json.dumps(dict(good, nonce='3' * 32, user='a b')).encode(),
+                 f'vibecode-invite-{"4" * 32}.json': json.dumps(dict(good, nonce='4' * 32, hostKey='ssh-rsa AAAA')).encode(),
+                 f'vibecode-answer-{"5" * 32}.json': json.dumps({'version': 1, 'nonce': '5' * 32, 'publicKey': 'ssh-ed25519 AAAA x'}).encode()}
+        for name, data in files.items():
+            (inbox / name).write_bytes(data)
+        with self.as_mac('book'):
+            found = self.inbox_json()
+        self.assertEqual((found['invites'], found['answers']), ([], []))
+        self.assertEqual(found['foreign'], 1)                                                              # das PDF
+        self.assertEqual(found['invalid'] + found['unknown'], len(files) - 1)                              # alles andere: zur Seite gelegt
+        downloads = {p.name: p.read_bytes() for p in (self.macs['book']['dir'] / 'downloads').iterdir()}
+        for name, data in files.items():
+            if name.startswith('vibecode-answer-5'):
+                continue                                                                                   # eine unbekannte, aber gültig aussehende Antwort wird verworfen
+            self.assertEqual(downloads.get(name), data, name)                                              # unverändert, nichts gelöscht
+        self.assertEqual(list(inbox.iterdir()), [])
+
+    def test_a_stranger_who_is_not_your_device_is_never_offered_and_a_name_clash_in_downloads_is_numbered(self):
+        self.two_macs()
+        inbox, downloads = self.macs['book']['dir'] / 'inbox', self.macs['book']['dir'] / 'downloads'
+        (downloads / 'foto.jpg').write_bytes(b'alt')
+        (inbox / 'foto.jpg').write_bytes(b'neu')
+        now = int(time.time())
+        stranger = {'version': 1, 'nonce': '6' * 32, 'host': 'evil.example-tailnet.ts.net', 'user': 'x', 'expires': now + 600, 'hostKey': 'ssh-ed25519 ' + 'A' * 68}
+        (inbox / f'vibecode-invite-{"6" * 32}.json').write_text(json.dumps(stranger))
+        with self.as_mac('book'):
+            found = self.inbox_json()
+        self.assertEqual(found['invites'], [])                                                             # kein eigenes Gerät: nie angeboten
+        self.assertEqual((found['invalid'], found['rejected']), (0, 1))                                     # verworfen, nicht „nach Downloads gelegt“
+        self.assertEqual(found['variant'], 'cli')
+        self.assertEqual((downloads / 'foto.jpg').read_bytes(), b'alt')                                    # nichts überschrieben
+        self.assertEqual((downloads / 'foto (2).jpg').read_bytes(), b'neu')
+
+    def test_accepting_checks_the_host_key_the_key_and_the_code_before_saving_anything(self):
+        self.two_macs()
+        with self.as_mac('studio'):
+            self.out(r.ssh_invite, ['100.64.0.5'])
+        with self.as_mac('book'):
+            code = self.inbox_json()['invites'][0]['nonce']
+            book_dir = self.macs['book']['dir']
+            # 1. Host-Schlüssel stimmt nicht mit der Einladung überein
+            state = r.read('taildrop.json')
+            state['invites'][code]['hostKey'] = 'ssh-ed25519 ' + 'B' * 68
+            r.write('taildrop.json', state)
+            with self.assertRaisesRegex(ValueError, 'stimmt NICHT mit dem der Einladung überein'):
+                r.ssh_accept([code])
+            self.assertIsNone(r.read('ssh.json'))
+            self.assertFalse((book_dir / 'ssh' / 'known_hosts').exists())
+            # 2. kein eigener Schlüssel: Exit 4, nichts gespeichert, Einladung bleibt
+            pub = book_dir / 'ssh' / 'id_ed25519.pub'
+            saved = pub.read_text()
+            pub.unlink()
+            with self.assertRaises(SystemExit) as caught:
+                self.out(r.ssh_accept, [code])
+            self.assertEqual(caught.exception.code, 4)
+            self.assertIsNone(r.read('ssh.json'))
+            pub.write_text(saved)
+            # 3. unbekannter oder abgelaufener Code, schlechte Eingabe
+            for bad in (['0' * 32], [], ['kein-code'], [code, 'extra']):
+                with self.assertRaises(ValueError, msg=repr(bad)):
+                    r.ssh_accept(bad)
+            state = r.read('taildrop.json')
+            state['invites'][code]['expires'] = 1
+            r.write('taildrop.json', state)
+            with self.assertRaisesRegex(ValueError, 'gibt es nicht'):
+                r.ssh_accept([code])
+
+    def test_if_the_answer_cannot_be_sent_the_target_stays_saved_and_the_invitation_can_be_accepted_again(self):
+        self.two_macs()
+        with self.as_mac('studio'):
+            self.out(r.ssh_invite, ['100.64.0.5'])
+        with self.as_mac('book'):
+            code = self.inbox_json()['invites'][0]['nonce']
+            offline = self.tailnet_status(name=self.BOOK, ips=('100.64.0.5',), peers=[(self.STUDIO, '100.64.0.9', False)])
+            (self.macs['book']['dir'] / 'status.json').write_text(json.dumps(offline))
+            with self.assertRaisesRegex(ValueError, 'studio ist offline'):
+                r.ssh_accept([code])
+            self.assertIn(code, r.read('taildrop.json')['invites'])                                         # noch da: später noch einmal
+            online = self.tailnet_status(name=self.BOOK, ips=('100.64.0.5',), peers=[(self.STUDIO, '100.64.0.9', True)])
+            (self.macs['book']['dir'] / 'status.json').write_text(json.dumps(online))
+            self.assertIn('✔ Einladung von studio angenommen', self.out(r.ssh_accept, [code]))
+
+    def test_an_answer_nobody_asked_for_and_a_wrong_nonce_never_reach_authorized_keys(self):
+        self.two_macs()
+        book_key = (self.macs['book']['dir'] / 'ssh' / 'id_ed25519.pub').read_text().strip()
+        studio_inbox = self.macs['studio']['dir'] / 'inbox'
+        (studio_inbox / f'vibecode-answer-{"7" * 32}.json').write_text(json.dumps({'version': 1, 'nonce': '7' * 32, 'publicKey': book_key}))
+        with self.as_mac('studio'):
+            found = self.inbox_json()
+            self.assertEqual((found['answers'], found['unknown']), ([], 1))                                  # nie eingeladen: verworfen
+            self.assertFalse((self.macs['studio']['dir'] / 'ssh' / 'authorized_keys').exists())
+            for bad in (['--yes'], ['--check'], ['--ja', '7' * 32], ['--yes', 'zu-kurz'], []):
+                with self.assertRaises(ValueError, msg=repr(bad)):
+                    r.ssh_grant(bad)
+            with self.assertRaisesRegex(ValueError, 'keine offene Einladung'):
+                r.ssh_grant(['--yes', '7' * 32])
+
+    def test_a_corrupt_state_file_is_reported_and_never_replaced_and_taildrop_errors_are_readable(self):
+        self.two_macs()
+        with self.as_mac('studio'):
+            (self.macs['studio']['dir'] / 'base' / 'taildrop.json').write_text('{kaputt')
+            with self.assertRaisesRegex(ValueError, 'taildrop.json ist ungültig'):
+                r.ssh_invite(['100.64.0.5'])
+            self.assertEqual(list((self.macs['book']['dir'] / 'inbox').iterdir()), [])                       # nichts verschickt, bevor der Zustand lesbar ist
+            self.assertEqual((self.macs['studio']['dir'] / 'base' / 'taildrop.json').read_text(), '{kaputt')
+            (self.macs['studio']['dir'] / 'base' / 'taildrop.json').unlink()
+        real_run = subprocess.run
+
+        def only_file_get(outcome):
+            def run(command, *args, **kwargs):
+                if 'file' in command[:3]:                                                  # nur `file get` ist ersetzt, der Status bleibt echt
+                    if isinstance(outcome, Exception):
+                        raise outcome
+                    return outcome
+                return real_run(command, *args, **kwargs)
+            return run
+        with self.as_mac('book'), patch.object(r.subprocess, 'run', side_effect=only_file_get(Mock(returncode=1, stdout='', stderr='Taildrop is not enabled'))):
+            with self.assertRaisesRegex(ValueError, 'Taildrop ist auf diesem Mac nicht verfügbar'):
+                r.ssh_inbox()
+        with self.as_mac('book'), patch.object(r.subprocess, 'run', side_effect=only_file_get(Mock(returncode=1, stdout='', stderr='Access denied: file get'))):
+            with self.assertRaisesRegex(ValueError, 'set --operator'):
+                r.ssh_inbox()
+        with self.as_mac('book'), patch.object(r.subprocess, 'run', side_effect=only_file_get(subprocess.TimeoutExpired('x', 25))):
+            with self.assertRaisesRegex(ValueError, 'nicht rechtzeitig'):
+                r.ssh_inbox()
+
+    def test_keygen_and_routing(self):
+        with patch.object(r, 'ensure_client_key') as ensure, patch.object(r, 'own_public_key', return_value=(Path('x.pub'), 'ssh-ed25519 AAAA x', FP)):
+            self.assertIn('✔ SSH-Schlüssel vorhanden', self.out(r.main, ['ssh', 'keygen']))
+        ensure.assert_called_once_with()
+        for bad in (['ssh', 'keygen', 'x'], ['ssh', 'inbox', 'x'], ['ssh', 'invite'], ['ssh', 'accept'], ['ssh', 'grant']):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                r.main(bad)
 
     def test_a_local_name_never_asks_tailscale_and_a_tailnet_line_is_a_valid_target(self):
         with self.tailscale_stub(self.tailnet_status()):

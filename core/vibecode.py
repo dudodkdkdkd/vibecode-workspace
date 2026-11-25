@@ -24,9 +24,9 @@ LAUNCHER = REPO / 'workspaces' / 'VibeCode Workspace.command'
 NAME_MAX = 60
 ENTRY_ID = re.compile(r'[a-z][a-z0-9-]*')
 RESERVED = {'run', 'start', 'list', 'save', 'delete', 'open', 'shortcuts', 'projects',
-            'window', 'help', '_state', '_ssh', 'ssh-open', 'folders', 'presets', 'settings', 'open-folder', 'open-workspace', 'workspace-quick', 'local-options', 'local-settings', 'local-default', 'tailscale'}
+            'window', 'help', '_state', '_ssh', 'ssh-open', 'folders', 'presets', 'settings', 'open-folder', 'open-workspace', 'workspace-quick', 'local-options', 'local-settings', 'local-default', 'tailscale', 'agents'}
 # Everything the window may trigger over SSH. Fixed on purpose: no arbitrary commands.
-SSH_ACTIONS = ('share', 'share-wake', 'share-recheck', 'join', 'allow-check', 'allow')
+SSH_ACTIONS = ('share', 'share-wake', 'share-recheck', 'join', 'allow-check', 'allow', 'tailnet', 'invite', 'inbox', 'accept', 'grant-check', 'grant')
 # Everything the window may do with Tailscale. Fixed on purpose; `setup` only opens a Terminal (VibeCode never runs sudo itself).
 TAILSCALE_ACTIONS = ('up', 'down', 'login', 'logout', 'auto-on', 'auto-off', 'setup')
 
@@ -786,6 +786,77 @@ def tailscale_action(action):
     return result['out']
 
 
+# --- Agenten: was die Coding-Agenten gerade tun (Schätzung aus ihren Verlaufsdateien) -------------------------------------
+
+AGENT_SCAN = CORE / 'agent_scan.py'
+AGENT_STATES = ('working', 'ready', 'tool_wait', 'stalled', 'unknown')
+
+
+def map_agent_sessions(raw, projects, resolve=os.path.realpath, host=None):
+    """Tie scanned sessions to known projects. A session counts when its folder is a project folder or inside one (the longest
+    project path wins). Returns [{'project', 'agent', 'state', 'age', 'branch'}], newest first; everything else (scratch folders,
+    desktop-app sessions) is left out. With `host` the project is named like the launcher names remote ones."""
+    known = [(name, resolve(path).rstrip(os.sep)) for name, path in projects]
+    found = []
+    for session in raw if isinstance(raw, list) else []:
+        if (not isinstance(session, dict) or session.get('state') not in AGENT_STATES or session.get('agent') not in ('claude', 'codex')
+                or not isinstance(session.get('cwd'), str) or type(session.get('age')) is not int):
+            continue
+        cwd = resolve(session['cwd']).rstrip(os.sep)
+        matches = [(len(path), name) for name, path in known if cwd == path or cwd.startswith(path + os.sep)]
+        if not matches:
+            continue
+        name = max(matches)[1]
+        branch = session.get('branch') if isinstance(session.get('branch'), str) else ''
+        found.append({'project': name, 'agent': session['agent'], 'state': session['state'], 'age': max(0, session['age']),
+                      'branch': re.sub(r'[\x00-\x1f\x7f]', '', branch)[:60]})
+    return sorted(found, key=lambda s: s['age'])
+
+
+def agents_local(paths=None):
+    """Agent sessions on this Mac: {'sessions': [...], 'error': None | text}. Never raises: the overview must open regardless.
+
+    `paths` = the launcher's (name, path) list when the caller has it already (state() does: one launcher call, not two)."""
+    if not AGENT_SCAN.is_file():
+        return {'sessions': [], 'error': None, 'available': False}
+    try:
+        result = subprocess.run([sys.executable, str(AGENT_SCAN), '--json'], capture_output=True, text=True, timeout=15,
+                                stdin=subprocess.DEVNULL)
+        if result.returncode:
+            raise ValueError((result.stderr.strip().splitlines() or [f'Exit {result.returncode}'])[-1])
+        raw = json.loads(result.stdout)['sessions']
+        projects = [(name, path) for name, path in (list_project_paths() if paths is None else paths) if not path.startswith('vscode-remote://')]
+        return {'sessions': map_agent_sessions(raw, projects), 'error': None, 'available': True}
+    except (ValueError, KeyError, TypeError, OSError, subprocess.SubprocessError) as exc:
+        return {'sessions': [], 'error': f'Agenten: {exc}', 'available': True}
+
+
+def agents_remote():
+    """Agent sessions on the saved Mac, over SSH (only on explicit request). Mapped to that host's repositories when known."""
+    try:
+        mac = ssh_state().get('mac')
+        if not mac or 'remote' not in {e['id'] for e in module_entries()}:
+            raise ValueError('Es ist noch kein anderer Mac verbunden (Bereich Remote).')
+        result = call_module('remote', ['ssh', 'agents'], timeout=60)
+        if result['code']:
+            raise ValueError(re.sub(r'^Remote: ', '', result['err'] or result['out'] or f'Status {result["code"]}'))
+        raw = json.loads(result['out'])['sessions']
+        names = [f'{mac["user"]}@{mac["host"]}' if mac.get('user') else mac['host'], mac['host']]
+        try:
+            snapshot = json.loads((config_dir() / 'remote-repositories.json').read_text(encoding='utf-8'))['hosts']
+        except (OSError, ValueError, KeyError, TypeError):
+            snapshot = {}
+        host = next((n for n in names if isinstance(snapshot.get(n), dict)), None)
+        if host:
+            paths = [(f'{Path(p).name or "Remote"} [SSH: {host}]', p) for p in snapshot[host].get('paths', []) if isinstance(p, str)]
+            return {'sessions': map_agent_sessions(raw, paths, resolve=os.path.normpath), 'error': None, 'mapped': True}
+        # No repository list for this Mac: show its sessions by folder name rather than nothing.
+        loose = [(Path(s['cwd']).name or '/', s['cwd']) for s in raw if isinstance(s, dict) and isinstance(s.get('cwd'), str)]
+        return {'sessions': map_agent_sessions(raw, loose, resolve=os.path.normpath), 'error': None, 'mapped': False}
+    except (ValueError, KeyError, TypeError, OSError, subprocess.SubprocessError) as exc:
+        return {'sessions': [], 'error': str(exc), 'mapped': False}
+
+
 def modules_error(text):
     """The reason without the module's own prefix ("Suchordner: ", "Remote-Repository-Suche: ")."""
     return re.sub(r'^(Suchordner|Remote-Repository-Suche): ', '', (text or '').strip())
@@ -1038,6 +1109,26 @@ def ssh_action(action, line=''):
         if not tokens:
             raise ValueError('In der Zeile fehlt benutzer@host.')
         args = ['ssh', 'join'] + tokens
+    elif action == 'invite':
+        # Der freigebende Mac lädt ein eigenes Tailnet-Gerät ein (Adresse oder Name); das Modul prüft den Besitzer.
+        tokens = line_tokens(line, 'invite')
+        if len(tokens) != 1:
+            raise ValueError('Es fehlt das Gerät.')
+        args = ['ssh', 'invite'] + tokens
+    elif action == 'inbox':
+        args = ['ssh', 'inbox']
+    elif action in ('accept', 'grant-check', 'grant'):
+        # Einladung annehmen / Antwort prüfen / Schlüssel eintragen: genau der 32-stellige Code, sonst nichts.
+        tokens = line_tokens(line, action)
+        if len(tokens) != 1 or not re.fullmatch(r'[0-9a-f]{32}', tokens[0]):
+            raise ValueError('Ungültiger Einladungscode.')
+        args = {'accept': ['ssh', 'accept'], 'grant-check': ['ssh', 'grant', '--check'], 'grant': ['ssh', 'grant', '--yes']}[action] + tokens
+    elif action == 'tailnet':
+        # Ein eigenes Gerät aus dem Tailnet: genau „benutzer@gerät“, das Modul prüft den Besitzer und vertraut dem Host-Schlüssel.
+        tokens = line_tokens(line, 'tailnet')
+        if len(tokens) != 1:
+            raise ValueError('Es fehlt benutzer@gerät.')
+        args = ['ssh', 'tailnet'] + tokens
     else:
         tokens = line_tokens(line, 'allow')
         if not tokens:
@@ -1057,6 +1148,16 @@ def open_ssh(kind, name=None):
         if 'remote' not in entries:
             raise ValueError('Das Remote-Modul fehlt.')
         open_in_terminal(entry_argv(entries['remote'], ['ssh']))
+    elif kind == 'keygen':
+        # Ein SSH-Schlüssel für diesen Mac, im Terminal, damit die Passphrase dort gewählt wird.
+        if 'remote' not in entries:
+            raise ValueError('Das Remote-Modul fehlt.')
+        open_in_terminal(entry_argv(entries['remote'], ['ssh', 'keygen']))
+    elif kind == 'pair':
+        # Schlüssel auf dem gespeicherten Mac installieren (ssh-copy-id, einmal das Passwort dort) und das Ergebnis zeigen.
+        if 'remote' not in entries:
+            raise ValueError('Das Remote-Modul fehlt.')
+        open_in_terminal(entry_argv(entries['remote'], ['ssh', 'pair', '--verify']))
     elif kind == 'host':
         # Nur Hosts aus der eigenen Liste: der Name kommt aus dem Fenster, nie ungeprüft in den Befehl.
         if name not in [entry['host'] for entry in ssh_state()['hosts']]:
@@ -1073,6 +1174,7 @@ def state():
     menu = [e for e in module_entries() if e.get('menu')]
     with ThreadPoolExecutor(max_workers=4) as pool:      # Modulstatus parallel: das Fenster soll zügig öffnen
         tailscale = pool.submit(tailscale_info)
+        agents = pool.submit(agents_local, paths)
         statuses = list(pool.map(entry_status, menu))
     ssh = ssh_state()
     return {
@@ -1087,6 +1189,7 @@ def state():
         'presets': presets_state(paths),
         'settings': {'wake': wake_state()},
         'tailscale': tailscale.result(),
+        'agents': agents.result(),
     }
 
 
@@ -1109,6 +1212,7 @@ def usage(entries):
              '  vibecode delete --name N      Workspace samt Shortcut löschen',
              '  vibecode shortcuts sync       Schreibtisch-Shortcuts neu anlegen',
              '  vibecode settings keep-awake on|off',
+             '  vibecode agents local|remote  was die Coding-Agenten gerade tun (JSON; remote nur auf Anfrage, per SSH)',
              '  vibecode tailscale up|down|login|logout|auto-on|auto-off|setup   Tailscale steuern (Fenster: Bereich Remote)',
              '  vibecode projects             Projekte, die der Launcher kennt',
              '  vibecode open-folder ORDNER   Repositories dieses Ordners zum Ankreuzen zeigen und öffnen (Schreibtisch-Shortcut)',
@@ -1155,6 +1259,11 @@ def main(argv):
         parser.add_argument('--line', default='')
         options = parser.parse_args(rest)
         print(json.dumps(ssh_action(options.action, options.line), ensure_ascii=False))
+        return 0
+    if command == 'agents':
+        if rest not in (['local'], ['remote']):
+            raise ValueError('Aufruf: vibecode agents local|remote')
+        print(json.dumps(agents_local() if rest == ['local'] else agents_remote(), ensure_ascii=False))
         return 0
     if command == 'tailscale':
         if len(rest) != 1:

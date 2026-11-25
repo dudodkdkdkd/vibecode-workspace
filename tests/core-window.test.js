@@ -95,7 +95,9 @@ const ui = {
     clipboardJoinLine: () => script.clipboardJoinLine || '',
     notify: (text) => calls.push(['notify', text]),
     askLine: (title, prompt, prefill) => { calls.push(['askLine', title, prefill]); return next('askLine'); },
-    share: (share, notice) => { calls.push(['share', share, notice]); return next('share'); },
+    share: (share, notice, canInvite) => { calls.push(['share', share, notice, canInvite]); return next('share'); },
+    pickTailscaleDevice: (devices) => { calls.push(['pickTailscaleDevice', devices.map((d) => d.name)]); return next('pickTailscaleDevice'); },
+    confirmInvite: (invite) => { calls.push(['confirmInvite', invite.device, invite.user]); return next('confirmInvite'); },
     copy: (text) => calls.push(['copy', text]),
     infoWithCopy: (text, copyText) => calls.push(['infoWithCopy', text, copyText]),
     clipboardAllowLine: () => script.clipboardAllowLine || '',
@@ -109,6 +111,8 @@ const ui = {
     confirmResetPreset: (label, effect) => { calls.push(['confirmResetPreset', label, effect]); return next('confirmResetPreset'); },
     confirmMovePreset: (label, target) => { calls.push(['confirmMovePreset', label, target]); return next('confirmMovePreset'); },
     confirmTailscale: (kind) => { calls.push(['confirmTailscale', kind]); return next('confirmTailscale'); },
+    showAgents: (model) => { calls.push(['showAgents', model.text, model.remoteLabel]); return next('showAgents'); },
+    askTailscaleDevice: (devices, user) => { calls.push(['askTailscaleDevice', devices.map((d) => d.name), user]); return next('askTailscaleDevice'); },
 };
 const backend = {
     state: () => { calls.push(['state']); return script.state; },
@@ -143,6 +147,7 @@ const backend = {
         return answer;
     },
     sshOpen: (kind, name) => calls.push(['sshOpen', kind, name || null]),
+    agents: (scope) => { calls.push(['agents', scope]); return next('agentsResults'); },
     tailscale: (action) => { calls.push(['tailscale', action]); const answer = next('tailscaleResults'); if (answer && answer.throw) throw new Error(answer.throw); return answer; },
     ssh: (action, line) => { calls.push(['ssh', action, line === undefined ? null : line]); return next('sshResults'); },
 };
@@ -534,7 +539,7 @@ test('Übersicht: der Tailscale-Bereich zeigt je Zustand Punkt, Text und genau d
         // Browser liest die Übersicht den Stand sonst nicht neu (so blieb „nicht installiert“ stehen, obwohl alles fertig war).
         const footers = rows(TS({ state })).filter((r) => r.type === 'footer' && r.buttons.some((b) => b.label === 'Aktualisieren'));
         assert.equal(footers.length, 1, state);
-        assert.deepEqual(footers[0].buttons[0].action, { action: 'tailscaleRefresh' });
+        assert.deepEqual(footers[0].buttons.at(-1).action, { action: 'tailscaleRefresh' });                  // „Aktualisieren“ steht immer zuletzt
     });
     const running = item(TS({ ours: true }));
     assert.equal(running.detail, 'verbunden · Kommandozeile · von VibeCode gestartet · 100.64.0.5 · remote-mac.example-tailnet.ts.net');
@@ -567,7 +572,7 @@ test('Übersicht: SSH und Tailscale stehen in einem Bereich „Remote“, SSH zu
     const titles = inside.filter((row) => row.type === 'item').map((row) => row.title);
     assert.ok(titles.includes('Tailscale') && titles.includes('Mit VibeCode starten und beenden'));
     const footerLabels = inside.filter((row) => row.type === 'footer').map((row) => row.buttons.map((b) => b.label));
-    assert.deepEqual(footerLabels, [['Neue Verbindung…', 'Diesen Mac freigeben…'], ['Aktualisieren']]);   // SSH-Knöpfe vor dem Tailscale-Teil
+    assert.deepEqual(footerLabels, [['Neue Verbindung…', 'Diesen Mac freigeben…'], ['Einladungen abholen', 'Aktualisieren']]);   // SSH-Knöpfe vor dem Tailscale-Teil
     assert.ok(inside.findIndex((row) => row.title === 'Tailscale') > inside.findIndex((row) => row.type === 'footer'));
     // Nur Tailscale (ohne SSH-Modul) oder nur SSH: weiter ein Bereich „Remote“.
     const only = (extra) => JSON.parse(widgets(`return JSON.stringify(dashboardModel(Object.assign({}, STATE, ${extra})));`))
@@ -641,10 +646,300 @@ test('Tailscale: Abmelden fragt zuerst, ändert ohne Ja nichts und Geräte zeigt
     assert.match(empty.find((c) => c[0] === 'info')[1], /Keine weiteren Geräte im Tailnet gefunden/);
 });
 
+// ------------------------------------------------------------------ Agenten
+
+const SESSION = (state, extra = {}) => Object.assign({ project: 'alpha', agent: 'claude', state, age: 5, branch: 'main' }, extra);
+const AG = (sessions, extra = {}) => Object.assign({ available: true, error: null, sessions }, extra);
+
+test('Übersicht: der Agenten-Bereich steht gleich unter den Workspaces und fasst zusammen, was gerade passiert', () => {
+    const rows = (agents) => JSON.parse(widgets(`return JSON.stringify(dashboardModel(Object.assign({}, STATE, { agents: ${JSON.stringify(agents)} })));`));
+    const sections = (agents) => rows(agents).filter((row) => row.type === 'section').map((row) => row.text);
+    assert.deepEqual(sections(AG([])).slice(0, 2), ['Workspaces', 'Agenten']);
+    const item = (agents) => rows(agents).find((row) => row.type === 'item' && row.title === 'Claude Code und Codex');
+    const many = item(AG([SESSION('working'), SESSION('working', { agent: 'codex' }), SESSION('ready'), SESSION('tool_wait'), SESSION('stalled'), SESSION('unknown')]));
+    assert.equal(many.detail, '2 arbeiten · 1 mit laufendem Befehl oder Freigabe · 1 wartet auf dich · 1 unklar · Schätzung');   // „unbekannt“ zählt nicht
+    assert.equal(many.level, 'ok');
+    assert.deepEqual(many.buttons.map((b) => [b.label, b.action.action]), [['Agenten…', 'agents']]);
+    assert.equal(item(AG([SESSION('working')])).detail, '1 arbeitet · Schätzung');
+    assert.equal(item(AG([SESSION('ready'), SESSION('ready')])).detail, '2 warten auf dich · Schätzung');
+    assert.equal(item(AG([SESSION('tool_wait')])).level, 'warn');
+    assert.equal(item(AG([SESSION('ready')])).level, 'off');
+    assert.equal(item(AG([])).detail, 'Keine Sitzung in den letzten 3 Stunden · Schätzung');
+    assert.ok(!sections({ available: false, sessions: [] }).includes('Agenten'));                      // ohne Scanner kein Bereich
+    const broken = rows(AG([], { error: 'Agenten: Exit 2' }));
+    assert.ok(broken.some((row) => row.type === 'section' && row.text === 'Agenten'));
+    assert.deepEqual(broken.filter((row) => row.type === 'note' && /Exit 2/.test(row.text)).map((row) => row.level), ['warn']);
+    assert.ok(!broken.some((row) => row.title === 'Claude Code und Codex'));
+});
+
+test('Agenten-Dialog: Zeilen mit Zustand, Projekt, Agent, Branch und Alter; mehr als zwölf werden gekürzt', () => {
+    const text = (model) => JSON.parse(widgets(`return JSON.stringify(agentsText(${JSON.stringify(model)}));`));
+    const local = [SESSION('working', { age: 4 }), SESSION('ready', { project: 'beta', agent: 'codex', branch: '', age: 600 }),
+        SESSION('tool_wait', { project: 'gamma', age: 3600 }), SESSION('stalled', { project: 'delta', age: 10800 })];
+    assert.equal(text({ local, mac: '' }), ['Dieser Mac (4)', '● arbeitet · alpha · Claude · main · vor 4 s', '○ fertig, wartet auf dich · beta · Codex · vor 10 min',
+        '◐ Befehl läuft oder wartet auf Freigabe · gamma · Claude · main · vor 60 min', '◌ unklar, seit längerem still · delta · Claude · main · vor 3 h', '',
+        'Eine Schätzung aus den Verlaufsdateien von Claude Code und Codex, kein Live-Monitor. „Aktualisieren“ liest neu.'].join('\n'));
+    const fifteen = Array.from({ length: 15 }, (_, n) => SESSION('ready', { project: `p${n}`, age: n }));
+    const lines = text({ local: fifteen, mac: '' }).split('\n');
+    assert.equal(lines[0], 'Dieser Mac (15)');
+    assert.equal(lines.filter((line) => line.startsWith('○')).length, 12);
+    assert.ok(lines.includes('… und 3 weitere'));
+    assert.match(text({ local: [], mac: '' }), /Keine Sitzung in den letzten 3 Stunden\./);
+    const withRemote = text({ local: [], mac: 'studio', remote: { sessions: [SESSION('working', { project: 'srv [SSH: studio]' })], error: null } });
+    assert.match(withRemote, /\nstudio \(1\)\n● arbeitet · srv \[SSH: studio\] · Claude/);
+    assert.match(text({ local: [], mac: 'studio', remote: { sessions: [], error: 'Auf dem anderen Mac fehlt python3.' } }), /\nstudio\n⚠︎ Auf dem anderen Mac fehlt python3\./);
+    assert.match(text({ local: [], localError: 'Agenten: kaputt', mac: '' }), /^Dieser Mac\n⚠︎ Agenten: kaputt/);
+});
+
+test('Agenten: die Liste kommt aus der Übersicht, den anderen Mac fragt nur der Klick, Aktualisieren liest neu', () => {
+    const state = Object.assign(STATE({ agents: AG([SESSION('working')]) }), { ssh: Object.assign({}, SSH, { mac: { user: 'user', host: 'studio', port: 22 } }) });
+    const calls = flowRun({ state, dashboard: [{ action: 'agents' }, back], showAgents: ['remote', 'refresh', 'close'],
+        agentsResults: [AG([SESSION('ready', { project: 'srv [SSH: studio]' })], { mapped: true }), AG([SESSION('ready')]),
+            AG([SESSION('working', { project: 'srv [SSH: studio]' })], { mapped: true })] });
+    const dialogs = calls.filter((c) => c[0] === 'showAgents');
+    assert.equal(dialogs.length, 3);
+    assert.equal(dialogs[0][2], 'Auf studio prüfen');
+    assert.ok(!dialogs[0][1].includes('studio ('));                                                  // beim Öffnen: nur dieser Mac, kein SSH
+    assert.deepEqual(calls.filter((c) => c[0] === 'agents'), [['agents', 'remote'], ['agents', 'local'], ['agents', 'remote']]);
+    assert.match(dialogs[1][1], /\nstudio \(1\)\n○ fertig/);                                       // nach dem Klick steht der andere Mac da
+    assert.match(dialogs[2][1], /○ fertig, wartet auf dich · alpha/);                                 // Aktualisieren: neue lokale Liste …
+    assert.equal(calls.filter((c) => c[0] === 'notify').length, 2);                                   // … und, weil schon geprüft, auch der andere Mac
+    assert.ok(calls.indexOf(calls.find((c) => c[0] === 'showAgents')) < calls.indexOf(calls.find((c) => c[0] === 'agents')));
+});
+
+test('Agenten: ohne verbundenen Mac gibt es keinen Knopf für den anderen Mac und nie einen SSH-Aufruf', () => {
+    const calls = flowRun({ state: STATE({ agents: AG([]) }), dashboard: [{ action: 'agents' }, back], showAgents: ['remote', 'close'] });
+    assert.equal(calls.find((c) => c[0] === 'showAgents')[2], '');
+    assert.ok(!kinds(calls).includes('agents') && !kinds(calls).includes('notify'));                  // ein verirrtes „remote“ schließt nur
+    assert.equal(kinds(calls).filter((k) => k === 'showAgents').length, 1);
+});
+
+test('Agenten-Dialog: die echten Knöpfe und ihre Antworten', () => {
+    const out = JSON.parse(widgets(`
+        const results = {};
+        const run = (name, model, response) => {
+            present = (alert) => { results[name + 'Buttons'] = titles(alert); results[name + 'Text'] = ObjC.unwrap(alert.informativeText); return response; };
+            results[name] = nativeUi({}).showAgents(model);
+        };
+        run('first', { text: 'Dieser Mac (0)', remoteLabel: 'Auf studio prüfen' }, FIRST);
+        run('second', { text: 'x', remoteLabel: 'Auf studio prüfen' }, FIRST + 1);
+        run('third', { text: 'x', remoteLabel: 'Auf studio prüfen' }, FIRST + 2);
+        run('noRemote', { text: 'x', remoteLabel: '' }, FIRST + 1);
+        return JSON.stringify(results);`));
+    assert.deepEqual(out.firstButtons, ['Aktualisieren', 'Auf studio prüfen', 'Schließen']);
+    assert.deepEqual([out.first, out.second, out.third], ['refresh', 'remote', 'close']);
+    assert.deepEqual(out.noRemoteButtons, ['Aktualisieren', 'Schließen']);
+    assert.equal(out.noRemote, 'close');                                                             // der zweite Knopf ist dann „Schließen“
+    assert.equal(out.firstText, 'Dieser Mac (0)');
+});
+
+// ------------------------------------------------------------------ Einladung per Taildrop
+
+const INBOX = (extra = {}) => result(0, JSON.stringify(Object.assign({ invites: [], answers: [], foreign: 0, invalid: 0, rejected: 0, unknown: 0, variant: 'cli' }, extra)));
+const INVITE = (extra = {}) => Object.assign({ nonce: 'a'.repeat(32), device: 'studio', user: 'studio_user', host: 'studio.example-tailnet.ts.net' }, extra);
+const ANSWER = (extra = {}) => Object.assign({ nonce: 'b'.repeat(32), device: 'book' }, extra);
+
+test('Freigabe-Maske: „Gerät aus Tailscale freigeben…“ nur, wenn dieser Mac bereit ist und ein eigenes Gerät online ist', () => {
+    const run = (share, tailscale) => {
+        const calls = flowRun({ state: Object.assign(ssh(), { tailscale }), dashboard: [sshShare, back], sshResults: [shareResult(share)], share: ['done'] });
+        return calls.find((c) => c[0] === 'share')[3];
+    };
+    const devices = [DEVICE('book')];
+    assert.equal(run({}, TS({ devices })), true);
+    assert.equal(run({ remoteLogin: false }, TS({ devices })), false);                       // noch nicht bereit
+    assert.equal(run({}, TS({ devices: [] })), false);                                         // kein anderes Gerät
+    assert.equal(run({}, TS({ devices: [DEVICE('book', { online: false })] })), false);        // niemand online
+    assert.equal(run({}, TS({ devices: [DEVICE('phone', { os: 'iOS' })] })), false);           // ein Telefon hat kein SSH
+    assert.equal(run({}, TS({ state: 'stopped', devices })), false);
+    assert.equal(run({}, undefined), false);                                                   // ältere Antwort ohne Tailscale
+    const built = JSON.parse(widgets(`
+        const on = buildShare(${JSON.stringify(SHARE({ awake: true }))}, '', true);
+        const off = buildShare(${JSON.stringify(SHARE({ awake: true }))}, '', false);
+        return JSON.stringify({ on: titles(on.alert), off: titles(off.alert), onActions: on.actions });`));
+    assert.deepEqual(built.on, ['Gerät aus Tailscale freigeben…', 'Schlüssel eintragen…', 'Zeile kopieren', 'Fertig']);
+    assert.ok(!built.off.includes('Gerät aus Tailscale freigeben…'));
+});
+
+test('Einladen: das Gerät wählen, Einladung senden, sagen wie es weitergeht; Fehler und Abbruch bleiben harmlos', () => {
+    const state = Object.assign(ssh(), { tailscale: TS({ devices: [DEVICE('book'), DEVICE('phone', { os: 'iOS', ip: '100.64.0.8' })] }) });
+    const okay = flowRun({ state, dashboard: [sshShare, back], sshResults: [shareResult({ awake: true }), result(0, 'Einladung an book geschickt. Dort in VibeCode …')],
+        share: ['invite'], pickTailscaleDevice: [DEVICE('book')] });
+    assert.deepEqual(okay.find((c) => c[0] === 'pickTailscaleDevice'), ['pickTailscaleDevice', ['book']]);       // das Telefon wird nicht angeboten
+    assert.deepEqual(okay.filter((c) => c[0] === 'ssh').map((c) => c.slice(1)), [['share', null], ['invite', '100.64.0.9']]);
+    assert.match(okay.find((c) => c[0] === 'notify')[1], /Lade book ein/);
+    assert.match(okay.find((c) => c[0] === 'info')[1], /^Einladung an book geschickt\..*\n\nDie Einladung gilt eine Stunde\.$/s);
+    const failed = flowRun({ state, dashboard: [sshShare, back], sshResults: [shareResult({ awake: true }), result(1, '', 'Remote: book ist offline: aufwecken und Tailscale verbinden, dann noch einmal.')],
+        share: ['invite'], pickTailscaleDevice: [DEVICE('book')] });
+    assert.match(failed.find((c) => c[0] === 'error')[1], /book ist offline/);
+    const cancelled = flowRun({ state, dashboard: [sshShare, back], sshResults: [shareResult({ awake: true })], share: ['invite'], pickTailscaleDevice: [null] });
+    assert.ok(!kinds(cancelled).includes('notify') && cancelled.filter((c) => c[0] === 'ssh').length === 1);
+});
+
+test('Einladungen abholen: annehmen, auf später lassen und den Schlüssel einer Antwort erst nach dem Fingerprint eintragen', () => {
+    const state = STATE({ tailscale: TS({ devices: [DEVICE('studio')] }) });
+    const key = JSON.stringify({ name: 'book', fingerprint: 'SHA256:xyz', known: false, comment: 'user@book' });
+    const calls = flowRun({ state, dashboard: [{ action: 'tailscaleInbox' }, back],
+        sshResults: [INBOX({ invites: [INVITE(), INVITE({ nonce: 'c'.repeat(32), device: 'zweites' })], answers: [ANSWER()] }),
+            result(0, '✔ Einladung von studio angenommen.'), result(0, key), result(0, 'Freigegeben: book (SHA256:xyz). Dort jetzt „Verbinden“.')],
+        confirmInvite: [true, false], confirmAllow: [true] });
+    assert.deepEqual(calls.filter((c) => c[0] === 'confirmInvite'), [['confirmInvite', 'studio', 'studio_user'], ['confirmInvite', 'zweites', 'studio_user']]);
+    assert.deepEqual(calls.filter((c) => c[0] === 'ssh').map((c) => c.slice(1)),
+        [['inbox', null], ['accept', 'a'.repeat(32)], ['grant-check', 'b'.repeat(32)], ['grant', 'b'.repeat(32)]]);   // „Später“ ruft nichts auf
+    assert.deepEqual(calls.find((c) => c[0] === 'confirmAllow'), ['confirmAllow', 'book', 'SHA256:xyz']);
+    const infos = calls.filter((c) => c[0] === 'info').map((c) => c[1]);
+    assert.match(infos[0], /Einladung von studio angenommen/);
+    assert.match(infos[1], /Freigegeben: book.*Bereich Remote auf Verbinden klicken/s);
+    assert.match(calls.find((c) => c[0] === 'notify')[1], /Hole Einladungen/);
+});
+
+test('Einladungen abholen: ein abgelehnter Fingerprint schreibt nichts, ein schon bekannter Schlüssel verbraucht die Einladung nur', () => {
+    const state = STATE({ tailscale: TS() });
+    const declined = flowRun({ state, dashboard: [{ action: 'tailscaleInbox' }, back],
+        sshResults: [INBOX({ answers: [ANSWER()] }), result(0, JSON.stringify({ name: 'book', fingerprint: 'SHA256:xyz', known: false }))], confirmAllow: [false] });
+    assert.deepEqual(declined.filter((c) => c[0] === 'ssh').map((c) => c[1]), ['inbox', 'grant-check']);          // kein „grant“
+    const known = flowRun({ state, dashboard: [{ action: 'tailscaleInbox' }, back],
+        sshResults: [INBOX({ answers: [ANSWER()] }), result(0, JSON.stringify({ name: 'book', fingerprint: 'SHA256:xyz', known: true })), result(0, 'Freigegeben')] });
+    assert.deepEqual(known.filter((c) => c[0] === 'ssh').map((c) => c[1]), ['inbox', 'grant-check', 'grant']);
+    assert.ok(!kinds(known).includes('confirmAllow'));
+    assert.match(known.find((c) => c[0] === 'info')[1], /„book“ war schon freigegeben/);
+});
+
+test('Einladungen abholen: Fehler, nichts da, fehlender Schlüssel und Hinweise auf zur Seite gelegte Dateien', () => {
+    const state = STATE({ tailscale: TS() });
+    const failed = flowRun({ state, dashboard: [{ action: 'tailscaleInbox' }, back], sshResults: [result(1, '', 'Remote: Taildrop ist auf diesem Mac nicht verfügbar: x')] });
+    assert.match(failed.find((c) => c[0] === 'error')[1], /Taildrop ist auf diesem Mac nicht verfügbar/);
+    const unreadable = flowRun({ state, dashboard: [{ action: 'tailscaleInbox' }, back], sshResults: [result(0, 'kein json')] });
+    assert.equal(unreadable.find((c) => c[0] === 'error')[1], 'Die Antwort des Remote-Moduls war nicht lesbar.');
+    const nothing = flowRun({ state, dashboard: [{ action: 'tailscaleInbox' }, back], sshResults: [INBOX({ foreign: 2, invalid: 1, rejected: 2, unknown: 1 })] });
+    const text = nothing.find((c) => c[0] === 'info')[1];
+    assert.match(text, /^Keine Einladungen oder Antworten gefunden\./);
+    assert.match(text, /2 weitere Taildrop-Dateien lagen im Posteingang: unverändert nach ~\/Downloads verschoben\./);
+    assert.match(text, /1 Datei mit unserem Namen waren ungültig oder abgelaufen und liegen in ~\/Downloads\./);
+    assert.match(text, /2 Einladungen von einem Gerät, das nicht zu deinem Tailscale-Konto gehört, wurden verworfen\./);          // nicht „liegen in Downloads“
+    assert.doesNotMatch(text, /Tailscale-App/);                                                                                       // der Hinweis nur bei der App
+    const app = flowRun({ state, dashboard: [{ action: 'tailscaleInbox' }, back], sshResults: [INBOX({ variant: 'app' })] });
+    assert.match(app.find((c) => c[0] === 'info')[1], /Bei der Tailscale-App muss Taildrop in den Systemeinstellungen eingeschaltet sein.*„Gerät per SSH verbinden…“ funktioniert immer\./s);
+    const garbled = flowRun({ state, dashboard: [{ action: 'tailscaleInbox' }, back], sshResults: [INBOX({ answers: [ANSWER()] }), result(0, 'kein json')] });
+    assert.equal(garbled.find((c) => c[0] === 'error')[1], 'Die Antwort des Remote-Moduls war nicht lesbar.');                          // kein roher SyntaxError
+    assert.match(text, /1 Antwort ohne Einladung wurde verworfen\./);
+    const noKey = flowRun({ state, dashboard: [{ action: 'tailscaleInbox' }, back], sshResults: [INBOX({ invites: [INVITE()] }), result(4, 'Dieser Mac hat noch keinen SSH-Schlüssel.')],
+        confirmInvite: [true], confirmTailscale: [true] });
+    assert.deepEqual(noKey.filter((c) => c[0] === 'confirmTailscale'), [['confirmTailscale', 'keygen']]);
+    assert.deepEqual(noKey.filter((c) => c[0] === 'sshOpen'), [['sshOpen', 'keygen', null]]);                 // Schlüssel im Terminal erzeugen
+    const accepted = flowRun({ state, dashboard: [{ action: 'tailscaleInbox' }, back], sshResults: [INBOX({ invites: [INVITE()] }), result(1, '', 'Remote: stimmt NICHT')],
+        confirmInvite: [true] });
+    assert.match(accepted.find((c) => c[0] === 'error')[1], /stimmt NICHT/);
+});
+
+test('Einladungs-Dialoge: Auswahl, Annehmen/Später und der Hinweis zum Schlüssel sind die echten Widgets', () => {
+    const out = JSON.parse(widgets(`
+        const results = {};
+        const run = (name, call, response) => {
+            present = (alert, built) => { results[name + 'Buttons'] = titles(alert); results[name + 'Title'] = ObjC.unwrap(alert.messageText);
+                results[name + 'Text'] = ObjC.unwrap(alert.informativeText); if (built && built.popup) built.popup.selectItemAtIndex(1); return response; };
+            results[name] = call(nativeUi({}));
+        };
+        const devices = ${JSON.stringify([DEVICE('book'), DEVICE('server', { os: 'linux', ip: '100.64.0.6' })])};
+        run('pick', (ui) => ui.pickTailscaleDevice(devices), FIRST);
+        run('pickCancel', (ui) => ui.pickTailscaleDevice(devices), FIRST + 1);
+        run('yes', (ui) => ui.confirmInvite(${JSON.stringify(INVITE())}), FIRST);
+        run('later', (ui) => ui.confirmInvite(${JSON.stringify(INVITE())}), FIRST + 1);
+        run('keygen', (ui) => ui.confirmTailscale('keygen'), FIRST);
+        return JSON.stringify(results);`));
+    assert.equal(out.pick.name, 'server');                                                         // die Auswahl im Popup zählt
+    assert.equal(out.pickCancel, null);
+    assert.deepEqual(out.pickButtons, ['Einladen', 'Abbrechen']);
+    assert.match(out.pickText, /Taildrop.*Kein Passwort, keine Zeilen zum Kopieren/s);
+    assert.deepEqual([out.yes, out.later], [true, false]);
+    assert.deepEqual(out.yesButtons, ['Annehmen', 'Später']);
+    assert.equal(out.yesTitle, 'Einladung von studio annehmen?');
+    assert.match(out.yesText, /als studio_user per SSH.*Fingerprint bestätigst/s);
+    assert.match(out.keygenText, /noch keinen SSH-Schlüssel.*Passphrase wählst du selbst/s);
+});
+
+const DEVICE = (name, extra = {}) => Object.assign({ name, dns: `${name}.example-tailnet.ts.net`, ip: '100.64.0.9', os: 'macOS', online: true, lastSeen: '' }, extra);
+
+test('Tailscale: „Gerät per SSH verbinden…“ gibt es nur, solange Tailscale läuft und es andere Geräte gibt', () => {
+    const footer = (tailscale) => JSON.parse(widgets(`return JSON.stringify(dashboardModel(Object.assign({}, STATE, { tailscale: ${JSON.stringify(tailscale)} })));`))
+        .filter((row) => row.type === 'footer' && row.buttons.some((b) => b.label === 'Aktualisieren'))[0].buttons.map((b) => b.label);
+    assert.deepEqual(footer(TS({ devices: [DEVICE('studio')] })), ['Gerät per SSH verbinden…', 'Einladungen abholen', 'Aktualisieren']);
+    assert.deepEqual(footer(TS({ devices: [] })), ['Einladungen abholen', 'Aktualisieren']);                // allein im Tailnet: nur Antworten könnten warten
+    assert.deepEqual(footer(TS({ state: 'stopped', devices: [DEVICE('studio')] })), ['Aktualisieren']);     // getrennt: nichts anzubieten
+    assert.deepEqual(footer(TS({ state: 'needs-login', devices: [DEVICE('studio')] })), ['Aktualisieren']);
+});
+
+test('Tailscale: ein Gerät per SSH verbinden fragt nur nach online erreichbaren Rechnern und meldet das Ergebnis', () => {
+    const devices = [DEVICE('studio'), DEVICE('phone', { os: 'iOS', ip: '100.64.0.8' }), DEVICE('alt', { online: false, ip: '100.64.0.7' }),
+        DEVICE('server', { os: 'linux', ip: '100.64.0.6' })];
+    const state = STATE({ tailscale: TS({ devices, localUser: 'user' }) });
+    const calls = flowRun({ state, dashboard: [{ action: 'tailscaleConnectDevice' }, back],
+        askTailscaleDevice: [{ name: 'studio', ip: '100.64.0.9', os: 'macOS', user: 'user' }],
+        sshResults: [{ code: 0, out: '✔ Verbunden mit user@studio.example-tailnet.ts.net. Befehle: workspace remote ssh run -- <befehl>', err: '' }] });
+    assert.deepEqual(calls.find((c) => c[0] === 'askTailscaleDevice'), ['askTailscaleDevice', ['studio', 'server'], 'user']);   // Telefon und Offline-Gerät fehlen
+    assert.deepEqual(calls.find((c) => c[0] === 'ssh'), ['ssh', 'tailnet', 'user@100.64.0.9']);
+    assert.match(calls.find((c) => c[0] === 'notify')[1], /Verbinde mit studio/);
+    const info = calls.find((c) => c[0] === 'info')[1];
+    assert.match(info, /^Verbunden mit user@studio\.example-tailnet\.ts\.net ✓/);
+    assert.match(info, /Remote-Ordner hinzufügen…/);
+    assert.ok(!kinds(calls).includes('sshOpen'));
+});
+
+test('Tailscale: fehlt der Schlüssel, öffnet sich nach der Bestätigung das Terminal mit ssh-copy-id, sonst nichts', () => {
+    const state = STATE({ tailscale: TS({ devices: [DEVICE('studio')], localUser: 'user' }) });
+    const pick = { name: 'studio', ip: '100.64.0.9', os: 'macOS', user: 'user' };
+    const calls = flowRun({ state, dashboard: [{ action: 'tailscaleConnectDevice' }, { action: 'tailscaleConnectDevice' }, back],
+        askTailscaleDevice: [pick, pick], confirmTailscale: [true, false],
+        sshResults: [{ code: 2, out: 'Noch kein Schlüssel', err: '' }, { code: 2, out: 'Noch kein Schlüssel', err: '' }] });
+    assert.deepEqual(calls.filter((c) => c[0] === 'confirmTailscale'), [['confirmTailscale', 'pair'], ['confirmTailscale', 'pair']]);
+    assert.deepEqual(calls.filter((c) => c[0] === 'sshOpen'), [['sshOpen', 'pair', null]]);              // nur beim Ja
+    assert.ok(!kinds(calls).includes('error'));
+});
+
+test('Tailscale: Fehler, Abbruch und „niemand online“ beim Gerät-Verbinden bleiben harmlos', () => {
+    const state = STATE({ tailscale: TS({ devices: [DEVICE('studio')], localUser: 'user' }) });
+    const failed = flowRun({ state, dashboard: [{ action: 'tailscaleConnectDevice' }, back],
+        askTailscaleDevice: [{ name: 'studio', ip: '100.64.0.9', os: 'macOS', user: 'user' }],
+        sshResults: [{ code: 1, out: '', err: 'Remote: Dieses Gerät gehört nicht zu deinem Tailscale-Konto.' }] });
+    assert.equal(failed.find((c) => c[0] === 'error')[1], 'Remote: Dieses Gerät gehört nicht zu deinem Tailscale-Konto.');
+    const cancelled = flowRun({ state, dashboard: [{ action: 'tailscaleConnectDevice' }, back], askTailscaleDevice: [null] });
+    assert.ok(!kinds(cancelled).includes('ssh') && !kinds(cancelled).includes('notify'));
+    const offline = flowRun({ state: STATE({ tailscale: TS({ devices: [DEVICE('studio', { online: false })] }) }),
+        dashboard: [{ action: 'tailscaleConnectDevice' }, back] });
+    assert.match(offline.find((c) => c[0] === 'info')[1], /kein anderes Gerät deines Tailnets online/);
+    assert.ok(!kinds(offline).includes('askTailscaleDevice'));
+});
+
+test('Gerät-Dialog: Auswahl und Benutzername, ein ungültiger Name wird nicht angenommen und die Eingabe bleibt', () => {
+    const out = JSON.parse(widgets(`
+        const devices = ${JSON.stringify([DEVICE('studio'), DEVICE('server', { os: 'linux', ip: '100.64.0.6' })])};
+        steps.push({ response: FIRST, user: '-oProxyCommand=x' },                      // ungültig
+            { response: FIRST, user: ' user ', pick: 1 });                            // gültig, zweites Gerät
+        const done = nativeUi({}).askTailscaleDevice(devices, 'standard');
+        steps.push({ response: FIRST + 1 });
+        const cancelled = nativeUi({}).askTailscaleDevice(devices, 'standard');
+        return JSON.stringify({ done, cancelled, notes, shown, items });`, `
+        const steps = [], notes = [], shown = [], items = [];
+        function scriptedPresent(alert, built) {
+            notes.push(ObjC.unwrap(alert.informativeText));
+            shown.push(ObjC.unwrap(built.user.stringValue));
+            if (!items.length) for (let i = 0; i < Number(built.popup.numberOfItems); i += 1) items.push(ObjC.unwrap(built.popup.itemTitleAtIndex(i)));
+            const step = steps.shift();
+            if (step.user !== undefined) built.user.stringValue = $(step.user);
+            if (step.pick !== undefined) built.popup.selectItemAtIndex(step.pick);
+            return step.response;
+        }`));
+    assert.deepEqual(out.done, { user: 'user', name: 'server', dns: 'server.example-tailnet.ts.net', ip: '100.64.0.6', os: 'linux', online: true, lastSeen: '' });
+    assert.equal(out.cancelled, null);
+    assert.deepEqual(out.items, ['studio · 100.64.0.9 · macOS', 'server · 100.64.0.6 · linux']);
+    assert.equal(out.shown[0], 'standard');                                                // der lokale Benutzername ist vorbelegt
+    assert.equal(out.shown[1], '-oProxyCommand=x');                                        // die falsche Eingabe blieb stehen
+    assert.match(out.notes[1], /Benutzernamen auf dem anderen Mac/);
+});
+
 test('Tailscale: der echte Bestätigungsdialog nennt Passwort, Terminal und die Folgen des Abmeldens', () => {
     const out = JSON.parse(widgets(`
         const texts = {};
-        ['setup', 'logout'].forEach((kind) => {
+        ['setup', 'logout', 'pair'].forEach((kind) => {
             let built;
             const ui = nativeUi({});
             ui.confirmTailscale(kind);
@@ -657,6 +952,7 @@ test('Tailscale: der echte Bestätigungsdialog nennt Passwort, Terminal und die 
             present = original;`)));
     assert.match(out.setup, /^Tailscale einrichten\?\|.*Admin-Passwort.*VibeCode sieht es nie.*\|Terminal öffnen$/);
     assert.match(out.logout, /^Von Tailscale abmelden\?\|.*Remote-Sitzungen.*brechen ab\.\|Abmelden$/);
+    assert.match(out.pair, /^Schlüssel auf dem anderen Mac einrichten\?\|.*Passwort des Benutzers.*VibeCode nie sieht.*Gerät per SSH verbinden….*\|Terminal öffnen$/);
 });
 
 test('Suchordner: ungültiger Host oder Abbruch beenden das Fenster nicht', () => {

@@ -62,6 +62,8 @@ function makeBackend(app, python, core) {
         // Suchordner: {message, warning}; Fehler kommen als Ausnahme mit lesbarem Grund.
         folder: (action, options) => JSON.parse(call("folders", action, "--json",
             ...Object.keys(options || {}).filter((key) => options[key]).map((key) => `--${key}=${options[key]}`))),
+        // Agenten: {sessions, error}; "local" liest diesen Mac, "remote" fragt den gespeicherten Mac per SSH (nur auf Klick).
+        agents: (scope) => JSON.parse(call("agents", scope)),
         // Tailscale: eine feste Aktion (up, down, login, logout, auto-on, auto-off, setup); die Antwort ist Text, bei "login" JSON {url}.
         tailscale: (action) => call("tailscale", action),
         // Ergebnis ist immer {code, out, err}: Exit-Code 2 von "join" heißt "noch nicht freigegeben".
@@ -286,7 +288,86 @@ function allowFlow(ui, backend) {
     else ui.error(done.err || done.out);
 }
 
-function shareFlow(ui, backend) {
+// Das freigebende Gerät wählt aus, wer Zugriff bekommen soll: Einladung per Taildrop, der andere Mac nimmt sie an und schickt seinen
+// öffentlichen Schlüssel zurück, hier wird er nach der Bestätigung mit Fingerprint eingetragen. Keine Zeilen, kein Passwort.
+function inviteFlow(ui, backend, tailscale) {
+    const devices = sshDevices(tailscale);
+    if (!devices.length) {
+        ui.info("Gerade ist kein anderes Gerät deines Tailnets online. Schalte es ein, dann hier noch einmal.");
+        return;
+    }
+    const pick = ui.pickTailscaleDevice(devices);
+    if (!pick) return;
+    ui.notify(`Lade ${pick.name} ein …`);
+    const result = backend.ssh("invite", pick.ip);
+    if (result.code === 0) ui.info(`${result.out}\n\nDie Einladung gilt eine Stunde.`);
+    else ui.error(result.err || result.out);
+}
+
+// „Einladungen abholen“: leert den Taildrop-Posteingang (nur Dateien mit unserem Namen werden gelesen, alles andere kommt unverändert
+// nach ~/Downloads) und arbeitet ab, was wartet: Einladungen annehmen, Antworten bestätigen. Nur auf diesen Klick, nie beim Öffnen.
+function inboxFlow(ui, backend) {
+    ui.notify("Hole Einladungen und Antworten …");
+    const fetched = backend.ssh("inbox");
+    if (fetched.code !== 0) {
+        ui.error(fetched.err || fetched.out);
+        return;
+    }
+    let inbox;
+    try {
+        inbox = JSON.parse(fetched.out);
+    } catch (error) {
+        ui.error("Die Antwort des Remote-Moduls war nicht lesbar.");
+        return;
+    }
+    const notes = [];
+    if (inbox.foreign) notes.push(`${inbox.foreign} weitere Taildrop-Datei${inbox.foreign === 1 ? "" : "en"} lag${inbox.foreign === 1 ? "" : "en"} im Posteingang: unverändert nach ~/Downloads verschoben.`);
+    if (inbox.invalid) notes.push(`${inbox.invalid} Datei${inbox.invalid === 1 ? "" : "en"} mit unserem Namen waren ungültig oder abgelaufen und liegen in ~/Downloads.`);
+    if (inbox.rejected) notes.push(`${inbox.rejected} Einladung${inbox.rejected === 1 ? "" : "en"} von einem Gerät, das nicht zu deinem Tailscale-Konto gehört, ${inbox.rejected === 1 ? "wurde" : "wurden"} verworfen.`);
+    if (inbox.unknown) notes.push(`${inbox.unknown} Antwort${inbox.unknown === 1 ? "" : "en"} ohne Einladung ${inbox.unknown === 1 ? "wurde" : "wurden"} verworfen.`);
+    if (!inbox.invites.length && !inbox.answers.length) {
+        // Die Tailscale-App empfängt Taildrop-Dateien selbst (die Kommandozeilen-Variante legt sie in den Posteingang): dann ist hier nichts zu holen.
+        const hint = inbox.variant === "app"
+            ? ["Bei der Tailscale-App muss Taildrop in den Systemeinstellungen eingeschaltet sein, und empfangene Dateien können direkt in ~/Downloads landen. " +
+                "„Gerät per SSH verbinden…“ funktioniert immer."] : [];
+        ui.info(["Keine Einladungen oder Antworten gefunden."].concat(hint, notes).join("\n\n"));
+        return;
+    }
+    inbox.invites.forEach((invite) => {
+        if (!ui.confirmInvite(invite)) return;                  // „Später“: die Einladung bleibt eine Stunde gespeichert
+        const done = backend.ssh("accept", invite.nonce);
+        if (done.code === 0) ui.info(done.out);
+        else if (done.code === 4) {
+            if (ui.confirmTailscale("keygen")) backend.sshOpen("keygen");
+        } else ui.error(done.err || done.out);
+    });
+    inbox.answers.forEach((answer) => {
+        const check = backend.ssh("grant-check", answer.nonce);
+        if (check.code !== 0) {
+            ui.error(check.err || check.out);
+            return;
+        }
+        let key;
+        try {
+            key = JSON.parse(check.out);
+        } catch (error) {
+            ui.error("Die Antwort des Remote-Moduls war nicht lesbar.");
+            return;
+        }
+        if (key.known) {
+            backend.ssh("grant", answer.nonce);                 // verbraucht die Einladung, der Schlüssel steht schon drin
+            ui.info(`„${key.name}“ war schon freigegeben.`);
+            return;
+        }
+        if (!ui.confirmAllow(key.name, key.fingerprint)) return;
+        const done = backend.ssh("grant", answer.nonce);
+        if (done.code === 0) ui.info(`${done.out}\n\nAuf dem anderen Mac jetzt im Bereich Remote auf Verbinden klicken.`);
+        else ui.error(done.err || done.out);
+    });
+    if (notes.length) ui.info(notes.join("\n\n"));
+}
+
+function shareFlow(ui, backend, tailscale) {
     let result = backend.ssh("share");
     let share = null;
     let notice = "";
@@ -305,7 +386,9 @@ function shareFlow(ui, backend) {
             }
             result = null;
         }
-        const choice = ui.share(share, notice);
+        // „Gerät aus Tailscale freigeben…“ nur, wenn dieser Mac bereit ist (Entfernte Anmeldung an) und ein eigenes Gerät online ist.
+        const canInvite = Boolean(share.remoteLogin && tailscale && tailscale.state === "running" && sshDevices(tailscale).length);
+        const choice = ui.share(share, notice, canInvite);
         notice = "";
         if (choice === "wake") {
             result = backend.ssh("share-wake");
@@ -316,6 +399,9 @@ function shareFlow(ui, backend) {
             notice = "Zeile kopiert ✓";
         } else if (choice === "allow") {
             allowFlow(ui, backend);
+            return;
+        } else if (choice === "invite") {
+            inviteFlow(ui, backend, tailscale);
             return;
         } else {
             return;
@@ -427,6 +513,9 @@ function perform(ui, backend, state, choice) {
             backend.preset("move", { path: choice.path, to: choice.to });
         }
         return false;
+    case "agents":
+        agentsFlow(ui, backend, state);
+        return false;
     case "tailscaleSetup":
         if (ui.confirmTailscale("setup")) ui.info(backend.tailscale("setup"));
         return false;
@@ -455,15 +544,40 @@ function perform(ui, backend, state, choice) {
     case "tailscaleLogout":
         if (ui.confirmTailscale("logout")) backend.tailscale("logout");
         return false;
+    case "tailscaleInbox":
+        inboxFlow(ui, backend);
+        return false;
     case "tailscaleDevices":
         ui.info(tailscaleDevicesText(state.tailscale));
         return false;
+    case "tailscaleConnectDevice": {
+        // Ein Gerät aus dem eigenen Tailnet als SSH-Ziel: ohne Zeilen zwischen den Macs; Tailscale bestätigt, dass es dein Gerät ist.
+        const devices = sshDevices(state.tailscale);
+        if (!devices.length) {
+            ui.info("Gerade ist kein anderes Gerät deines Tailnets online. Schalte es ein (und dort „Wachhalten“), dann hier auf „Aktualisieren“ klicken.");
+            return false;
+        }
+        const pick = ui.askTailscaleDevice(devices, state.tailscale.localUser || "");
+        if (!pick) return false;
+        ui.notify(`Verbinde mit ${pick.name} … das kann bis zu 30 Sekunden dauern.`);
+        const result = backend.ssh("tailnet", `${pick.user}@${pick.ip}`);
+        if (result.code === 0) {
+            const connected = /Verbunden mit (.+?)\. Befehle/.exec(result.out);
+            ui.info(`Verbunden${connected ? ` mit ${connected[1]}` : ""} ✓\n\nIm Bereich Remote kannst du jetzt auf „Verbinden“ klicken oder ` +
+                "„Remote-Ordner hinzufügen…“ wählen: der Host ist dort schon eingetragen.");
+        } else if (result.code === 2) {
+            if (ui.confirmTailscale("pair")) backend.sshOpen("pair");
+        } else {
+            ui.error(result.err || result.out);
+        }
+        return false;
+    }
     case "tailscaleRefresh":
         return false;                                   // die Übersicht liest den Stand ohnehin neu
     case "sshNew":
         return newConnection(ui, backend, state.ssh);
     case "sshShare":
-        shareFlow(ui, backend);
+        shareFlow(ui, backend, state.tailscale);
         return false;
     default:
         return false;
@@ -485,6 +599,97 @@ function flow(ui, backend) {
             if (perform(ui, backend, state, choice)) return;
         } catch (error) {
             ui.error(cleanMessage(error));
+        }
+    }
+}
+
+// ---------------------------------------------------------------- Agenten (Modell, ohne Widgets)
+
+// Was die Agenten gerade tun, geschätzt aus den Verlaufsdateien von Claude Code und Codex (core/agent_scan.py): ein Schnappschuss mit
+// „Aktualisieren“, kein Live-Monitor. Die Übersicht fragt nie einen anderen Mac; das geschieht nur auf einen Klick im Dialog.
+const AGENT_LABEL = { working: "arbeitet", ready: "fertig, wartet auf dich", tool_wait: "Befehl läuft oder wartet auf Freigabe",
+    stalled: "unklar, seit längerem still", unknown: "unbekannt" };
+const AGENT_MARK = { working: "●", ready: "○", tool_wait: "◐", stalled: "◌", unknown: "·" };
+const AGENT_NAME = { claude: "Claude", codex: "Codex" };
+const AGENT_LINES = 12;
+
+function agentAge(seconds) {
+    if (seconds < 90) return `vor ${seconds} s`;
+    if (seconds < 5400) return `vor ${Math.round(seconds / 60)} min`;
+    return `vor ${Math.round(seconds / 3600)} h`;
+}
+
+function agentCounts(sessions) {
+    const counts = { working: 0, ready: 0, tool_wait: 0, stalled: 0, unknown: 0 };
+    (sessions || []).forEach((session) => { if (session.state in counts) counts[session.state] += 1; });
+    return counts;
+}
+
+function agentsSummary(sessions) {
+    const counts = agentCounts(sessions);
+    const parts = [];
+    if (counts.working) parts.push(counts.working === 1 ? "1 arbeitet" : `${counts.working} arbeiten`);
+    if (counts.tool_wait) parts.push(`${counts.tool_wait} mit laufendem Befehl oder Freigabe`);
+    if (counts.ready) parts.push(counts.ready === 1 ? "1 wartet auf dich" : `${counts.ready} warten auf dich`);
+    if (counts.stalled) parts.push(`${counts.stalled} unklar`);
+    return parts.length ? parts.join(" · ") : "Keine Sitzung in den letzten 3 Stunden";
+}
+
+function agentRows(agents) {
+    const rows = [{ type: "section", text: "Agenten" }];
+    if (agents.error) {
+        rows.push({ type: "note", text: `⚠︎ ${agents.error}`, level: "warn" });
+        return rows;
+    }
+    const counts = agentCounts(agents.sessions);
+    rows.push({ type: "item", title: "Claude Code und Codex", detail: `${agentsSummary(agents.sessions)} · Schätzung`,
+        level: counts.working ? "ok" : counts.tool_wait ? "warn" : "off",
+        buttons: [{ label: "Agenten…", action: { action: "agents" } }] });
+    return rows;
+}
+
+function agentSection(title, sessions, error) {
+    const lines = [`${title}${error ? "" : ` (${(sessions || []).length})`}`];
+    if (error) {
+        lines.push(`⚠︎ ${error}`);
+        return lines;
+    }
+    if (!(sessions || []).length) lines.push("Keine Sitzung in den letzten 3 Stunden.");
+    (sessions || []).slice(0, AGENT_LINES).forEach((session) => lines.push([`${AGENT_MARK[session.state]} ${AGENT_LABEL[session.state]}`,
+        session.project, AGENT_NAME[session.agent] || session.agent, session.branch, agentAge(session.age)].filter(Boolean).join(" · ")));
+    if ((sessions || []).length > AGENT_LINES) lines.push(`… und ${sessions.length - AGENT_LINES} weitere`);
+    return lines;
+}
+
+function agentsText(model) {
+    const lines = agentSection("Dieser Mac", model.local, model.localError);
+    if (model.remote) lines.push("", ...agentSection(model.mac, model.remote.sessions, model.remote.error));
+    lines.push("", "Eine Schätzung aus den Verlaufsdateien von Claude Code und Codex, kein Live-Monitor. „Aktualisieren“ liest neu.");
+    return lines.join("\n");
+}
+
+// Der Dialog läuft in einer Schleife, bis er geschlossen wird. Den anderen Mac fragt nur der ausdrückliche Klick (und dann jede
+// Aktualisierung mit): die Übersicht selbst darf nie auf SSH warten.
+function agentsFlow(ui, backend, state) {
+    let local = state.agents.sessions || [];
+    let localError = state.agents.error || null;
+    let remote = null;
+    const mac = state.ssh && state.ssh.mac ? state.ssh.mac.host : "";
+    const askRemote = () => {
+        ui.notify(`Prüfe ${mac} … das kann einen Moment dauern.`);
+        remote = backend.agents("remote");
+    };
+    for (;;) {
+        const choice = ui.showAgents({ text: agentsText({ local, localError, remote, mac }), remoteLabel: mac ? `Auf ${mac} prüfen` : "" });
+        if (choice === "remote" && mac) {
+            askRemote();
+        } else if (choice === "refresh") {
+            const fresh = backend.agents("local");
+            local = fresh.sessions || [];
+            localError = fresh.error || null;
+            if (remote) askRemote();
+        } else {
+            return;
         }
     }
 }
@@ -520,11 +725,27 @@ const TAILSCALE_BUTTONS = {
 // Die Übersicht liest den Stand nur beim Aufbau. Nach dem Einrichten im Terminal oder der Anmeldung im Browser zeigt sie ihn erst
 // nach einem Klick hierauf; darum gibt es den Knopf in jedem Zustand (auch bei einem Lesefehler).
 const TAILSCALE_REFRESH = { type: "footer", buttons: [{ label: "Aktualisieren", action: { action: "tailscaleRefresh" } }] };
+const MOBILE_OS = ["ios", "android", "tvos", "watchos", "ipados"];
+
+// Geräte, auf die man per SSH kommen kann: online und kein Telefon. Ob es wirklich ein eigenes Gerät ist, prüft das Modul.
+function sshDevices(tailscale) {
+    return (tailscale.devices || []).filter((device) => device.online && device.ip && !MOBILE_OS.includes(String(device.os).toLowerCase()));
+}
+
+// „Aktualisieren“ immer; „Gerät per SSH verbinden…“ und „Einladungen abholen“ nur, solange Tailscale läuft (das Verbinden außerdem nur,
+// wenn es überhaupt andere Geräte gibt).
+function tailscaleFooter(tailscale) {
+    const running = tailscale.state === "running";
+    const buttons = (running && (tailscale.devices || []).length
+        ? [{ label: "Gerät per SSH verbinden…", action: { action: "tailscaleConnectDevice" } }] : [])
+        .concat(running ? [{ label: "Einladungen abholen", action: { action: "tailscaleInbox" } }] : []);
+    return { type: "footer", buttons: buttons.concat(TAILSCALE_REFRESH.buttons) };
+}
 
 function tailscaleRows(tailscale) {
     const rows = [];                       // ohne eigene Überschrift: der Bereich heißt „Remote“
     if (tailscale.error) {
-        rows.push({ type: "note", text: `⚠︎ ${tailscale.error}`, level: "warn" }, TAILSCALE_REFRESH);
+        rows.push({ type: "note", text: `⚠︎ ${tailscale.error}`, level: "warn" }, tailscaleFooter(tailscale));
         return rows;
     }
     const known = TAILSCALE_STATES[tailscale.state] || TAILSCALE_STATES.unknown;
@@ -544,7 +765,7 @@ function tailscaleRows(tailscale) {
         buttons: [{ label: "Aktiv", checkbox: true, checked: Boolean(tailscale.auto),
             action: { action: "tailscaleAuto", enabled: !tailscale.auto } }] });
     if (tailscale.autoError) rows.push({ type: "note", text: `⚠︎ ${tailscale.autoError}`, level: "warn" });
-    rows.push(TAILSCALE_REFRESH);
+    rows.push(tailscaleFooter(tailscale));
     return rows;
 }
 
@@ -592,6 +813,8 @@ function dashboardModel(state) {
                 || (state.folders && state.folders.local.some((folder) => folder.quickOpen))
                 ? [{ label: "Shortcuts erneuern", action: { action: "sync" } }] : []),
     });
+
+    if (state.agents && state.agents.available) agentRows(state.agents).forEach((row) => rows.push(row));
 
     const folders = state.folders;
     if (folders && (folders.canAddLocal || folders.canAddRemote || folders.local.length || folders.remote.length)) {
@@ -883,6 +1106,26 @@ function collectPreset(built) {
     };
 }
 
+function buildTailscaleDevice(note, devices, user) {
+    const view = $.NSView.alloc.initWithFrame($.NSMakeRect(0, 0, WIDTH, 118));
+    view.addSubview(label("Gerät in deinem Tailnet", $.NSMakeRect(0, 100, WIDTH, 18), true));
+    const popup = $.NSPopUpButton.alloc.initWithFramePullsDown($.NSMakeRect(0, 70, WIDTH, 26), false);
+    devices.forEach((device) => popup.addItemWithTitle($([device.name, device.ip, device.os].filter(Boolean).join(" · "))));
+    view.addSubview(popup);
+    view.addSubview(label("Benutzername auf diesem Gerät", $.NSMakeRect(0, 44, WIDTH, 18), true));
+    const field = $.NSTextField.alloc.initWithFrame($.NSMakeRect(0, 14, WIDTH, 24));
+    field.stringValue = $(user || "");
+    view.addSubview(field);
+    const alert = $.NSAlert.alloc.init;
+    alert.messageText = $("Gerät per SSH verbinden");
+    alert.informativeText = $(note || "Tailscale bestätigt, dass es dein eigenes Gerät ist, deshalb brauchst du keine Zeile vom anderen Mac. " +
+        "„Entfernte Anmeldung“ muss dort an sein. Fehlt dein Schlüssel noch, richtet ein Terminal ihn einmal mit dem Passwort ein.");
+    alert.accessoryView = view;
+    alert.addButtonWithTitle($("Verbinden"));
+    alert.addButtonWithTitle($("Abbrechen"));
+    return { alert, popup, user: field };
+}
+
 function buildRemoteFolder(note, draft) {
     const view = $.NSView.alloc.initWithFrame($.NSMakeRect(0, 0, WIDTH, 118));
     view.addSubview(label("SSH-Host (Alias aus ~/.ssh/config oder benutzer@host)", $.NSMakeRect(0, 100, WIDTH, 18), true));
@@ -911,7 +1154,7 @@ function wrappingText(text, frame, mono) {
     return field;
 }
 
-function buildShare(share, notice) {
+function buildShare(share, notice, canInvite) {
     const alert = $.NSAlert.alloc.init;
     alert.messageText = $("Diesen Mac freigeben");
     let actions;
@@ -942,9 +1185,9 @@ function buildShare(share, notice) {
         view.addSubview(wrappingText("2. Der andere Mac zeigt dann eine Zeile. Klicke hier auf „Schlüssel eintragen…“ und füge sie ein.",
             $.NSMakeRect(0, 0, WIDTH, 40), false));
         alert.accessoryView = view;
-        actions = ["allow", "copy"].concat(share.awake ? [] : ["wake"], ["done"]);
+        actions = (canInvite ? ["invite"] : []).concat(["allow", "copy"], share.awake ? [] : ["wake"], ["done"]);
     }
-    const titles = { allow: "Schlüssel eintragen…", copy: "Zeile kopieren", wake: "Wach halten", recheck: "Erneut prüfen", done: "Fertig" };
+    const titles = { invite: "Gerät aus Tailscale freigeben…", allow: "Schlüssel eintragen…", copy: "Zeile kopieren", wake: "Wach halten", recheck: "Erneut prüfen", done: "Fertig" };
     actions.forEach((action) => alert.addButtonWithTitle($(titles[action])));
     return { alert, actions, line };
 }
@@ -1205,8 +1448,8 @@ function nativeUi(app) {
                 throw error;
             }
         },
-        share(state, notice) {
-            const built = buildShare(state, notice);
+        share(state, notice, canInvite) {
+            const built = buildShare(state, notice, canInvite);
             const response = present(built.alert, built);
             return built.actions[Number(response) - Number($.NSAlertFirstButtonReturn)] || "done";
         },
@@ -1271,11 +1514,66 @@ function nativeUi(app) {
                 message = "Gib den SSH-Host an, zum Beispiel spark oder benutzer@server.";
             }
         },
+        // Die Agenten-Liste. Ergebnis: "refresh", "remote" (nur wenn ein anderer Mac verbunden ist) oder "close".
+        showAgents(model) {
+            const alert = $.NSAlert.alloc.init;
+            alert.messageText = $("Agenten");
+            alert.informativeText = $(model.text);
+            alert.addButtonWithTitle($("Aktualisieren"));
+            if (model.remoteLabel) alert.addButtonWithTitle($(model.remoteLabel));
+            alert.addButtonWithTitle($("Schließen"));
+            const response = present(alert, null);
+            if (isButton(response, $.NSAlertFirstButtonReturn)) return "refresh";
+            return model.remoteLabel && isButton(response, $.NSAlertSecondButtonReturn) ? "remote" : "close";
+        },
+        // Ein Gerät aus dem Tailnet wählen (für die Einladung). Ergebnis: das Gerät oder null.
+        pickTailscaleDevice(devices) {
+            const alert = $.NSAlert.alloc.init;
+            alert.messageText = $("Gerät aus Tailscale freigeben");
+            alert.informativeText = $("Das gewählte Gerät bekommt eine Einladung per Taildrop. Es nimmt sie in VibeCode an (Bereich Remote → „Einladungen abholen“) " +
+                "und schickt seinen öffentlichen Schlüssel zurück; den bestätigst du hier mit dem Fingerprint. Kein Passwort, keine Zeilen zum Kopieren.");
+            const popup = $.NSPopUpButton.alloc.initWithFramePullsDown($.NSMakeRect(0, 0, WIDTH, 26), false);
+            devices.forEach((device) => popup.addItemWithTitle($([device.name, device.ip, device.os].filter(Boolean).join(" · "))));
+            alert.accessoryView = popup;
+            alert.addButtonWithTitle($("Einladen"));
+            alert.addButtonWithTitle($("Abbrechen"));
+            const response = present(alert, { alert, popup });
+            return isButton(response, $.NSAlertFirstButtonReturn) ? devices[Number(popup.indexOfSelectedItem)] : null;
+        },
+        // Eine Einladung des freigebenden Geräts annehmen? Ergebnis: true/false („Später“ lässt sie eine Stunde gespeichert).
+        confirmInvite(invite) {
+            const alert = $.NSAlert.alloc.init;
+            alert.messageText = $(`Einladung von ${invite.device} annehmen?`);
+            alert.informativeText = $(`${invite.device} lässt dich als ${invite.user} per SSH zu. Der Host-Schlüssel wird mit dem der Einladung verglichen und gemerkt, ` +
+                "danach schickt dieser Mac seinen öffentlichen Schlüssel dorthin. Freigegeben wird erst, wenn du dort den Fingerprint bestätigst.");
+            alert.addButtonWithTitle($("Annehmen"));
+            alert.addButtonWithTitle($("Später"));
+            return isButton(present(alert, null), $.NSAlertFirstButtonReturn);
+        },
+        // Gerät und Benutzername für „Gerät per SSH verbinden…“. Ergebnis: null (Abbrechen) oder {name, ip, user}.
+        askTailscaleDevice(devices, defaultUser) {
+            let note = "";
+            let user = defaultUser;
+            for (;;) {
+                const built = buildTailscaleDevice(note, devices, user);
+                const response = present(built.alert, built);
+                if (!isButton(response, $.NSAlertFirstButtonReturn)) return null;
+                user = ObjC.unwrap(built.user.stringValue).trim();
+                if (/^[A-Za-z0-9_][A-Za-z0-9._-]*$/.test(user)) return Object.assign({ user }, devices[Number(built.popup.indexOfSelectedItem)]);
+                note = "Gib den Benutzernamen auf dem anderen Mac an (Buchstaben, Ziffern, Punkt, Unterstrich, Minus).";
+            }
+        },
         confirmTailscale(kind) {
             const texts = {
                 setup: ["Tailscale einrichten?", "Ein Terminal öffnet sich und installiert Tailscale als reines Kommandozeilenprogramm " +
                     "(Homebrew) und startet den Systemdienst. Dafür fragt macOS dort einmal nach deinem Admin-Passwort; VibeCode sieht es nie. " +
                     "Die Tailscale-App wird dafür nicht gebraucht.", "Terminal öffnen"],
+                pair: ["Schlüssel auf dem anderen Mac einrichten?", "Dort ist dein Schlüssel noch nicht eingetragen. Ein Terminal öffnet sich und " +
+                    "installiert ihn: du gibst einmal das Passwort des Benutzers auf dem anderen Mac ein, das VibeCode nie sieht. " +
+                    "Danach noch einmal „Gerät per SSH verbinden…“ wählen, das bestätigt die Verbindung.", "Terminal öffnen"],
+                keygen: ["SSH-Schlüssel auf diesem Mac erzeugen?", "Dieser Mac hat noch keinen SSH-Schlüssel. Ein Terminal öffnet sich und erzeugt einen " +
+                    "(ed25519); die Passphrase wählst du selbst, leer ist erlaubt. Danach „Einladungen abholen“ noch einmal wählen: die Einladung bleibt gültig.",
+                    "Terminal öffnen"],
                 logout: ["Von Tailscale abmelden?", "Dieser Mac verlässt dein Tailnet und ist nicht mehr erreichbar, bis du dich wieder " +
                     "anmeldest. Laufende Verbindungen, auch Remote-Sitzungen im Editor, brechen ab.", "Abmelden"],
             }[kind];

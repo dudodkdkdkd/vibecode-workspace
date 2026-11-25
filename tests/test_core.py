@@ -34,7 +34,9 @@ class CoreTests(unittest.TestCase):
         # Ohne Mac-Namen: die Tests lesen die Schreibtisch-Dateien unter ihrem Basisnamen (sonst hinge der echte Computername dran).
         env = patch.dict(os.environ, {'VIBECODE_CONFIG_DIR': str(self.config),
                                       'VIBECODE_DESKTOP_DIR': str(self.desktop),
-                                      'VIBECODE_MAC_LABEL': '', 'VIBECODE_TAILSCALE': ''})
+                                      'VIBECODE_MAC_LABEL': '', 'VIBECODE_TAILSCALE': '',
+                                      # Nie die echten Verlaufsdateien lesen: der Scanner sucht in zwei leeren Ordnern.
+                                      'VIBECODE_CLAUDE_PROJECTS': str(self.tmp / 'no-claude'), 'VIBECODE_CODEX_SESSIONS': str(self.tmp / 'no-codex')})
         env.start()
         self.addCleanup(env.stop)
         # Kein Start verbindet je ein echtes Tailscale: der Haken ist ersetzt; ein eigener Test prüft die echte Funktion.
@@ -355,6 +357,41 @@ class CoreTests(unittest.TestCase):
             for host in ('remote-mac.example-tailnet.ts.net', '100.64.0.5'):
                 core.ssh_action('join', f'workspace remote ssh join user@{host} {fp}')
                 self.assertEqual(call.call_args.args, ('remote', ['ssh', 'join', f'user@{host}', fp]))
+
+    def test_the_tailnet_action_passes_exactly_one_user_at_device_and_pair_opens_a_terminal(self):
+        with patch.object(core, 'call_module', return_value={'code': 0, 'out': '', 'err': ''}) as call:
+            core.ssh_action('tailnet', 'user@100.64.0.9')
+            self.assertEqual(call.call_args.args, ('remote', ['ssh', 'tailnet', 'user@100.64.0.9']))
+            core.ssh_action('tailnet', 'workspace remote ssh tailnet user@studio.example-tailnet.ts.net --wake')   # Optionen fallen weg
+            self.assertEqual(call.call_args.args[1], ['ssh', 'tailnet', 'user@studio.example-tailnet.ts.net'])
+            call.reset_mock()
+            for bad in ('', '   ', 'a b', 'user@x\nuser@y'):
+                with self.assertRaises(ValueError, msg=repr(bad)):
+                    core.ssh_action('tailnet', bad)
+            call.assert_not_called()
+        with patch.object(core, 'open_in_terminal') as terminal:
+            core.open_ssh('pair')
+        self.assertEqual(terminal.call_args.args[0][2:], ['ssh', 'pair', '--verify'])                      # mit Ergebnis statt stummem exec
+
+    def test_the_invitation_actions_pass_only_a_device_or_a_32_digit_code_and_keygen_opens_a_terminal(self):
+        code = 'ab' * 16
+        with patch.object(core, 'call_module', return_value={'code': 0, 'out': '', 'err': ''}) as call:
+            for action, line, expected in (('invite', '100.64.0.5', ['ssh', 'invite', '100.64.0.5']), ('inbox', '', ['ssh', 'inbox']),
+                                           ('accept', code, ['ssh', 'accept', code]), ('grant-check', code, ['ssh', 'grant', '--check', code]),
+                                           ('grant', f'workspace remote ssh grant {code} --wake', ['ssh', 'grant', '--yes', code])):
+                core.ssh_action(action, line)
+                self.assertEqual(call.call_args.args, ('remote', expected), action)
+            call.reset_mock()
+            for action, line in (('invite', ''), ('invite', 'a b'), ('accept', ''), ('accept', 'zu-kurz'), ('accept', code.upper()), ('accept', code + 'ab'),
+                                 ('grant', f'{code} {code}'), ('grant-check', 'x' * 32), ('grant', '../etc')):
+                with self.assertRaises(ValueError, msg=(action, line)):
+                    core.ssh_action(action, line)
+            call.assert_not_called()                                                        # nichts davon erreicht je das Modul
+        with patch.object(core, 'open_in_terminal') as terminal:
+            core.open_ssh('keygen')
+        self.assertEqual(terminal.call_args.args[0][2:], ['ssh', 'keygen'])
+        for action in ('invite', 'inbox', 'accept', 'grant-check', 'grant'):
+            self.assertIn(action, core.SSH_ACTIONS)
 
     def test_ssh_actions_are_a_fixed_list_and_bad_lines_are_rejected(self):
         with patch.object(core, 'call_module') as call:
@@ -1328,6 +1365,121 @@ class CoreTests(unittest.TestCase):
         with patch.object(core, 'module_entries', return_value=[]), patch.object(core, 'call_module') as call:
             REAL_AUTOSTART(['A'])
         call.assert_not_called()                                                        # ohne Remote-Modul gibt es nichts zu tun
+
+    # --- Agenten: was die Coding-Agenten tun (Schätzung aus ihren Verlaufsdateien) ------------------------------------------------
+
+    PROJECTS = [('app', '/Users/example/work/app'), ('app-api', '/Users/example/work/app/api'), ('app2', '/Users/example/work/app2')]
+
+    def raw(self, cwd, state='ready', agent='claude', age=30, branch='main'):
+        return {'cwd': cwd, 'state': state, 'agent': agent, 'age': age, 'branch': branch}
+
+    def test_sessions_are_tied_to_the_longest_matching_project_and_everything_else_is_left_out(self):
+        raw = [self.raw('/Users/example/work/app/api/src', age=50), self.raw('/Users/example/work/app', 'working', 'codex', 10),
+               self.raw('/Users/example/work/app2/x', age=70), self.raw('/Users/example/work/appendix', age=5),         # nur ein gleicher Anfang
+               self.raw('/Users/example/scratch', age=1), self.raw('/', age=2)]
+        found = core.map_agent_sessions(raw, self.PROJECTS)
+        self.assertEqual([(s['project'], s['agent'], s['state'], s['age']) for s in found],
+                         [('app', 'codex', 'working', 10), ('app-api', 'claude', 'ready', 50), ('app2', 'claude', 'ready', 70)])   # nach Alter
+        self.assertEqual(set(found[0]), {'project', 'agent', 'state', 'age', 'branch'})
+
+    def test_malformed_scan_entries_are_skipped_and_text_is_cleaned(self):
+        good = self.raw('/Users/example/work/app', branch='fe\x1b[31mature' + 'x' * 100)
+        bad = [None, 'x', [], {}, self.raw('/Users/example/work/app', state='lila'), self.raw('/Users/example/work/app', agent='bot'),
+               dict(self.raw('/Users/example/work/app'), age='5'), dict(self.raw('/Users/example/work/app'), age=True),
+               dict(self.raw('/Users/example/work/app'), cwd=7), dict(self.raw('/Users/example/work/app'), age=-5)]
+        found = core.map_agent_sessions([good] + bad, self.PROJECTS)
+        self.assertEqual(len(found), 2)                                                           # die gute und die mit negativem Alter (auf 0 gesetzt)
+        self.assertTrue(all('\x1b' not in s['branch'] and len(s['branch']) <= 60 for s in found))
+        self.assertEqual(core.map_agent_sessions('kaputt', self.PROJECTS), [])
+
+    def test_symlinked_folders_match_locally_and_dotdot_is_resolved_for_a_remote_mac(self):
+        real = self.tmp / 'real' / 'app'
+        real.mkdir(parents=True)
+        os.symlink(self.tmp / 'real', self.tmp / 'link')
+        found = core.map_agent_sessions([self.raw(str(self.tmp / 'link' / 'app' / 'src'))], [('app', str(real))])
+        self.assertEqual([s['project'] for s in found], ['app'])
+        remote = core.map_agent_sessions([self.raw('/srv/git/app/../other/x'), self.raw('/srv/git/app/x/../y')],
+                                         [('app [SSH: h]', '/srv/git/app')], resolve=os.path.normpath)
+        self.assertEqual([s['project'] for s in remote], ['app [SSH: h]'])
+
+    def test_local_agents_never_raise_and_skip_remote_projects(self):
+        scan = {'sessions': [self.raw('/Users/example/work/app/src', 'working')]}
+        ok = Mock(returncode=0, stdout=json.dumps(scan), stderr='')
+        paths = self.PROJECTS + [('far [SSH: h]', 'vscode-remote://ssh-remote+h/Users/example/work/app')]
+        with patch.object(core.subprocess, 'run', return_value=ok) as run, patch.object(core, 'list_project_paths', return_value=paths):
+            found = core.agents_local()
+        self.assertEqual((found['error'], found['available'], [s['project'] for s in found['sessions']]), (None, True, ['app']))
+        self.assertEqual(run.call_args.args[0][1:], [str(core.AGENT_SCAN), '--json'])
+        for label, outcome in (('Exit', Mock(returncode=2, stdout='', stderr='Aufruf: x')), ('kein JSON', Mock(returncode=0, stdout='kaputt', stderr='')),
+                               ('falsche Form', Mock(returncode=0, stdout='[]', stderr=''))):
+            with self.subTest(label), patch.object(core.subprocess, 'run', return_value=outcome), patch.object(core, 'list_project_paths', return_value=paths):
+                found = core.agents_local()
+            self.assertEqual(found['sessions'], [])
+            self.assertTrue(found['error'].startswith('Agenten: '))
+        with patch.object(core, 'AGENT_SCAN', self.tmp / 'gibt-es-nicht.py'):
+            self.assertEqual(core.agents_local(), {'sessions': [], 'error': None, 'available': False})   # ohne Scanner kein Bereich
+
+    def test_remote_agents_use_the_connected_mac_and_that_macs_repository_list(self):
+        mac = {'user': 'user', 'host': 'studio.example-tailnet.ts.net', 'port': 22}
+        scan = json.dumps({'sessions': [self.raw('/srv/git/app/src', 'working'), self.raw('/srv/git/elsewhere', 'ready')]})
+        self.config.mkdir(exist_ok=True)
+        (self.config / 'remote-repositories.json').write_text(json.dumps({'version': 1, 'hosts': {
+            'user@studio.example-tailnet.ts.net': {'root': '~', 'paths': ['/srv/git/app']}}}))
+        with patch.object(core, 'ssh_state', return_value={'mac': mac}), self.module_answer(out=scan) as call:
+            found = core.agents_remote()
+        call.assert_called_once_with('remote', ['ssh', 'agents'], timeout=60)
+        self.assertEqual((found['error'], found['mapped'], [(s['project'], s['state']) for s in found['sessions']]),
+                         (None, True, [('app [SSH: user@studio.example-tailnet.ts.net]', 'working')]))      # fremde Ordner fallen weg
+        (self.config / 'remote-repositories.json').unlink()                                                  # keine Liste: nach Ordnername
+        with patch.object(core, 'ssh_state', return_value={'mac': mac}), self.module_answer(out=scan):
+            found = core.agents_remote()
+        self.assertEqual((found['mapped'], sorted(s['project'] for s in found['sessions'])), (False, ['elsewhere', 'src']))               # der Ordnername der Sitzung, ohne Repository-Liste nichts Besseres
+
+    def test_remote_agent_problems_become_a_message_not_an_exception(self):
+        mac = {'user': 'user', 'host': 'studio', 'port': 22}
+        with patch.object(core, 'ssh_state', return_value={'mac': None}):
+            self.assertIn('noch kein anderer Mac', core.agents_remote()['error'])
+        for label, answer in (('Fehler', dict(code=1, err='Remote: Auf dem anderen Mac fehlt python3.')), ('kein JSON', dict(out='kaputt')),
+                              ('falsche Form', dict(out='{"sessions": 5}')), ('leer', dict(out=''))):
+            with self.subTest(label), patch.object(core, 'ssh_state', return_value={'mac': mac}), self.module_answer(**answer):
+                found = core.agents_remote()
+            self.assertEqual(found['sessions'], [])
+            self.assertTrue(found['error'] and not found['error'].startswith('Remote: '), found)
+        with patch.object(core, 'ssh_state', return_value={'mac': mac}), patch.object(core, 'call_module', side_effect=subprocess.TimeoutExpired('x', 60)):
+            self.assertTrue(core.agents_remote()['error'])
+
+    def test_the_window_state_asks_the_launcher_once_and_hands_its_list_to_the_agents(self):
+        real_run = subprocess.run
+
+        def run(command, *args, **kwargs):
+            if str(core.AGENT_SCAN) in [str(part) for part in command]:                              # nur der Scanner ist ersetzt
+                return Mock(returncode=0, stdout=json.dumps({'sessions': [self.raw('/Users/example/work/app/src', 'working')]}), stderr='')
+            return real_run(command, *args, **kwargs)
+        with patch.object(core, 'list_project_paths', return_value=[('app', '/Users/example/work/app')]) as listing, \
+             patch.object(core.subprocess, 'run', side_effect=run), patch.object(core, 'tailscale_info', return_value={'available': False}), \
+             patch.object(core, 'ssh_state', return_value={'hosts': []}), patch.object(core, 'presets_state', return_value={'available': False}), \
+             patch.object(core, 'folder_state', return_value={'local': []}), patch.object(core, 'wake_state', return_value=None):
+            state = core.state()
+        listing.assert_called_once()                                                                # ein Launcher-Aufruf, nicht zwei
+        self.assertEqual([(s['project'], s['state']) for s in state['agents']['sessions']], [('app', 'working')])
+
+    def test_the_window_state_carries_local_agents_only_and_the_cli_exposes_both_scopes(self):
+        with patch.object(core, 'agents_local', return_value={'sessions': [], 'error': None, 'available': True}) as local, \
+             patch.object(core, 'agents_remote') as remote, patch.object(core, 'tailscale_info', return_value={'available': False}), \
+             patch.object(core, 'ssh_state', return_value={'hosts': []}), patch.object(core, 'list_project_paths', return_value=[]), \
+             patch.object(core, 'presets_state', return_value={'available': False}), patch.object(core, 'folder_state', return_value={'local': []}), \
+             patch.object(core, 'wake_state', return_value=None):
+            state = core.state()
+        self.assertEqual(state['agents']['available'], True)
+        local.assert_called_once()
+        remote.assert_not_called()                                                                  # die Übersicht fragt nie einen anderen Mac
+        with patch.object(core, 'agents_local', return_value={'sessions': [], 'error': None}), patch.object(core, 'agents_remote', return_value={'sessions': [], 'error': 'x'}):
+            self.assertEqual(json.loads(self.cli('agents', 'local')[1])['error'], None)
+            self.assertEqual(json.loads(self.cli('agents', 'remote')[1])['error'], 'x')
+        for bad in (['agents'], ['agents', 'alle'], ['agents', 'local', 'remote']):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                self.cli(*bad)
+        self.assertIn('vibecode agents', core.usage([]))
 
     def test_projects_in_a_folder_are_the_launchers_names_sorted_and_never_remote_or_siblings(self):
         folder = self.tmp / 'Github'

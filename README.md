@@ -29,6 +29,7 @@ nichts ist hinter einem Menü versteckt, und jede Zeile hat ihren Status und ihr
 | Bereich | Was du siehst | Knöpfe |
 |---------|---------------|--------|
 | **Workspaces** | jeder gespeicherte Workspace mit Projekten und Schreibtisch-Shortcut (⚠︎ wenn ein Projekt fehlt), spontane Projektauswahl | Kästchen **Quick-Öffnen**, **Starten**, **Bearbeiten…**, **Workspace anlegen…**, **Einmaliger Workspace…**, **Shortcuts erneuern** |
+| **Agenten** | eine Zeile: wie viele Claude-Code- und Codex-Sitzungen in deinen Projekten gerade arbeiten oder auf dich warten (Schätzung) | **Agenten…** (Liste mit **Aktualisieren** und **Auf <Mac> prüfen**) |
 | **Repository-Suche** | alle Ordner, in denen VibeCode nach Git-Repositories sucht, lokal und auf SSH-Hosts, mit Zahl der Funde | Kästchen **Quick-Öffnen** (lokale Ordner), **Ordner hinzufügen…**, **Remote-Ordner hinzufügen…**, **Entfernen** |
 | **Presets pro Repository** | der allgemeine Standard (gilt ohne eigenes Preset) und welche Terminals und Browser-Tabs je Repository starten; Presets von verschobenen Repositories | **Festlegen…**, **Bearbeiten…**, **Zurücksetzen**, **Übernehmen**, **Preset anlegen…** |
 | **Remote** | oben SSH: deine SSH-Hosts mit Zahl der gefundenen Repositories, dazu der gespeicherte Mac (siehe unten). Darunter Tailscale: Zustand (verbunden, getrennt, nicht angemeldet, nicht installiert …), App oder Kommandozeile, und der Schalter „Mit VibeCode starten und beenden“ | SSH: **Verbinden**, **Neue Verbindung…**, **Diesen Mac freigeben…**. Tailscale: **Einrichten…**, **Anmelden…**, **Verbinden** / **Trennen**, **Geräte…**, **Abmelden…**, Kästchen **Aktiv**, **Aktualisieren** |
@@ -213,6 +214,30 @@ Der untere Teil des Bereichs **Remote** steuert Tailscale, ohne dass du die Mac-
   klicken. **Abmelden…** fragt vorher nach, weil dieser Mac dann nicht mehr erreichbar ist.
 - **Verbinden** / **Trennen** sind ein einfaches `tailscale up` / `tailscale down` (ohne Optionen, damit deine Einstellungen bleiben).
 - **Geräte…** listet die anderen Geräte deines Tailnets: Name, 100.x-Adresse, System, online oder zuletzt gesehen.
+- **Gerät aus Tailscale freigeben…** (im Dialog **Diesen Mac freigeben…**, nur wenn „Entfernte Anmeldung“ an ist und ein eigenes Gerät online
+  ist): so läuft es **vom freigebenden Mac aus**. Dort wählst du das Gerät, das Zugriff bekommen soll. VibeCode schickt ihm per Taildrop eine
+  Einladung (Host, Benutzer, den Host-Schlüssel dieses Macs, einen Einmal-Code; sie gilt eine Stunde). Auf dem anderen Mac wählst du im Bereich
+  **Remote** **Einladungen abholen** und **Annehmen**: VibeCode prüft, dass der Host-Schlüssel zur Einladung passt, merkt ihn, speichert das Ziel
+  und schickt den **öffentlichen** Schlüssel dieses Macs zurück. Zurück auf dem freigebenden Mac: **Einladungen abholen**, dann siehst du Name
+  und Fingerprint und bestätigst. Erst dann wird der Schlüssel eingetragen (Taildrop prüft den Absender einer Datei nicht, deshalb bleibt diese
+  eine Bestätigung). Kein Passwort, keine Zeilen zum Kopieren. Ein Code gilt genau einmal.
+  - **Taildrop-Posteingang:** `tailscale file get` holt immer **alles** aus dem Posteingang. VibeCode liest deshalb nur Dateien mit genau
+    den Namen `vibecode-invite-…json` / `vibecode-answer-…json` (höchstens 16 KB, strenges Format), alles andere legt es unverändert nach
+    `~/Downloads` (bei gleichem Namen mit Nummer) und sagt, wie viele Dateien das waren. Es löscht nie etwas, das nicht von ihm stammt.
+  - **Voraussetzungen:** Tailscale auf beiden Macs und beide online. Verifiziert ist die Kommandozeilen-Variante (Einrichten…); bei der
+    Tailscale-App muss Taildrop in den Systemeinstellungen an sein und der Empfang ist **nicht** geprüft. Dann nimm den Weg unten, der immer geht.
+- **Gerät per SSH verbinden…** (nur wenn Tailscale läuft und andere Geräte da sind): der Weg **vom Client aus**, ein Passwort einmal.
+  Der kürzeste Weg zu einem zweiten Mac, wenn Taildrop nicht geht. Du wählst das
+  Gerät aus deinem Tailnet und gibst den Benutzernamen dort an, mehr nicht. Es gibt keine Zeilen, die zwischen den Macs wandern. Tailscale
+  bestätigt, dass es **dein eigenes** Gerät ist (gleiches Konto, nicht von außen hereingeteilt); darauf vertraut VibeCode seinem
+  Host-Schlüssel beim ersten Mal und trägt ihn für Name **und** 100.x-Adresse in `known_hosts` ein (nie über einen schon vorhandenen
+  Eintrag). Fehlt dein Schlüssel dort noch, öffnet sich ein Terminal, das ihn mit `ssh-copy-id` einmal mit dem **Passwort des Benutzers
+  dort** einträgt und das Ergebnis anzeigt; danach „Gerät per SSH verbinden…“ noch einmal wählen. Hat dieser Mac noch keinen SSH-Schlüssel,
+  erzeugt dasselbe Terminal zuerst einen (die Passphrase wählst du selbst); hat er eine Passphrase und ist nicht im ssh-agent, fragt es sie einmal ab
+  und merkt sie im Schlüsselbund. Löst der Tailscale-Name auf diesem Mac nicht auf (Tailscale-DNS aus), speichert VibeCode die 100.x-Adresse. Voraussetzung: „Entfernte Anmeldung“
+  ist auf dem anderen Mac an. Den Weg über die Zeile (**Neue Verbindung…**) und die geführte Einrichtung für beliebige Server gibt es
+  unverändert. Tailscales eigenes SSH (`tailscale ssh`) nutzt VibeCode bewusst nicht: die Standardregel „check“ verlangt regelmäßig eine
+  neue Anmeldung im Browser, das bricht Agenten und den Editor ab.
 - **Mit VibeCode starten und beenden** (Kästchen **Aktiv**): Startest du einen Workspace (Schreibtisch-Shortcut, **Starten**, Quick-Öffnen,
   **Einmaliger Workspace…**), verbindet VibeCode Tailscale vorher, falls es getrennt ist. Bei Remote-Projekten (`[SSH: …]`) wartet der
   Start bis zu 10 Sekunden darauf, damit Remote-SSH sofort eine Verbindung findet. **Beendet** wird so: Sobald das **letzte von VibeCode
@@ -228,6 +253,24 @@ Der untere Teil des Bereichs **Remote** steuert Tailscale, ohne dass du die Mac-
 
 Meldet `join` „nicht erreichbar … nodename nor servname“, wird der Name nicht gefunden (anderes Netz, kein Tailscale): dann den
 Tailscale-Host oder die IP-Adresse des Remote-Macs nehmen (`ipconfig getifaddr en0`, bei WLAN `en1`).
+
+### Agenten-Überblick
+
+Der Bereich **Agenten** zeigt in einer Zeile, was Claude Code und Codex gerade tun, zum Beispiel „1 arbeitet · 2 warten auf dich“.
+**Agenten…** öffnet die Liste mit Zustand, Projekt, Agent, Branch und Alter.
+
+- **Woher das kommt:** aus den Verlaufsdateien der Agenten (`~/.claude/projects`, `~/.codex/sessions`, plus `$CODEX_HOME` und
+  `$CLAUDE_CONFIG_DIR`; mit `VIBECODE_CLAUDE_PROJECTS` / `VIBECODE_CODEX_SESSIONS` ersetzbar). Gelesen wird nur das Ende jeder Datei
+  der letzten 3 Stunden, ausgegeben werden nur Agent, Ordner, Branch, Zustand und Alter, **nie Nachrichtentext**. An deinen Agenten ändert
+  sich nichts (keine Hooks, keine Einstellungen).
+- **Zustände (geschätzt):** ● arbeitet · ○ fertig, wartet auf dich · ◐ ein Befehl läuft oder wartet auf Freigabe · ◌ unklar, seit
+  längerem still. Es ist ein Schnappschuss, kein Live-Monitor: **Aktualisieren** liest neu.
+- **Nur deine Projekte:** angezeigt werden Sitzungen, deren Ordner in einem bekannten Projekt liegt (der längste passende Pfad gewinnt).
+  Scratch-Ordner und Sitzungen der Desktop-Apps bleiben draußen.
+- **Der andere Mac:** **Auf <Mac> prüfen** startet per SSH (ohne Passwortabfrage, mit Zeitlimit) dasselbe Skript dort und zeigt die Sitzungen
+  des Remote-Macs, also die Agenten, die du von hier aus gestartet hast. Das passiert **nur auf diesen Klick**; die Übersicht fragt nie
+  einen anderen Mac. Dort muss `python3` vorhanden sein (auf einem Mac: die Command Line Tools), sonst sagt die Meldung es.
+- Im Terminal: `./VibeCode\ Workspace.command agents local|remote` (JSON).
 
 Auch ohne Fenster:
 

@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import plistlib
 import re
+import secrets
 import shlex
 import shutil
 import signal
@@ -451,7 +452,7 @@ def tailscale_query():
 
     `info` is what tailscale_state() returns, `data` the parsed status object ({} if unreadable) and `problem` is '' or
     'denied' (the daemon refuses this user: the operator is not set, see TAILSCALE_SETUP) or 'daemon' (no answer: not running)."""
-    info = {'cli': tailscale_cli(), 'state': '', 'magic': False, 'name': '', 'ip': '', 'peers': []}
+    info = {'cli': tailscale_cli(), 'state': '', 'magic': False, 'name': '', 'ip': '', 'owner': None, 'peers': []}
     if not info['cli']:
         return info, {}, ''
     try:
@@ -472,11 +473,14 @@ def tailscale_query():
     info['magic'] = isinstance(tailnet, dict) and tailnet.get('MagicDNSEnabled') is True
     if isinstance(me, dict):
         info['name'], info['ip'] = tailnet_node(me)
+        info['owner'] = me.get('UserID') if type(me.get('UserID')) is int else None
     for peer in peers.values() if isinstance(peers, dict) else []:
         if isinstance(peer, dict):
             name, ip = tailnet_node(peer)
             names = [name.lower(), name.split('.')[0].lower()] if name else []
-            info['peers'].append({'names': names, 'ip': ip, 'online': peer.get('Online') is True})
+            info['peers'].append({'names': names, 'name': name, 'ip': ip, 'online': peer.get('Online') is True,
+                                  'owner': peer.get('UserID') if type(peer.get('UserID')) is int else None,
+                                  'shared': peer.get('ShareeNode') is True})
     return info, data, ''
 
 
@@ -484,7 +488,8 @@ def tailscale_state():
     """What Tailscale on THIS Mac reports (see tailscale_query), without the details only the window needs.
 
     {'cli': path or None, 'state': BackendState ('' if unknown), 'magic': MagicDNS on, 'name': this Mac's tailnet name,
-     'ip': its 100.x address, 'peers': [{'names': [lowercase full and short name], 'ip', 'online'}]}"""
+     'ip': its 100.x address, 'owner': its Tailscale user id, 'peers': [{'names': [lowercase full and short name], 'name', 'ip',
+     'online', 'owner', 'shared'}]}"""
     return tailscale_query()[0]
 
 
@@ -672,6 +677,7 @@ def tailscale_show():
     print(json.dumps({'variant': tailscale_variant(info['cli']), 'state': state, 'name': info['name'], 'ip': info['ip'],
                       'tailnet': clean_text(tailnet.get('Name'), 80) if isinstance(tailnet, dict) else '',
                       'auto': auto, 'autoError': auto_error, 'ours': tailscale_marker() is not None,
+                      'localUser': getpass.getuser() if SSH_USER.fullmatch(getpass.getuser()) else '',
                       'devices': tailscale_devices(data)}, ensure_ascii=False))
 
 
@@ -1020,12 +1026,52 @@ def ssh_connect(remote=None):
     os.execv(command[0], command)
 
 
-def ssh_pair():
-    """Install this Mac's public key on the target. Needs the target's password: a human step."""
+def ensure_client_key():
+    """A fresh Mac has no SSH key: make one here, in the Terminal that is open anyway, so the user chooses the passphrase themselves."""
+    try:
+        own_public_key()
+        return
+    except ValueError:
+        pass
+    SSH_DIR.mkdir(mode=0o700, exist_ok=True)
+    print('Auf diesem Mac gibt es noch keinen SSH-Schlüssel. Er wird jetzt erzeugt (ed25519); die Passphrase wählst du selbst, leer ist erlaubt.')
+    key = SSH_DIR / 'id_ed25519'
+    if subprocess.run(['/usr/bin/ssh-keygen', '-t', 'ed25519', '-f', str(key), '-C', 'VibeCode Workspace']).returncode or not key.with_suffix('.pub').is_file():
+        raise ValueError('Der SSH-Schlüssel konnte nicht erzeugt werden.')
+
+
+def key_needs_passphrase(private):
+    result = subprocess.run(['/usr/bin/ssh-keygen', '-y', '-P', '', '-f', private], capture_output=True, text=True)
+    return result.returncode != 0 and 'passphrase' in (result.stderr + result.stdout).lower()
+
+
+def ssh_pair(verify=False):
+    """Install this Mac's public key on the target. Needs the target's password: a human step.
+
+    With `verify` it does not replace the process: after ssh-copy-id it tries the login, so the Terminal ends with a clear result."""
     target = saved_ssh_target()
     ssh_require_reachable(target)
     command = ['/usr/bin/ssh-copy-id', '-p', str(target['port']), ssh_destination(target)]
-    os.execv(command[0], command)
+    if not verify:
+        os.execv(command[0], command)
+        return                                                          # only reached when a test replaced execv
+    ensure_client_key()
+    status = subprocess.run(command).returncode                       # inherits the terminal: the password prompt is theirs
+    if status:
+        raise SystemExit(status)
+    outcome = probe_login(target)
+    if outcome != 'ok':
+        # A key with a passphrase that is not in the agent is refused in BatchMode although the copy worked: ask for it once here.
+        path = own_public_key()[0]
+        private = str(path)[:-4]
+        if key_needs_passphrase(private):
+            print('Dein Schlüssel hat eine Passphrase und ist noch nicht im ssh-agent. Gib sie jetzt einmal ein; macOS merkt sie sich im Schlüsselbund.')
+            subprocess.run(['/usr/bin/ssh-add', '--apple-use-keychain', private])
+            outcome = probe_login(target)
+    if outcome != 'ok':
+        raise ValueError(f'Der Schlüssel ist eingetragen, aber die Anmeldung ohne Passwort klappt auf {ssh_destination(target)} noch nicht '
+                         '(Permission denied). Prüfe dort „Entfernte Anmeldung“ und ob für das Konto ein Passwort-Login erlaubt ist.')
+    print(f'✔ Verbunden mit {ssh_destination(target)}. In VibeCode: „Gerät per SSH verbinden…“ bestätigt es noch einmal.')
 
 
 def summary():
@@ -1250,6 +1296,20 @@ def pin_host_key(target, fingerprint):
     append_line(SSH_DIR / 'known_hosts', entry)
 
 
+def probe_login(target):
+    """'ok' if a login without a password works, 'denied' if the other Mac does not know our key yet; anything else raises."""
+    probe = subprocess.run(ssh_command(target, 'true'), capture_output=True, text=True, timeout=30)
+    if probe.returncode == 0:
+        return 'ok'
+    if 'Host key verification failed' in probe.stderr:
+        raise ValueError('Host-Schlüssel unbekannt oder geändert. Auf dem Remote-Mac `workspace remote '
+                         'ssh share` ausführen und den ganzen join-Befehl mit Fingerprint verwenden.')
+    if 'Permission denied' not in probe.stderr:
+        raise ValueError('Verbindung fehlgeschlagen: ' +
+                         (probe.stderr.strip().splitlines() or [f'Exit {probe.returncode}'])[-1])
+    return 'denied'
+
+
 def ssh_join(args):
     """Run on the Mac that wants access: pin the host key, save the target, check the login.
 
@@ -1269,16 +1329,9 @@ def ssh_join(args):
         if fingerprint:
             pin_host_key(target, fingerprint)
         write(SSH_FILE, target)
-    probe = subprocess.run(ssh_command(target, 'true'), capture_output=True, text=True, timeout=30)
-    if probe.returncode == 0:
+    if probe_login(target) == 'ok':
         print(f'✔ Verbunden mit {ssh_destination(target)}. Befehle: workspace remote ssh run -- <befehl>')
         return
-    if 'Host key verification failed' in probe.stderr:
-        raise ValueError('Host-Schlüssel unbekannt oder geändert. Auf dem Remote-Mac `workspace remote '
-                         'ssh share` ausführen und den ganzen join-Befehl mit Fingerprint verwenden.')
-    if 'Permission denied' not in probe.stderr:
-        raise ValueError('Verbindung fehlgeschlagen: ' +
-                         (probe.stderr.strip().splitlines() or [f'Exit {probe.returncode}'])[-1])
     path, key, fingerprint = own_public_key()
     line = f'workspace remote ssh allow {shlex.quote(key)}'
     copied = clipboard(line)
@@ -1290,6 +1343,360 @@ def ssh_join(args):
     print(f'Hilft das nicht, hat der Schlüssel eine Passphrase und ist nicht im ssh-agent: '
           f'ssh-add --apple-use-keychain {str(path)[:-4]}')
     raise SystemExit(2)
+
+
+TAILNET_USAGE = 'Aufruf: workspace remote ssh tailnet benutzer@gerät'
+
+
+def tailnet_peer(host, info):
+    """The device of YOUR OWN Tailscale account that `host` names (full or short name, or its 100.x address), else a ValueError.
+
+    Only such a device may have its SSH host key trusted without a fingerprint: Tailscale authenticates the peer, but a device
+    of another account that was shared into the tailnet is not yours."""
+    if info['state'] != 'Running':
+        raise ValueError('Tailscale ist auf diesem Mac nicht verbunden.')
+    low = host.lower()
+    peer = next((p for p in info['peers'] if low in p['names'] or low == p['ip']), None)
+    if peer is None:
+        raise ValueError('Dieses Gerät kennt Tailscale in deinem Tailnet nicht.')
+    if peer['shared'] or info['owner'] is None or peer['owner'] != info['owner']:
+        raise ValueError('Dieses Gerät gehört nicht zu deinem Tailscale-Konto. Für fremde Geräte gibt es keine automatische Vertrauensstellung: '
+                         'nimm die Zeile des anderen Macs (Neue Verbindung…).')
+    try:
+        ok = ipaddress.IPv4Address(peer['ip']) in TAILNET_ADDRESSES
+    except ValueError:
+        ok = False
+    if not ok:
+        raise ValueError('Das Gerät hat keine Tailscale-Adresse (100.x).')
+    return peer
+
+
+def tailnet_target(user, peer, info):
+    """The SSH target for an own tailnet device: its MagicDNS name only if that resolves here, else its 100.x address."""
+    return ssh_target(f'{user}@{peer["name"] if info["magic"] and peer["name"] else peer["ip"]}')
+
+
+def pin_tailnet_host_key(target, peer, expected=None):
+    """Trust the host key of an own tailnet device on first use. Returns its fingerprint, or '' if the host was known already.
+
+    The key is read from the peer's 100.x address and written for BOTH the name and the address, so ssh, `join` and the editor's
+    Remote-SSH all match whichever of the two ends up in a saved target. A host that is known is never overwritten. With `expected`
+    (the key an invitation carried) the scanned key must be exactly that one."""
+    names = [target['host']] + ([peer['ip']] if target['host'] != peer['ip'] else [])
+    if any(run('/usr/bin/ssh-keygen', '-F', name, check=False).returncode == 0 for name in names):
+        return ''
+    scan = run('/usr/bin/ssh-keyscan', '-T', '5', '-t', 'ed25519', peer['ip'], check=False).stdout
+    fields = next((line.split() for line in scan.splitlines() if line.strip() and not line.startswith('#')), [])
+    if len(fields) < 3:
+        raise ValueError(f'Host-Schlüssel von {target["host"]} konnte nicht gelesen werden. Ist „Entfernte Anmeldung“ dort an?')
+    fingerprint = keygen_fingerprint(' '.join(fields[1:3]))
+    if expected is not None and ' '.join(fields[1:3]) != expected:
+        raise ValueError(f'Der Host-Schlüssel von {target["host"]} stimmt NICHT mit dem der Einladung überein. Nicht verbinden: '
+                         'neu einladen oder „Gerät per SSH verbinden…“ nehmen.')
+    append_line(SSH_DIR / 'known_hosts', f'{",".join(names)} {fields[1]} {fields[2]}')
+    return fingerprint
+
+
+def ssh_tailnet(args):
+    """Connect to an own tailnet device without pasting lines: check it is yours, trust its key, save it as the target, try the login.
+
+    Exit 0 = connected, 1 = error, 2 = the device does not know our key yet (`ssh pair --verify` installs it with its password once)."""
+    if len(args) != 1:
+        raise ValueError(TAILNET_USAGE)
+    wanted = ssh_target(args[0])
+    if not wanted['user']:
+        raise ValueError(TAILNET_USAGE)
+    info = tailscale_state()
+    peer = tailnet_peer(wanted['host'], info)
+    target = tailnet_target(wanted['user'], peer, info)
+    host = target['host']
+    try:
+        ssh_require_reachable(target)
+    except ValueError as exc:
+        # MagicDNS may be on in the tailnet while this Mac does not use Tailscale's DNS: the address always works, so use it instead.
+        if host == peer['ip'] or not ('nodename nor servname' in str(exc) or 'not known' in str(exc)):
+            raise
+        host = peer['ip']
+        target = ssh_target(f'{wanted["user"]}@{host}')
+        ssh_require_reachable(target)
+    fingerprint = pin_tailnet_host_key(target, peer)
+    write(SSH_FILE, target)
+    if fingerprint:
+        print(f'Host-Schlüssel von {host} übernommen ({fingerprint}). Tailscale hat das Gerät als dein eigenes bestätigt.')
+    if probe_login(target) == 'ok':
+        print(f'✔ Verbunden mit {ssh_destination(target)}. Befehle: workspace remote ssh run -- <befehl>')
+        return
+    print(f'Noch kein Schlüssel auf {host}: `workspace remote ssh pair --verify` installiert ihn (einmal das Passwort von {target["user"]}).')
+    raise SystemExit(2)
+
+
+AGENT_SCRIPT = ROOT.parent / 'core' / 'agent_scan.py'
+# Runs on the OTHER Mac: refuse before python3 could pop up the Command Line Tools installer (the macOS shim does that), then read
+# the scanner from stdin. Fixed text, nothing from outside is part of it.
+AGENT_REMOTE = r"""
+if [ "$(uname)" = Darwin ] && ! xcode-select -p >/dev/null 2>&1; then echo "python3 fehlt (Command Line Tools: xcode-select --install)" >&2; exit 3; fi
+command -v python3 >/dev/null 2>&1 || { echo "python3 fehlt" >&2; exit 3; }
+exec python3 - --json
+"""
+
+
+def ssh_agents():
+    """Run core/agent_scan.py on the saved Mac (over stdin, BatchMode) and print its JSON. Read-only there: nothing is installed."""
+    target = saved_ssh_target()
+    if not AGENT_SCRIPT.is_file():
+        raise ValueError('core/agent_scan.py fehlt.')
+    ssh_require_reachable(target)
+    result = subprocess.run(ssh_command(target, '/bin/sh -c ' + shlex.quote(AGENT_REMOTE)), input=AGENT_SCRIPT.read_text(encoding='utf-8'),
+                            capture_output=True, text=True, timeout=45)
+    if result.returncode == 3:
+        raise ValueError('Auf dem anderen Mac ' + (result.stderr.strip() or 'fehlt python3') + '.')
+    if result.returncode:
+        raise ValueError('Der andere Mac antwortet nicht lesbar: ' + clean_text((result.stderr.strip().splitlines() or [f'Exit {result.returncode}'])[-1], 200))
+    try:
+        data = json.loads(result.stdout)
+        if not isinstance(data, dict) or not isinstance(data.get('sessions'), list):
+            raise ValueError
+    except ValueError:
+        raise ValueError('Die Antwort des anderen Macs war kein Agenten-Bericht.') from None
+    print(json.dumps(data, ensure_ascii=False))
+
+
+# --- Einladung per Taildrop: der freigebende Mac wählt das Gerät, kein Zeilen-Austausch ---------------------------------------
+# Der Studio kann den Schlüssel des anderen Macs nicht selbst holen, also ein Hin und Her über Taildrop (nur zwischen eigenen Geräten):
+#   1. der freigebende Mac schickt eine Einladung (Host, Benutzer, sein Host-Schlüssel, ein Einmal-Code),
+#   2. der andere Mac nimmt sie an (Klick), prüft den Host-Schlüssel, speichert das Ziel und schickt seinen ÖFFENTLICHEN Schlüssel zurück,
+#   3. der freigebende Mac trägt ihn erst nach der Bestätigung mit Fingerprint ein (Taildrop ist auf Dateiebene nicht authentifiziert).
+# `tailscale file get` holt IMMER alles aus dem Posteingang. Darum nur in einen privaten Ordner, nur die zwei genauen Dateinamen lesen
+# und alles andere unverändert nach ~/Downloads legen: dort geht nie eine fremde Datei verloren.
+TAILDROP_FILE = 'taildrop.json'
+INVITE_NAME = re.compile(r'vibecode-invite-([0-9a-f]{32})\.json')
+ANSWER_NAME = re.compile(r'vibecode-answer-([0-9a-f]{32})\.json')
+NONCE = re.compile(r'[0-9a-f]{32}')
+HOST_KEY_TEXT = re.compile(r'ssh-ed25519 [A-Za-z0-9+/]{20,100}={0,2}')
+TAILDROP_MAX = 16384
+INVITE_TTL = 3600
+HOST_KEY_FILE = Path('/etc/ssh/ssh_host_ed25519_key.pub')
+INBOX_USAGE = 'Aufruf: workspace remote ssh invite GERÄT | inbox | accept CODE | grant --check|--yes CODE | keygen'
+
+
+def downloads_dir():
+    return Path(os.environ.get('VIBECODE_DOWNLOADS') or Path.home() / 'Downloads')
+
+
+def taildrop_load(now):
+    """{'sent': {code: {name, ip, expires}}, 'invites': {code: {host, user, hostKey, expires}}, 'answers': {code: {publicKey}}}, expired
+    entries dropped. A corrupt file raises (it is never replaced by an empty one)."""
+    try:
+        saved = read(TAILDROP_FILE)
+    except ValueError:
+        raise ValueError(f'{TAILDROP_FILE} ist ungültig. Datei prüfen oder löschen.') from None
+    if saved is None:
+        return {'sent': {}, 'invites': {}, 'answers': {}}
+    if not isinstance(saved, dict) or saved.get('version') != 1 or not all(isinstance(saved.get(k), dict) for k in ('sent', 'invites', 'answers')):
+        raise ValueError(f'{TAILDROP_FILE} ist ungültig. Datei prüfen oder löschen.')
+    state = {key: dict(saved[key]) for key in ('sent', 'invites', 'answers')}
+    for kind in ('sent', 'invites'):
+        state[kind] = {code: item for code, item in state[kind].items()
+                       if NONCE.fullmatch(code) and isinstance(item, dict) and isinstance(item.get('expires'), (int, float)) and item['expires'] > now}
+    state['answers'] = {code: item for code, item in state['answers'].items() if code in state['sent'] and isinstance(item, dict)}
+    return state
+
+
+def taildrop_save(state):
+    write(TAILDROP_FILE, dict(state, version=1))
+
+
+def short_name(peer):
+    return (peer['names'][1] if len(peer['names']) > 1 else '') or peer['ip']
+
+
+def taildrop_send(cli, peer, filename, payload):
+    """Send one small JSON file to an own device (`tailscale file cp FILE IP:`). An offline device is said plainly, not left to time out."""
+    if not peer['online']:
+        raise ValueError(f'{short_name(peer)} ist offline: aufwecken und Tailscale verbinden, dann noch einmal.')
+    with tempfile.TemporaryDirectory(prefix='vibecode-drop-') as folder:      # private (0700) and gone afterwards
+        path = Path(folder) / filename
+        path.write_text(json.dumps(payload), encoding='utf-8')
+        tailscale_command(cli, 'file', 'cp', str(path), peer['ip'] + ':', timeout=45)
+
+
+def move_to_downloads(path):
+    """A file that is not ours goes to ~/Downloads under the same name (numbered if taken), never deleted."""
+    target = downloads_dir()
+    target.mkdir(parents=True, exist_ok=True)
+    destination, number = target / path.name, 2
+    while destination.exists():
+        destination = target / f'{path.stem} ({number}){path.suffix}'
+        number += 1
+    shutil.move(str(path), str(destination))
+
+
+def clean_invite(data, now):
+    keys = {'version', 'nonce', 'host', 'user', 'hostKey', 'expires'}
+    if (not isinstance(data, dict) or set(data) != keys or data['version'] != 1 or not isinstance(data['nonce'], str)
+            or not NONCE.fullmatch(data['nonce']) or not isinstance(data['host'], str) or not SSH_HOST.fullmatch(data['host']) or ':' in data['host']
+            or not isinstance(data['user'], str) or not SSH_USER.fullmatch(data['user']) or not isinstance(data['hostKey'], str)
+            or not HOST_KEY_TEXT.fullmatch(data['hostKey']) or type(data['expires']) is not int or not now < data['expires'] <= now + 2 * INVITE_TTL):
+        return None
+    return {key: data[key] for key in keys - {'version', 'nonce'}}
+
+
+def clean_answer(data):
+    if (not isinstance(data, dict) or set(data) != {'version', 'nonce', 'publicKey'} or data['version'] != 1 or not isinstance(data['nonce'], str)
+            or not NONCE.fullmatch(data['nonce']) or not isinstance(data['publicKey'], str)):
+        return None
+    try:
+        checked_public_key(data['publicKey'])
+    except ValueError:
+        return None
+    return {'publicKey': data['publicKey']}
+
+
+def ssh_invite(args):
+    """Run on the Mac that is shared: invite one of YOUR OWN tailnet devices (after you picked it in the window)."""
+    if len(args) != 1:
+        raise ValueError(INBOX_USAGE)
+    cli, info, _ = tailscale_ready()
+    peer = tailnet_peer(args[0], info)
+    if not ssh_listening():
+        raise ValueError('„Entfernte Anmeldung“ ist auf diesem Mac aus. Zuerst in den Systemeinstellungen einschalten (Diesen Mac freigeben…).')
+    host = tailscale_host(info)
+    fields = HOST_KEY_FILE.read_text(encoding='utf-8').split() if HOST_KEY_FILE.is_file() else []
+    if not host or len(fields) < 2 or not HOST_KEY_TEXT.fullmatch(' '.join(fields[:2])):
+        raise ValueError('Der Host-Schlüssel dieses Macs ist nicht lesbar oder Tailscale hat noch keinen Namen für ihn.')
+    now = int(time.time())
+    code = secrets.token_hex(16)
+    invite = {'version': 1, 'nonce': code, 'host': host, 'user': getpass.getuser(), 'hostKey': ' '.join(fields[:2]), 'expires': now + INVITE_TTL}
+    if not SSH_USER.fullmatch(invite['user']):
+        raise ValueError('Der Benutzername dieses Macs ist für SSH nicht zulässig.')
+    state = taildrop_load(now)                                          # fail on a corrupt file BEFORE anything is sent
+    taildrop_send(cli, peer, f'vibecode-invite-{code}.json', invite)
+    state['sent'][code] = {'name': short_name(peer), 'ip': peer['ip'], 'expires': now + INVITE_TTL}
+    taildrop_save(state)
+    print(f'Einladung an {short_name(peer)} geschickt. Dort in VibeCode „Einladungen abholen“ wählen und annehmen; danach hier ebenfalls '
+          '„Einladungen abholen“ und den Schlüssel bestätigen.')
+
+
+def taildrop_collect(cli, state, now):
+    """Empty Taildrop's inbox. Returns (invites, answers, foreign, invalid, unknown) counts; our valid files go into `state`."""
+    foreign = invalid = unknown = 0
+    with tempfile.TemporaryDirectory(prefix='vibecode-inbox-') as folder:
+        try:
+            result = subprocess.run([cli, 'file', 'get', '--wait=false', '--conflict=rename', '--verbose', folder], capture_output=True, text=True,
+                                    timeout=25, env={**os.environ, 'TAILSCALE_BE_CLI': '1'}, stdin=subprocess.DEVNULL)
+        except subprocess.TimeoutExpired:
+            raise ValueError('Tailscale hat den Posteingang nicht rechtzeitig geöffnet.') from None
+        taken = sorted(path for path in Path(folder).iterdir() if path.is_file())
+        if result.returncode and not taken:
+            text = (result.stderr or result.stdout).lower()
+            raise ValueError(TAILSCALE_SETUP_HINT if 'denied' in text else 'Taildrop ist auf diesem Mac nicht verfügbar: ' + clean_text((text.strip().splitlines() or ['unbekannter Fehler'])[-1], 150))
+        for path in taken:
+            invite_match, answer_match = INVITE_NAME.fullmatch(path.name), ANSWER_NAME.fullmatch(path.name)
+            if not (invite_match or answer_match):
+                move_to_downloads(path)
+                foreign += 1
+                continue
+            try:
+                data = json.loads(path.read_text(encoding='utf-8')) if path.stat().st_size <= TAILDROP_MAX else None
+            except (OSError, ValueError):
+                data = None
+            if invite_match:
+                item = clean_invite(data, now) if isinstance(data, dict) and data.get('nonce') == invite_match.group(1) else None
+                if item:
+                    state['invites'][invite_match.group(1)] = item
+                    continue
+            else:
+                item = clean_answer(data) if isinstance(data, dict) and data.get('nonce') == answer_match.group(1) else None
+                if item and answer_match.group(1) in state['sent']:
+                    state['answers'][answer_match.group(1)] = item
+                    continue
+                if item:
+                    unknown += 1                                          # a valid answer nobody asked for: dropped, not kept
+                    path.unlink()
+                    continue
+            move_to_downloads(path)                                       # our name, but not a valid file: keep it, say so
+            invalid += 1
+    return foreign, invalid, unknown
+
+
+def ssh_inbox():
+    """Fetch invitations and answers (on the click only). Prints JSON: what is waiting, plus counts of what was set aside."""
+    cli, info, _ = tailscale_ready()
+    now = int(time.time())
+    state = taildrop_load(now)
+    foreign, invalid, unknown = taildrop_collect(cli, state, now)
+    invites, dropped = [], 0
+    for code, item in list(state['invites'].items()):
+        try:
+            peer = tailnet_peer(item['host'], info)
+        except ValueError:
+            del state['invites'][code]                                    # not one of your devices (any more): never offered
+            dropped += 1
+            continue
+        invites.append({'nonce': code, 'device': short_name(peer), 'user': item['user'], 'host': item['host']})
+    taildrop_save(state)
+    answers = [{'nonce': code, 'device': state['sent'][code]['name']} for code in state['answers']]
+    print(json.dumps({'invites': invites, 'answers': answers, 'foreign': foreign, 'invalid': invalid, 'rejected': dropped, 'unknown': unknown,
+                      'variant': tailscale_variant(info['cli'])}, ensure_ascii=False))
+
+
+def ssh_accept(args):
+    """Accept one stored invitation: check the host key against the invitation, save the target, answer with OUR PUBLIC key.
+
+    Exit 4 = this Mac has no SSH key yet (`ssh keygen` makes one in a Terminal)."""
+    if len(args) != 1 or not NONCE.fullmatch(args[0]):
+        raise ValueError(INBOX_USAGE)
+    now = int(time.time())
+    state = taildrop_load(now)
+    invite = state['invites'].get(args[0])
+    if invite is None:
+        raise ValueError('Diese Einladung gibt es nicht (mehr). Sie gilt nur eine Stunde: neu einladen lassen.')
+    cli, info, _ = tailscale_ready()
+    peer = tailnet_peer(invite['host'], info)
+    try:
+        key_line = own_public_key()[1]
+    except ValueError:
+        print('Dieser Mac hat noch keinen SSH-Schlüssel. Einen erzeugen (Terminal), danach die Einladung noch einmal annehmen.')
+        raise SystemExit(4) from None
+    target = tailnet_target(invite['user'], peer, info)
+    pin_tailnet_host_key(target, peer, expected=invite['hostKey'])
+    write(SSH_FILE, target)
+    taildrop_send(cli, peer, f'vibecode-answer-{args[0]}.json', {'version': 1, 'nonce': args[0], 'publicKey': key_line})
+    del state['invites'][args[0]]
+    taildrop_save(state)
+    print(f'✔ Einladung von {short_name(peer)} angenommen. Mein Schlüssel ist dorthin geschickt; sobald dort bestätigt wurde, klappt '
+          f'„Verbinden“ ({ssh_destination(target)}).')
+
+
+def ssh_grant(args):
+    """The sharing Mac: enter the key that came back for one of its invitations, only after the user confirmed its fingerprint.
+
+    `--check CODE` prints {name, fingerprint, comment, known} and writes nothing; `--yes CODE` appends the key and uses the code up."""
+    if len(args) != 2 or args[0] not in ('--check', '--yes') or not NONCE.fullmatch(args[1]):
+        raise ValueError(INBOX_USAGE)
+    state = taildrop_load(int(time.time()))
+    sent, answer = state['sent'].get(args[1]), state['answers'].get(args[1])
+    if sent is None or answer is None:
+        raise ValueError('Zu dieser Antwort gibt es keine offene Einladung (abgelaufen, schon benutzt oder nie verschickt).')
+    key, fingerprint = checked_public_key(answer['publicKey'])
+    path = SSH_DIR / 'authorized_keys'
+    blob = key.split()[1]
+    known = path.exists() and any(blob in line.split() for line in path.read_text().splitlines())
+    if args[0] == '--check':
+        print(json.dumps({'name': sent['name'], 'fingerprint': fingerprint, 'known': known,
+                          'comment': key.split(' ', 2)[2] if key.count(' ') >= 2 else ''}, ensure_ascii=False))
+        return
+    if not known:
+        append_line(path, key)
+    del state['sent'][args[1]]
+    del state['answers'][args[1]]
+    taildrop_save(state)
+    print(f'Freigegeben: {sent["name"]} ({fingerprint}). Dort jetzt „Verbinden“.')
+
+
+def ssh_keygen():
+    ensure_client_key()
+    print(f'✔ SSH-Schlüssel vorhanden: {own_public_key()[2]}')
 
 
 def control_running():
@@ -1735,8 +2142,22 @@ def main(args):
             if not ' '.join(words).strip():
                 raise ValueError('Aufruf: workspace remote ssh run -- <befehl>')
             ssh_connect(' '.join(words))
-        elif sub == 'pair' and len(args) == 2:
-            ssh_pair()
+        elif sub == 'pair' and args[2:] in ([], ['--verify']):
+            ssh_pair(args[2:] == ['--verify'])
+        elif sub == 'tailnet':
+            ssh_tailnet(args[2:])
+        elif sub == 'agents' and len(args) == 2:
+            ssh_agents()
+        elif sub == 'invite':
+            ssh_invite(args[2:])
+        elif sub == 'inbox' and len(args) == 2:
+            ssh_inbox()
+        elif sub == 'accept':
+            ssh_accept(args[2:])
+        elif sub == 'grant':
+            ssh_grant(args[2:])
+        elif sub == 'keygen' and len(args) == 2:
+            ssh_keygen()
         elif sub == 'share':
             ssh_share(args[2:])
         elif sub == 'join':
@@ -1752,7 +2173,7 @@ def main(args):
         else:
             raise ValueError('ssh-Befehle: ssh share [--wake] | ssh join benutzer@host [SHA256:…] | '
                              'ssh allow \'<schlüssel>\' | ssh run -- <befehl> | ssh | ssh pair | '
-                             'ssh set benutzer@host [port] | ssh info')
+                             'ssh set benutzer@host [port] | ssh info | ssh tailnet benutzer@gerät | ssh pair [--verify] | ' + INBOX_USAGE.replace('Aufruf: workspace remote ', ''))
     elif cmd == 'tailscale':
         tailscale_main(args[1:])
     elif cmd == 'summary':
