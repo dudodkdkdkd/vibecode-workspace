@@ -6,9 +6,11 @@ Die Module (workspaces/, remote/, local-dev/) melden sich über eine module.json
 """
 import argparse
 from concurrent.futures import ThreadPoolExecutor
+import functools
 import hashlib
 import json
 import os
+import platform
 import re
 import shlex
 import subprocess
@@ -192,20 +194,68 @@ def starter_path(name):
     return config_dir() / 'shortcuts' / f'{slug}-{digest}.command'
 
 
+# Ein geteilter Schreibtisch (iCloud: „Schreibtisch & Dokumente“) liegt auf mehreren Macs. Ein Alias zeigt auf den Starter in
+# ~/.config *dieses* Macs; unter einem anderen Kontonamen oder Ordnerpfad ist derselbe Alias auf dem anderen Mac tot, wurde dort
+# als „kaputt“ gelöscht und neu angelegt, und beide Macs überschrieben sich gegenseitig. Darum bekommt jeder Mac seinen eigenen
+# Alias: der Name trägt den Namen des Macs. Gespeichert werden weiter nur die Basisnamen; das Suffix kennt allein desktop_name().
+MAC_LABEL_MAX = 30
+
+
+@functools.lru_cache(maxsize=None)
+def _computer_name():
+    for key in ('ComputerName', 'LocalHostName'):
+        try:
+            result = subprocess.run(['/usr/sbin/scutil', '--get', key], capture_output=True, text=True, timeout=5)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout
+    return platform.node().split('.')[0]
+
+
+def mac_label():
+    """Name of this Mac for its Desktop shortcuts, '' for none. Order: VIBECODE_MAC_LABEL, then the file `mac-label` in the
+    config folder (an empty one switches the suffix off), then the Mac's computer name."""
+    value = os.environ.get('VIBECODE_MAC_LABEL')
+    if value is None:
+        override = config_dir() / 'mac-label'
+        value = override.read_text(encoding='utf-8') if override.is_file() else _computer_name()
+    value = re.sub(r'[/\\:\x00-\x1f\x7f]', ' ', value)
+    return ' '.join(value.split()).lstrip('.')[:MAC_LABEL_MAX].strip()
+
+
+def desktop_name(name):
+    """File name on the Desktop for the shortcut of `name`, e.g. „Demo (Mac A)“."""
+    label = mac_label()
+    return f'{name} ({label})' if label else name
+
+
 def desktop_alias(name):
-    return desktop_dir() / name
+    return desktop_dir() / desktop_name(name)
 
 
-def alias_owner(name, target=None):
-    """'free' (nothing there), 'ours', 'broken' (dead alias of that name) or 'foreign' (someone else's file)."""
-    state = alias_js('inspect', str(desktop_alias(name)))
+def alias_owner_at(file, target):
+    """'free' (nothing there), 'ours', 'broken' (dead alias) or 'foreign' (someone else's file) for the Desktop item `file`."""
+    state = alias_js('inspect', str(file))
     if state == 'missing':
         return 'free'
     if state == 'alias-broken':
         return 'broken'
-    if state.startswith('alias ') and Path(state[6:]).resolve() == (target or starter_path(name)).resolve():
+    if state.startswith('alias ') and Path(state[6:]).resolve() == target.resolve():
         return 'ours'
     return 'foreign'
+
+
+def alias_owner(name, target=None):
+    return alias_owner_at(desktop_alias(name), target or starter_path(name))
+
+
+def retire_unlabelled(name, target=None):
+    """Before the Mac label existed the alias was just called `name`. Take that one down if it is ours or dead (the alias of an
+    older version, maybe synced from the other Mac, is replaced by one per Mac); anything else under that name is never touched."""
+    plain = desktop_dir() / name
+    if plain != desktop_alias(name) and alias_owner_at(plain, target or starter_path(name)) in ('ours', 'broken'):
+        plain.unlink()
 
 
 def add_shortcut(name):
@@ -213,22 +263,23 @@ def add_shortcut(name):
     atomic_write(starter, STARTER.format(label=f'den Workspace {name}', command='run ' + shlex.quote(name)))
     starter.chmod(0o755)
     owner = alias_owner(name)
-    if owner == 'ours':
-        return
     if owner == 'foreign':
-        raise ValueError(f'Auf dem Schreibtisch liegt schon „{name}“, das nicht von VibeCode stammt. '
+        raise ValueError(f'Auf dem Schreibtisch liegt schon „{desktop_name(name)}“, das nicht von VibeCode stammt. '
                          'Benenne es um oder wähle einen anderen Workspace-Namen.')
-    if not desktop_dir().is_dir():
-        raise ValueError(f'Schreibtisch-Ordner nicht gefunden: {desktop_dir()}')
-    if owner == 'broken':
-        desktop_alias(name).unlink()
-    alias_js('create', str(starter), str(desktop_alias(name)))
+    if owner != 'ours':
+        if not desktop_dir().is_dir():
+            raise ValueError(f'Schreibtisch-Ordner nicht gefunden: {desktop_dir()}')
+        if owner == 'broken':
+            desktop_alias(name).unlink()
+        alias_js('create', str(starter), str(desktop_alias(name)))
+    retire_unlabelled(name)
 
 
 def remove_shortcut(name):
     """Remove only what VibeCode created: our alias (or a dead one of that name) and our starter."""
     if alias_owner(name) in ('ours', 'broken'):
         desktop_alias(name).unlink()
+    retire_unlabelled(name)
     starter_path(name).unlink(missing_ok=True)
 
 
@@ -257,8 +308,8 @@ def install_quick_shortcut(alias_name, starter, label, command):
     """Create (or refresh) the Desktop alias and its starter. Returns the alias name. A foreign file is never touched."""
     owner = alias_owner(alias_name, starter)
     if owner == 'foreign':
-        raise ValueError(f'Auf dem Schreibtisch liegt schon „{alias_name}“, das nicht von VibeCode stammt (oder zu einem anderen '
-                         'Ordner oder Workspace gehört). Benenne es um und versuche es erneut.')
+        raise ValueError(f'Auf dem Schreibtisch liegt schon „{desktop_name(alias_name)}“, das nicht von VibeCode stammt (oder zu einem '
+                         'anderen Ordner oder Workspace gehört). Benenne es um und versuche es erneut.')
     if not desktop_dir().is_dir():
         raise ValueError(f'Schreibtisch-Ordner nicht gefunden: {desktop_dir()}')
     atomic_write(starter, STARTER.format(label=label, command=command))
@@ -267,13 +318,15 @@ def install_quick_shortcut(alias_name, starter, label, command):
         desktop_alias(alias_name).unlink()
     if owner != 'ours':
         alias_js('create', str(starter), str(desktop_alias(alias_name)))
-    return alias_name
+    retire_unlabelled(alias_name, starter)
+    return desktop_name(alias_name)
 
 
 def remove_quick_shortcut(alias_name, starter):
     """Remove only what VibeCode created: our alias (or a dead one of that name) and our starter."""
     if alias_owner(alias_name, starter) in ('ours', 'broken'):
         desktop_alias(alias_name).unlink()
+    retire_unlabelled(alias_name, starter)
     starter.unlink(missing_ok=True)
 
 
@@ -369,7 +422,7 @@ def set_workspace_quick(name, enabled):
     ws = find(store, name)
     if not ws:
         raise ValueError(f'Den Workspace „{name}“ gibt es nicht.')
-    shortcut_name = workspace_shortcut_name(ws['name'])
+    shortcut_name = desktop_name(workspace_shortcut_name(ws['name']))
     if enabled:
         add_workspace_quick(ws['name'])            # zuerst der Shortcut, dann das Kästchen
         ws['quickOpen'] = True
@@ -705,7 +758,7 @@ def folder_state(hosts):
             for folder in info['local']:
                 if folder.get('quickOpen'):
                     try:
-                        folder['shortcut'] = folder_shortcut_name(folder['path'])
+                        folder['shortcut'] = desktop_name(folder_shortcut_name(folder['path']))
                     except ValueError:
                         folder['shortcut'] = None
         except (ValueError, TypeError, subprocess.SubprocessError) as exc:
@@ -757,7 +810,7 @@ def folder_action(action, path=None, host=None, root=None, mode=None):
         if mode == 'off':
             remove_folder_shortcut(known['path'])
             checked('search-folders', ['quick', config, known['path'], 'off'], 30)
-            return {'message': f'Quick-Öffnen aus: der Shortcut „{folder_shortcut_name(known["path"])}“ ist vom Schreibtisch entfernt.',
+            return {'message': f'Quick-Öffnen aus: der Shortcut „{desktop_name(folder_shortcut_name(known["path"]))}“ ist vom Schreibtisch entfernt.',
                     'warning': None}
         # Zuerst der Shortcut: scheitert er (z. B. ein fremdes Objekt gleichen Namens), bleibt das Kästchen aus.
         name = add_folder_shortcut(known['path'])

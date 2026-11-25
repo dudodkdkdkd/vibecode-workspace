@@ -25,13 +25,37 @@ enough: no `match`, no `X | Y` types).
 1. The workspace stores project **names** (not paths — paths change, see the `~/Documents/GitHub`
    → `~/Projects` move) and `shortcut: true`.
 2. Saving writes a starter `shortcuts/<slug>-<hash>.command` and a **Finder alias** to it on the
-   Desktop, named like the workspace.
+   Desktop, named like the workspace plus the Mac's name (`Demo (Mac A)`, see below).
 3. Double-click → alias resolves to the starter → starter reads `~/.config/.../home` (the repo
    path, refreshed on every app start, so a moved repo only needs one app start) → `vibecode.py
    run NAME` → `workspaces/VibeCode Workspace.command --project A --project B`.
 
 `--list-projects` exists so the window shows exactly the list the launcher shows, including
 auto-discovered sibling repos. Do not re-implement discovery in Python.
+
+## One Desktop on several Macs (per-Mac aliases)
+
+The Desktop can be shared (iCloud "Desktop & Documents"), the starters in `~/.config` cannot. An alias resolves **by path** on
+another Mac (verified with two disk images of the same name and different volume UUID: a file at the same path is found, none
+means `alias-broken`), so on a Mac with a different account name or folder path the other Mac's alias is dead. The old code
+treated a dead alias of that name as its own, unlinked and recreated it, and the two Macs overwrote each other's alias for good.
+
+- **Every Desktop file name goes through `desktop_name(base)`** = `base (label)`; `desktop_alias()` is the single place that applies
+  it, so `add_shortcut`, `remove_shortcut`, `install_quick_shortcut`, `remove_quick_shortcut` and `save_workspace` (rename, case-only
+  rename) stay unchanged. The stores (`workspaces.json`, `search-folders.json`) and the starters keep the **base** names; the
+  suffix exists only on the Desktop. Anything shown to the user (`folder['shortcut']`, `set_workspace_quick`, the quick-open
+  messages) shows `desktop_name(...)`.
+- `mac_label()` order: env `VIBECODE_MAC_LABEL` (empty = none), file `config/mac-label` (empty = none), the computer name
+  (`scutil --get ComputerName`, then `LocalHostName`, then the host name). Sanitized (`/ \ :` and control characters become spaces,
+  no leading dot) and capped at `MAC_LABEL_MAX` (30). Tests set it to `''` in `setUp` so they keep reading base names.
+- **Never touch another Mac's alias.** There is deliberately no glob over `base (*)`: an alias with a different suffix is the other
+  Mac's, even if it happens to resolve to our own starter (it does when both Macs use the same paths).
+- **Migration** (`retire_unlabelled`): the plain `base` alias of an older version is removed only if it resolves to our starter or
+  is dead (the existing "ours" rule), after the labelled one exists; anything else under that name stays. It runs in add and remove.
+- Regression tests: `test_two_macs_on_one_desktop_*` (one Desktop, two config folders and labels, the other Mac's alias is dead and
+  survives sync, quick off, rename, delete and folder removal) and `test_an_unlabelled_alias_of_an_older_version_*`.
+- Not verified: a real second Mac and the real iCloud Desktop. After updating, run **Shortcuts erneuern** on each Mac; a Mac that
+  still has the old version keeps recreating the plain name.
 
 ## Terminal lifetime
 
@@ -95,7 +119,7 @@ never re-implements the scan: `folder_state()` asks the module, `folder_action()
 Adding a remote folder runs `discover` **without** `--interactive` and keeps the host even if the search fails.
 
 **Quick open (a Desktop shortcut per local search folder).** The checkbox next to Entfernen creates a Finder alias named
-`<folder> öffnen` (`folder_shortcut_name`), same mechanics as workspace shortcuts: alias -> starter in `shortcuts/` -> `vibecode.py
+`<folder> öffnen (<Mac>)` (`folder_shortcut_name` + `desktop_name`), same mechanics as workspace shortcuts: alias -> starter in `shortcuts/` -> `vibecode.py
 open-folder PATH`. The shared `STARTER` template takes a `{command}`. The folder starter is keyed by the **folder path**
 (`folder_starter_path`), not the name, so two folders both called "Github" never share a starter; the second one is refused as
 "foreign" instead of stealing the alias. Store: `"quickOpen": true` in `search-folders.json` (written only when on, a non-boolean raises and

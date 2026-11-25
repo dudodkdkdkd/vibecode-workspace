@@ -78,6 +78,14 @@ Namen des Workspaces auf dem Schreibtisch. Ein Doppelklick startet den Workspace
   stattdessen gibt es eine Fehlermeldung und nichts wird gespeichert.
 - Verschiebst du das Repository, öffne die App einmal aus dem neuen Ordner: die Shortcuts finden es dann wieder.
 - Beim ersten Shortcut kann macOS einmal nach dem Zugriff auf den Schreibtisch-Ordner fragen.
+- **Ein Schreibtisch auf mehreren Macs** (iCloud „Schreibtisch & Dokumente“): Jeder Mac legt seinen **eigenen** Alias an. Der Name
+  trägt den Namen des Macs, z. B. „Mein Workspace (Mac A)“ und „Mein Workspace (Mac B)“; so überschreiben sich die Macs nicht mehr
+  gegenseitig. Jeder Mac fasst nur seine eigenen Aliasse an, die des anderen Macs bleiben stehen. Der Name kommt vom Computernamen
+  (Systemeinstellungen → Allgemein → Info). Anders: Datei `~/.config/vibecode-workspace/mac-label` mit einem Wort (oder die
+  Umgebungsvariable `VIBECODE_MAC_LABEL`); eine **leere** Datei schaltet den Zusatz ab. Aliasse ohne Zusatz aus älteren Versionen
+  ersetzt **Shortcuts erneuern** durch die neuen, nur wenn sie von diesem Mac stammen oder tot sind. Ein Alias des anderen Macs ist
+  auf diesem Mac meist tot oder zeigt auf dessen Starter; du kannst ihn ignorieren. Wird ein Mac umbenannt, bleibt sein alter Alias
+  liegen und muss einmal von Hand gelöscht werden.
 - Workspaces speichern Projekt-*Namen*, nicht Pfade. Fehlt ein Projekt, warnt das Fenster, und der Shortcut
   zeigt einen Alarm statt still nichts zu tun.
 - Kennt der Launcher noch keine Projekte, unter **Repository-Suche → Ordner hinzufügen…** einen Repository-Ordner auswählen.

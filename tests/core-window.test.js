@@ -1319,6 +1319,11 @@ test('Übersicht: Quick-Öffnen bei Workspaces ist ein Kästchen vor Starten und
     const footer = (state) => rows(state).filter((row) => row.type === 'footer')[0].buttons.map((b) => b.label);
     assert.ok(footer(STATE({ workspaces: [QUICK_WS(true).workspaces[0]] })).includes('Shortcuts erneuern'));
     assert.ok(!footer(STATE({ workspaces: [QUICK_WS(false).workspaces[0]] })).includes('Shortcuts erneuern'));
+    // … und wenn es nur das Quick-Öffnen eines Suchordners gibt (kein Workspace mit Shortcut): auch dieser Shortcut wird neu angelegt.
+    const folders = (quickOpen) => ({ canAddLocal: true, canAddRemote: false, errors: [], remote: [],
+        local: [{ path: '/Users/example/Github', exists: true, repos: 3, truncated: false, quickOpen, shortcut: quickOpen ? 'Github öffnen (Mac A)' : null }] });
+    assert.ok(footer(STATE({ workspaces: [], folders: folders(true) })).includes('Shortcuts erneuern'));
+    assert.ok(!footer(STATE({ workspaces: [], folders: folders(false) })).includes('Shortcuts erneuern'));
 });
 
 test('Übersicht: das Quick-Öffnen-Kästchen eines Workspaces ist ein echter Schalter und löst seine Aktion aus', () => {

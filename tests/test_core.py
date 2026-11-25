@@ -15,7 +15,7 @@ import sys
 import tempfile
 import unicodedata
 import unittest
-from contextlib import redirect_stdout
+from contextlib import contextmanager, redirect_stdout
 from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -30,8 +30,10 @@ class CoreTests(unittest.TestCase):
         self.addCleanup(lambda: subprocess.run(['/bin/rm', '-rf', str(self.tmp)]))
         self.config, self.desktop = self.tmp / 'config', self.tmp / 'desktop'
         self.desktop.mkdir()
+        # Ohne Mac-Namen: die Tests lesen die Schreibtisch-Dateien unter ihrem Basisnamen (sonst hinge der echte Computername dran).
         env = patch.dict(os.environ, {'VIBECODE_CONFIG_DIR': str(self.config),
-                                      'VIBECODE_DESKTOP_DIR': str(self.desktop)})
+                                      'VIBECODE_DESKTOP_DIR': str(self.desktop),
+                                      'VIBECODE_MAC_LABEL': ''})
         env.start()
         self.addCleanup(env.stop)
 
@@ -1075,6 +1077,122 @@ class CoreTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             core.sync_shortcuts()
         self.assertEqual(list(self.desktop.iterdir()), [])
+
+    # --- Ein Schreibtisch auf mehreren Macs (iCloud): jeder Mac hat seinen eigenen Alias -------------------------------
+
+    @contextmanager
+    def as_mac(self, label, config):
+        """Run as another Mac that shares this desktop: its own config folder (so its own starters) and its own name."""
+        with patch.dict(os.environ, {'VIBECODE_CONFIG_DIR': str(config), 'VIBECODE_MAC_LABEL': label}):
+            yield
+
+    def alias_state(self, name):
+        return core.alias_js('inspect', str(self.desktop / name))
+
+    def test_the_mac_label_is_sanitized_capped_and_comes_from_env_then_file_then_the_computer_name(self):
+        for raw, expected in [('Mac A', 'Mac A'), ('  Mac / A:  ', 'Mac A'), ('.versteckt', 'versteckt'),
+                              ('a\tb\nc', 'a b c'), ('x' * 80, 'x' * core.MAC_LABEL_MAX), ('', '')]:
+            with patch.dict(os.environ, {'VIBECODE_MAC_LABEL': raw}):
+                self.assertEqual(core.mac_label(), expected, msg=repr(raw))
+        with patch.dict(os.environ, {'VIBECODE_MAC_LABEL': 'Mac B'}):
+            self.assertEqual(core.desktop_name('Demo'), 'Demo (Mac B)')
+        with patch.dict(os.environ), patch.object(core, '_computer_name', return_value='Mac A'):
+            del os.environ['VIBECODE_MAC_LABEL']
+            self.assertEqual(core.mac_label(), 'Mac A')                               # kein Env, keine Datei: der Computername
+            self.config.mkdir()
+            (self.config / 'mac-label').write_text('Büro-Mac\n', encoding='utf-8')
+            self.assertEqual(core.mac_label(), 'Büro-Mac')                                 # die Datei schlägt den Computernamen
+            (self.config / 'mac-label').write_text('', encoding='utf-8')
+            self.assertEqual((core.mac_label(), core.desktop_name('Demo')), ('', 'Demo'))  # leer: kein Suffix
+            os.environ['VIBECODE_MAC_LABEL'] = 'Env'
+            self.assertEqual(core.mac_label(), 'Env')                                      # Env schlägt die Datei
+
+    def test_two_macs_on_one_desktop_each_get_their_own_aliases_and_never_touch_the_others(self):
+        mac_a, mac_b = self.tmp / 'mac-a', self.tmp / 'mac-b'
+        names = {}
+        for label, config in (('Mac A', mac_a), ('Mac B', mac_b)):
+            with self.as_mac(label, config):
+                folder = self.search_folder('Github', parent=self.tmp / f'home-{label[-1].lower()}')      # je Mac ein anderer Ordnerpfad
+                core.folder_action('quick-open', path=str(folder), mode='on')
+                self.save('Demo', ['A'], shortcut=True)
+                core.set_workspace_quick('Demo', True)
+                names[label] = [f'Github öffnen ({label})', f'Demo ({label})', f'Demo öffnen ({label})']
+                starters = [core.folder_starter_path(folder), core.starter_path('Demo'), core.workspace_starter_path('Demo')]
+                for name, starter in zip(names[label], starters):
+                    self.assertEqual(self.alias_target(name).resolve(), starter.resolve(), msg=name)
+        self.assertEqual(self.desktop_names(), sorted(names['Mac A'] + names['Mac B']))
+        # Auf dem anderen Mac wäre der Alias tot (anderer Kontoname oder Pfad): der Starter fehlt dort.
+        for starter in (mac_a / 'shortcuts').iterdir():
+            starter.unlink()
+        for name in names['Mac A']:
+            self.assertEqual(self.alias_state(name), 'alias-broken')
+        with self.as_mac('Mac B', mac_b):
+            self.assertEqual(core.sync_shortcuts(), 3)                                          # Erneuern, ...
+            core.set_workspace_quick('Demo', False)                                             # ... Quick aus, ...
+            self.save('Neu', ['A'], shortcut=True, rename_from='Demo')                          # ... Umbenennen ...
+            core.delete_workspace('Neu')                                                        # ... und Löschen
+            core.folder_action('remove', path=str(self.tmp / 'home-b' / 'Github'))
+        self.assertEqual(self.desktop_names(), sorted(names['Mac A']))                       # der andere Mac bleibt unangetastet
+        for name in names['Mac A']:
+            self.assertEqual(self.alias_state(name), 'alias-broken')
+        with self.as_mac('Mac A', mac_a):                                                 # und wird dort repariert
+            self.assertEqual(core.sync_shortcuts(), 3)
+            self.assertEqual(self.alias_target('Demo (Mac A)').resolve(), core.starter_path('Demo').resolve())
+
+    def test_two_macs_with_the_same_folder_path_do_not_share_a_starter_or_overwrite_each_other(self):
+        mac_a, mac_b = self.tmp / 'mac-a', self.tmp / 'mac-b'
+        folder = self.search_folder('Github', parent=self.tmp / 'gemeinsam')                     # derselbe Pfad auf beiden Macs
+        for label, config in (('Mac A', mac_a), ('Mac B', mac_b)):
+            with self.as_mac(label, config):
+                core.folder_action('add', path=str(folder))
+                core.folder_action('quick-open', path=str(folder), mode='on')
+        self.assertEqual(self.desktop_names(), ['Github öffnen (Mac A)', 'Github öffnen (Mac B)'])
+        for label, config in (('Mac A', mac_a), ('Mac B', mac_b)):
+            with self.as_mac(label, config):
+                self.assertEqual(self.alias_target(f'Github öffnen ({label})').resolve(), core.folder_starter_path(folder).resolve())
+                self.assertEqual(core.folder_starter_path(folder).parent, config / 'shortcuts')
+
+    def test_an_unlabelled_alias_of_an_older_version_is_replaced_but_foreign_ones_are_left_alone(self):
+        folder = self.search_folder()
+        core.folder_action('quick-open', path=str(folder), mode='on')                           # so hießen sie, bevor es Mac-Namen gab
+        self.save('Demo', ['A'], shortcut=True)
+        core.set_workspace_quick('Demo', True)
+        self.save('Gast', ['A'], shortcut=False)
+        self.assertEqual(self.desktop_names(), ['Demo', 'Demo öffnen', 'Github öffnen'])
+        core.starter_path('Demo').unlink()                                                      # dieser Alias ist tot, ...
+        (self.desktop / 'Gast').write_text('meine Datei')                                       # dieser Name gehört jemand anderem, ...
+        elsewhere = self.tmp / 'woanders.command'
+        elsewhere.write_text('#!/bin/zsh\n')
+        core.alias_js('create', str(elsewhere), str(self.desktop / 'Mein Alias'))               # und der zeigt auf eine andere Datei
+        with patch.dict(os.environ, {'VIBECODE_MAC_LABEL': 'Mac A'}):
+            self.save('Mein Alias', ['A'], shortcut=True)
+            self.save('Gast', ['A'], shortcut=True, rename_from='Gast')
+            self.assertEqual(core.sync_shortcuts(), 5)
+        self.assertEqual(self.desktop_names(), ['Demo (Mac A)', 'Demo öffnen (Mac A)', 'Gast', 'Gast (Mac A)',
+                                                'Github öffnen (Mac A)', 'Mein Alias', 'Mein Alias (Mac A)'])
+        self.assertEqual((self.desktop / 'Gast').read_text(), 'meine Datei')
+        self.assertEqual(self.alias_target('Mein Alias').resolve(), elsewhere.resolve())
+        self.assertEqual(self.alias_target('Demo (Mac A)').resolve(), core.starter_path('Demo').resolve())
+
+    def test_messages_and_the_window_state_show_the_name_on_the_desktop(self):
+        folder = self.search_folder('Github')
+        self.save('Demo', ['A'], shortcut=False)
+        with patch.dict(os.environ, {'VIBECODE_MAC_LABEL': 'Mac A'}):
+            self.assertIn('„Github öffnen (Mac A)“', core.folder_action('quick-open', path=str(folder), mode='on')['message'])
+            self.assertEqual(self.stored_quick(folder)['shortcut'], 'Github öffnen (Mac A)')
+            self.assertEqual(self.cli('workspace-quick', '--name=Demo', 'on')[1].strip(),
+                             'Quick-Öffnen an: „Demo öffnen (Mac A)“ liegt auf dem Schreibtisch.')
+            self.assertEqual(self.desktop_names(), ['Demo öffnen (Mac A)', 'Github öffnen (Mac A)'])
+            self.assertIn('„Github öffnen (Mac A)“', core.folder_action('quick-open', path=str(folder), mode='off')['message'])
+            self.assertEqual(self.cli('workspace-quick', '--name=Demo', 'off')[1].strip(),
+                             'Quick-Öffnen aus: „Demo öffnen (Mac A)“ ist vom Schreibtisch entfernt.')
+            self.assertEqual(self.desktop_names(), [])
+            self.save('Demo', ['A'], shortcut=True, rename_from='Demo')
+            self.assertEqual(self.desktop_names(), ['Demo (Mac A)'])
+            (self.desktop / 'Demo (Mac A)').unlink()
+            (self.desktop / 'Demo (Mac A)').write_text('meine Datei')
+            with self.assertRaisesRegex(ValueError, 'schon „Demo \\(Mac A\\)“'):
+                core.add_shortcut('Demo')
 
     def test_projects_in_a_folder_are_the_launchers_names_sorted_and_never_remote_or_siblings(self):
         folder = self.tmp / 'Github'

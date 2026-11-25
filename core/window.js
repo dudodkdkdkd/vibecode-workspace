@@ -480,7 +480,9 @@ function dashboardModel(state) {
         type: "footer",
         buttons: [{ label: "Workspace anlegen…", action: { action: "new" } }].concat(
             state.canLaunch ? [{ label: "Einmaliger Workspace…", action: { action: "open", id: "launch" } }] : [],
+            // Auch ein Suchordner mit Quick-Öffnen hat einen Schreibtisch-Shortcut, den „erneuern“ neu anlegt (z. B. unter dem Namen dieses Macs).
             state.workspaces.some((workspace) => workspace.shortcut || workspace.quickOpen)
+                || (state.folders && state.folders.local.some((folder) => folder.quickOpen))
                 ? [{ label: "Shortcuts erneuern", action: { action: "sync" } }] : []),
     });
 
