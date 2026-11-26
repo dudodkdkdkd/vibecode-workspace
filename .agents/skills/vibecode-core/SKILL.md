@@ -159,6 +159,21 @@ characters) and writes `provider`, `model`, `framework`, `providers.<p>.default_
 through argv positionally, so a leading `-` is fine. Nothing is re-detected in Python or JS; the module's `fail` text (`× …`) is
 shown without the `×`. The status line comes from `summary.py` and reads the new values on the next redraw.
 
+**Ollama models and combinations (Local Dev tab).** `local-dev/models.py` (hidden entry `local-models`, stdlib, Python 3.9) lists installed
+models from the manifests on disk (name, size = sum of layer sizes), never calls `ollama` and never touches the network, so `state()` can
+call it on every redraw (`ollama_models()`; `launcher.zsh --options*` starts many `jq` processes and must not run per redraw). Not
+downloaded = the configured `default_model` plus `ollama-suggestions.json`; there is no library API, anything else is typed. `pull`
+opens a Terminal (`open_in_terminal`, after `check` validated the name, so a bad name fails in the window, not in a Terminal), `remove`
+runs `ollama rm` after the window confirmed. Names: `models.py` `MODEL_NAME`, no leading `-`, no `..`, argv only. Combinations are
+`{provider, model, framework}` in `~/.config/vibecode-workspace/local-combos.json` (`combos_load/combo_action`, same reject-never-replace
+rule as `workspaces.json`, parts limited to `COMBO_PART` because they travel space-separated in a preset prompt). The preset editor offers
+them as extra items of the "Terminal" popup and stores the **triple itself** in the terminal (`type: "Local Dev"`, `prompt: "P M F"`),
+never a reference, so deleting a combination cannot break a preset; a triple that is not saved stays as "(nicht gespeichert)". The stored
+`command` holds only the placeholders `@LOCAL_DEV_SCRIPT@` and `@REPOSITORY@` (no path of this Mac in `terminals.json`); the launcher
+fills them at start, shows an explanatory terminal on SSH hosts or without the module, and skips the workspace-level Local Dev terminal
+when a preset starts the same triple for that repo. The type list exists in `presets.js`, `terminal-setup.js` (validation) and `window.js`
+(`PRESET_TYPES`); a missed copy makes `readStore` reject the whole file.
+
 **Presets.** `workspaces/presets.js` reads and writes `terminals.json` (the wizard's file, v1 read / v2 written). It loads
 `terminalCommand`, `defaultTerminals`, `validateTerminals`, `validateUrls`, `normalizeEntry` **from `terminal-setup.js`'s own
 source** (`new Function`), so the command building and its shell quoting exist once. The window sends only type, name, prompt

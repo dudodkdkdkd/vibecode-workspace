@@ -162,6 +162,60 @@ class RemoteTests(unittest.TestCase):
         quit_apps.assert_not_called()
         launch.assert_not_called()
 
+    def test_wake_only_never_manages_or_starts_apps(self):
+        r.save_settings(keep_awake=True, start_apps=False, apps=['Claude Code', 'Codex'])
+        handle = {'tty': '/dev/ttys999', 'token': 'a' * 32}
+        r.save_cli_handles({'Claude Code': handle})
+        r.save_managed_apps({'Codex'})
+        coffee = Mock()
+        coffee.poll.return_value = None
+        with patch.object(r.time, 'sleep', side_effect=KeyboardInterrupt), \
+             patch.object(r.subprocess, 'Popen', return_value=coffee) as launch, \
+             patch.object(r, 'run') as run, patch.object(r, 'launch_cli_platform') as cli, \
+             patch.object(r, 'close_cli_platform') as close, patch.object(r, 'quit_apps') as quit_apps, \
+             patch.object(r, 'terminal') as terminal:
+            with self.assertRaises(KeyboardInterrupt):
+                r.controller()
+        launch.assert_called_once()
+        self.assertEqual(launch.call_args.args[0][:2], ['/usr/bin/caffeinate', '-is'])
+        for operation in (run, cli, close, quit_apps, terminal):
+            operation.assert_not_called()
+        self.assertEqual(r.cli_handles(), {'Claude Code': handle})
+        self.assertEqual(r.saved_managed_apps(), {'Codex'})
+        self.assertEqual(r.config()['apps'], ['Claude Code', 'Codex'])
+
+    def test_wake_with_apps_opens_codex_desktop_and_starts_claude_code_in_terminal(self):
+        r.save_settings(keep_awake=True, start_apps=True, close_apps_on_off=False, apps=['Claude Code', 'Codex'])
+        handle = {'tty': '/dev/ttys999', 'token': 'a' * 32}
+        with patch.object(r.time, 'sleep', side_effect=KeyboardInterrupt), \
+             patch.object(r.subprocess, 'Popen', return_value=Mock(poll=Mock(return_value=None))), \
+             patch.object(r, 'app_running', return_value=False), patch.object(r, 'run') as run, \
+             patch.object(r, 'launch_cli_platform', return_value=handle) as cli, patch.object(r, 'terminal'):
+            with self.assertRaises(KeyboardInterrupt):
+                r.controller()
+        run.assert_called_once_with('/usr/bin/open', '-b', 'com.openai.codex')
+        cli.assert_called_once_with('Claude Code')
+
+    def test_wake_with_apps_brings_existing_codex_forward_once_without_owning_it(self):
+        r.save_settings(keep_awake=True, start_apps=True, apps=['Codex'])
+        now = self.ts(8, 15)
+        loops = [now, now + 60]
+
+        def advance(_):
+            if len(loops) == 1:
+                raise KeyboardInterrupt
+            loops.pop(0)
+
+        with patch.object(r.time, 'time', side_effect=lambda: loops[0]), \
+             patch.object(r.time, 'sleep', side_effect=advance), \
+             patch.object(r.subprocess, 'Popen', return_value=Mock(poll=Mock(return_value=None))), \
+             patch.object(r, 'app_running', return_value=True), patch.object(r, 'run') as run, \
+             patch.object(r, 'quit_apps') as quit_apps:
+            with self.assertRaises(KeyboardInterrupt):
+                r.controller()
+        run.assert_called_once_with('/usr/bin/open', '-b', 'com.openai.codex')
+        quit_apps.assert_not_called()
+
     def test_off_cleans_persisted_apps_after_controller_restart(self):
         r.write('config.json', {'keep_awake': False, 'apps': ['Claude']})
         r.write('managed-apps.json', ['Claude'])
@@ -262,8 +316,8 @@ class RemoteTests(unittest.TestCase):
         now = self.ts(8, 15)
         r.save_settings(keep_awake=False, switch_at=int(now + 60),
                         cycle={'on_seconds': 120, 'off_seconds': 60},
-                        close_apps_on_off=False, apps=['Claude', 'Codex'])
-        r.save_cli_handles({'Codex': handle})
+                        close_apps_on_off=False, apps=['Claude', 'OpenCode'])
+        r.save_cli_handles({'OpenCode': handle})
         r.save_managed_apps({'Claude'})
         coffee = Mock()
         coffee.poll.return_value = None
@@ -288,7 +342,7 @@ class RemoteTests(unittest.TestCase):
         close_cli.assert_not_called()
         launch_cli.assert_not_called()
         self.assertEqual(cli_alive.call_args_list, [call(handle), call(handle)])
-        self.assertEqual(r.cli_handles(), {'Codex': handle})
+        self.assertEqual(r.cli_handles(), {'OpenCode': handle})
         self.assertEqual(r.saved_managed_apps(), {'Claude'})
         self.assertEqual([process.args[0][:4] for process in launch.call_args_list],
                          [['/usr/bin/caffeinate', '-is', '-t', '120']] * 2)
@@ -350,6 +404,13 @@ class RemoteTests(unittest.TestCase):
         with self.assertRaises(SystemExit) as result:
             r.main(['_cli_host', 'a' * 32, str(executable)])
         self.assertEqual(result.exception.code, 7)
+
+    def test_claude_code_terminal_starts_remote_control(self):
+        with patch.object(r, 'cli_executable', return_value='/example/claude'), \
+             patch.object(r, 'cli_handle_alive', return_value=True), \
+             patch.object(r, 'run', return_value=Mock(stdout='/dev/ttys999\n')) as run:
+            r.launch_cli_platform('Claude Code')
+        self.assertEqual(shlex.split(run.call_args.args[-1])[-2:], ['/example/claude', 'remote-control'])
 
     def test_automatic_control_terminal_uses_the_real_remote_entrypoint(self):
         with patch.object(r, 'control_running', return_value=False), patch.object(r, 'run') as run:
@@ -574,6 +635,34 @@ class RemoteTests(unittest.TestCase):
         self.assertEqual((self.ssh_dir / 'authorized_keys').read_text(),
                          'ssh-ed25519 AAAAexisting old@host\n' + key + '\n')
 
+    def test_revoke_removes_only_the_selected_plain_key_and_preserves_other_lines(self):
+        selected = self.make_key(comment='user@client')
+        other = self.make_key('other_key', 'user@other')
+        fingerprint = r.checked_public_key(selected)[1]
+        other_fp = r.checked_public_key(other)[1]
+        keys = self.ssh_dir / 'authorized_keys'
+        header = b'# Local comment\r\n\n'
+        restricted = f'from="192.0.2.5" {selected}\r\n'.encode()
+        original = header + (selected + '\r\n').encode() + restricted + (selected + '\n' + other).encode()
+        keys.write_bytes(original)
+        keys.chmod(0o640)
+
+        self.assertEqual(json.loads(self.out(r.ssh_access)), [
+            {'name': 'user@client', 'fingerprint': fingerprint},
+            {'name': 'user@other', 'fingerprint': other_fp},
+        ])
+        with self.assertRaisesRegex(ValueError, 'Bestätigung'):
+            r.ssh_revoke([fingerprint])
+        self.assertEqual(keys.read_bytes(), original)
+
+        self.assertIn('widerrufen', self.out(r.ssh_revoke, ['--yes', fingerprint]))
+        expected = header + restricted + other.encode()
+        self.assertEqual(keys.read_bytes(), expected)
+        self.assertEqual(stat.S_IMODE(keys.stat().st_mode), 0o640)
+        self.assertEqual(json.loads(self.out(r.ssh_access)), [{'name': 'user@other', 'fingerprint': other_fp}])
+        self.assertIn('bereits entfernt', self.out(r.ssh_revoke, ['--yes', fingerprint]))
+        self.assertEqual(keys.read_bytes(), expected)
+
     def test_allow_refuses_without_confirmation_and_rejects_smuggled_options(self):
         key = self.make_key()
         keys = self.ssh_dir / 'authorized_keys'
@@ -717,11 +806,11 @@ class RemoteTests(unittest.TestCase):
              patch.object(r, 'clipboard', return_value=False), \
              patch.object(r, 'activate') as activate:
             shown = self.out(r.ssh_share, ['--wake'])
-            activate.assert_called_once_with()
+            activate.assert_called_once_with(start_apps=False)
             self.assertIn('Wachhalten           AN', shown)
             with self.assertRaises(ValueError):
                 self.out(r.ssh_share, ['--wirklich'])
-            activate.assert_called_once_with()
+            activate.assert_called_once_with(start_apps=False)
 
     def share_json(self, args, listening=True, awake=True, fingerprint=FP, copied=True):
         with patch.object(r, 'ssh_listening', return_value=listening), patch.object(r, 'wake_active', return_value=awake), \
@@ -758,7 +847,7 @@ class RemoteTests(unittest.TestCase):
 
     def test_share_json_with_wake_turns_keep_awake_on_and_reports_it(self):
         data, _, _, activate = self.share_json(['--json', '--wake'], awake=False)
-        activate.assert_called_once_with()
+        activate.assert_called_once_with(start_apps=False)
         self.assertTrue(data['awake'])                                                          # --wake gilt sofort als an
 
     def test_share_flags_are_checked_and_the_terminal_text_is_unchanged(self):
@@ -1260,6 +1349,7 @@ exit 0
             self.assertIn('Freigegeben: book', self.out(r.ssh_grant, ['--yes', code]))
             keys = (self.macs['studio']['dir'] / 'ssh' / 'authorized_keys').read_text().splitlines()
             self.assertEqual(keys, [book_key])                                                             # genau dieser eine Schlüssel
+            self.assertEqual(json.loads(self.out(r.ssh_access)), [{'name': 'user@book', 'fingerprint': check['fingerprint']}])
             with self.assertRaisesRegex(ValueError, 'keine offene Einladung'):                              # ein Code gilt nur einmal
                 r.ssh_grant(['--yes', code])
             self.assertEqual(r.read('taildrop.json'), {'version': 1, 'sent': {}, 'invites': {}, 'answers': {}})

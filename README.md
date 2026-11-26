@@ -23,17 +23,14 @@ Für einzelne **Workspaces** und Suchordner legt die App den Schreibtisch-Alias 
 
 ## 🪟 VibeCode Workspace (Grundapp)
 
-Eine App für alles: Doppelklick auf `VibeCode Workspace.command` öffnet die **Übersicht**. Sie zeigt alles auf einen Blick,
-nichts ist hinter einem Menü versteckt, und jede Zeile hat ihren Status und ihren eigenen Knopf:
+Ein Doppelklick auf `VibeCode Workspace.command` öffnet die Übersicht auf **Workspaces**.
 
-| Bereich | Was du siehst | Knöpfe |
-|---------|---------------|--------|
-| **Workspaces** | jeder gespeicherte Workspace mit Projekten und Schreibtisch-Shortcut (⚠︎ wenn ein Projekt fehlt), spontane Projektauswahl | Kästchen **Quick-Öffnen**, **Starten**, **Bearbeiten…**, **Workspace anlegen…**, **Einmaliger Workspace…**, **Shortcuts erneuern** |
-| **Agenten** | eine Zeile: wie viele Claude-Code- und Codex-Sitzungen in deinen Projekten gerade arbeiten oder auf dich warten (Schätzung) | **Agenten…** (Liste mit **Aktualisieren** und **Auf <Mac> prüfen**) |
-| **Repository-Suche** | alle Ordner, in denen VibeCode nach Git-Repositories sucht, lokal und auf SSH-Hosts, mit Zahl der Funde | Kästchen **Quick-Öffnen** (lokale Ordner), **Ordner hinzufügen…**, **Remote-Ordner hinzufügen…**, **Entfernen** |
-| **Presets pro Repository** | der allgemeine Standard (gilt ohne eigenes Preset) und welche Terminals und Browser-Tabs je Repository starten; Presets von verschobenen Repositories | **Festlegen…**, **Bearbeiten…**, **Zurücksetzen**, **Übernehmen**, **Preset anlegen…** |
-| **Remote** | oben SSH: deine SSH-Hosts mit Zahl der gefundenen Repositories, dazu der gespeicherte Mac (siehe unten). Darunter Tailscale: Zustand (verbunden, getrennt, nicht angemeldet, nicht installiert …), App oder Kommandozeile, und der Schalter „Mit VibeCode starten und beenden“ | SSH: **Verbinden**, **Neue Verbindung…**, **Diesen Mac freigeben…**. Tailscale: **Einrichten…**, **Anmelden…**, **Verbinden** / **Trennen**, **Geräte…**, **Abmelden…**, Kästchen **Aktiv**, **Aktualisieren** |
-| **App-Einstellungen** | Wachhalten mit ausgewählten Apps, Local Dev mit Status | **Einschalten** / **Ausschalten**, **Apps wählen…**, Local Dev: **Einstellen…** und **Öffnen** |
+| Reiter | Inhalt |
+|--------|--------|
+| **Workspaces** | Gespeicherte Workspaces starten und bearbeiten, Projekte spontan öffnen, Schreibtisch-Shortcuts, Agentenübersicht und Wachhalten & Apps. |
+| **Projekte** | Lokale und entfernte Suchordner mit den gefundenen Repository-Zahlen sowie Terminal- und Browser-Presets. |
+| **Remote** | Tailscale, Verbindungen von diesem Mac zu anderen Macs und Servern (mit der Einrichtung) und der Zugriff auf diesen Mac (Freigaben, Einladungen). |
+| **Local Dev** | Anbieter, Modell und CLI als Vorauswahl festlegen, Ollama-Modelle verwalten (laden, entfernen), Kombinationen aus Modell und CLI speichern oder Local Dev öffnen. |
 
 Der Punkt vor einer Zeile zeigt den Zustand: grün = eingerichtet und in Ordnung, orange = braucht Aufmerksamkeit
 (z. B. keine Projekte gefunden), grau = aus oder nicht eingerichtet. **Öffnen** und **Verbinden** starten das Ziel im
@@ -41,9 +38,9 @@ Terminal und schließen die Übersicht. Jedes Modul meldet seinen Status selbst 
 Die eigenen macOS-Terminal-Fenster der App, ihrer Shortcuts und Module schließen nach erfolgreichem Abschluss automatisch,
 auch nach einem Abbruch ohne Fehler. Bei Fehlern bleiben Ausgabe und Diagnose bis zur Bestätigung mit Enter sichtbar.
 Laufende Agenten und SSH-Sitzungen bleiben geöffnet. Fenster mit mehreren Tabs und manuell benutzte Shells bleiben erhalten.
-Der Schalter für Wachhalten lässt die Übersicht geöffnet und aktualisiert ihren Zustand direkt.
-Einschalten hält den Mac wach und startet die ausgewählten Apps. Ausschalten löst die Wachhaltesperre
-und schließt die Apps je nach Einstellung. **Apps wählen…** öffnet das Kontrollterminal.
+**Nur wachhalten** verhindert den automatischen Ruhezustand. **Wachhalten mit Apps** startet zusätzlich die unter **Apps wählen…**
+ausgewählten Programme. **Claude Code** startet mit Remote Control im Terminal, **Codex** als Mac-App. Die Einstellung zum
+Schließen von Apps beim Ausschalten gilt für den Modus mit Apps.
 
 Ein **Workspace** ist eine benannte Auswahl von Projekten, z. B. „Demo“ = example-api + example-web + example-docs.
 Es gibt zwei Wege, Projekte zu öffnen:
@@ -99,7 +96,7 @@ Statt jedes Repository einzeln einzutragen, gibst du **Ordner** an, in denen Vib
   4 Ebenen tief und findet Repositories und Git-Worktrees. Versteckte Ordner, `node_modules`, `.venv`, `venv`, `.cache`,
   `Library` und verlinkte Ordner werden übersprungen; in einem gefundenen Repository wird nicht weiter gesucht. Ist ein Ordner
   riesig (Home-Verzeichnis, `/`), bricht die Suche ab und sagt es.
-- **Remote-Ordner hinzufügen…** fragt nach **SSH-Host** (Alias aus `~/.ssh/config` oder `benutzer@host`) und **Ordner auf dem Server**
+- **Remote-Ordner hinzufügen…** fragt nach **SSH-Host** (frei tippen: Alias aus `~/.ssh/config` oder `benutzer@host`, oder die Liste öffnen: dort stehen die schon verbundenen Geräte und die Macs, die im Tailnet gerade online sind) und **Ordner auf dem Server**
   (leer = Home). Auf dem Server wird rekursiv gesucht, wie beim Setup. Die Suche läuft ohne Passwortabfrage; klappt die Anmeldung
   noch nicht, bleibt der Host gespeichert, und das Fenster verweist auf **SSH → Neue Verbindung… → Geführte Einrichtung**.
 - **Quick-Öffnen** ist ein Kästchen neben **Entfernen** und gilt pro lokalem Ordner (Standard: aus). Eingeschaltet legt es einen
@@ -123,6 +120,13 @@ Ein **Preset** legt fest, welche **Terminals** (Shell, Claude Code, Codex, Codex
 Name und Unterordner) und welche **Browser-Tabs** für ein Repository starten. Es ist dieselbe Konfiguration wie bei „Terminals ändern“
 im Setup (`terminals.json`), nur im Fenster:
 
+- **Local-Dev-Terminals:** Die Auswahl „Terminal“ bietet nach den festen Typen deine gespeicherten **Kombinationen** an
+  („Local Dev · qwen2.5-coder:7b → OpenCode · Ollama“, siehe **Local Dev → Kombinationen**). Das Terminal startet den lokalen
+  Modellserver und darauf die CLI im Repository, ohne Rückfragen, wie das Local-Dev-Terminal eines Workspaces. Es läuft nur auf diesem
+  Mac: auf einem SSH-Host zeigt das Terminal stattdessen den Grund. Im Preset steht Anbieter, Modell und CLI selbst (nicht ein Verweis
+  auf die Kombination): löschst du die Kombination, bleibt das Terminal erhalten und erscheint als „(nicht gespeichert)“. Hat der
+  Workspace dieselbe Kombination für dasselbe Repository ohnehin, startet sie nicht doppelt. Zwei **verschiedene** MLX-Modelle in einem
+  Workspace stören sich, denn es läuft nur ein MLX-Server (bei Ollama nicht).
 - **Öffnen in** legt pro Terminal **Unteres Panel**, **Editor-Tab** oder **Editor-Raster** fest. **Standard** übernimmt die
   Einstellung aus VS Code. Die Auswahl wird im Preset gespeichert und gilt beim nächsten Workspace-Start.
 - **Allgemeiner Standard:** die erste Zeile des Bereichs. Er gilt für **jedes Repository ohne eigenes Preset**, lokal wie auf
@@ -160,9 +164,15 @@ beim nächsten Start der Projektterminals. Sind alle Projektterminals geschlosse
 
 ### SSH im Fenster
 
-Im Bereich **Remote** zeigt der obere Teil (SSH) deine eingerichteten Verbindungen: die SSH-Hosts mit Repository-Suche (mit der Anzahl der zuletzt
-gefundenen Repositories) und den gespeicherten Remote-Mac. Den Bereich gibt es nur, wenn ein Modul SSH anbietet.
-Die Übersicht fragt dabei **keinen Host per SSH** an, sie zeigt den zuletzt gefundenen Stand.
+Der Reiter **Remote** ist nach Richtung geordnet: **Tailscale** (das Netz), **Verbindungen von diesem Mac** (hierhin kommst du) und
+**Zugriff auf diesen Mac** (wer hierhin kommt). Unter *Verbindungen von diesem Mac* öffnest du eine Verbindung zu einem eingerichteten
+Mac oder Server; **Geführte Einrichtung…** richtet einen SSH-Host und seinen Suchordner ein. Unter **Projekte → Remote-Suchordner**
+siehst du den Pfad und die zuletzt gefundenen Repositories desselben Hosts. Die Übersicht liest den gespeicherten Stand.
+
+Ein **Punkt** steht nur für einen Zustand, der gerade stimmt: grün = läuft/online, grau = aus/offline, orange = braucht dich. Einstellungen
+(das Kästchen *Mit VibeCode starten und beenden*), Freigaben und Knöpfe haben keinen Punkt. Bei Verbindungen kommt „online“ oder
+„offline“ aus Tailscale (Name, Tailscale-Name oder Adresse passt zu einem Gerät); die Übersicht kontaktiert keinen SSH-Host. Ziele, die
+nicht im Tailnet stehen, haben keinen Punkt, und erreichbare Ziele stehen oben.
 
 | Schaltfläche | Was sie tut |
 |--------------|-------------|
@@ -172,8 +182,8 @@ Die Übersicht fragt dabei **keinen Host per SSH** an, sie zeigt den zuletzt gef
 
 Zwischen zwei Macs, jeweils mit dieser App: auf dem **Remote-Mac** *Diesen Mac freigeben…* → Zeile kopieren; auf dem **Client-Mac**
 *Neue Verbindung… → Mit der Zeile…* → einfügen → die angezeigte Zeile kopieren; zurück auf dem **Remote-Mac** *Schlüssel eintragen…* →
-einfügen, Fingerprint prüfen, bestätigen; auf dem **Client-Mac** *Verbinden*. *Wach halten* startet auch die gewählten Apps
-(wie `remote on`); ohne Wachhalten kann der Remote-Mac einschlafen und ist dann nicht erreichbar.
+einfügen, Fingerprint prüfen, bestätigen; auf dem **Client-Mac** *Verbinden*. *Wach halten* in der SSH-Freigabe
+verhindert den automatischen Ruhezustand. Das hilft, den Mac auch bei längerer Inaktivität erreichbar zu halten.
 
 **Unterwegs (Tailscale):** `.local`-Namen und die Heimnetz-Adressen (192.168.…) gibt es nur im selben Netz. Von außerhalb braucht es
 [Tailscale](https://tailscale.com) auf **beiden** Macs (gleiches Konto). Tailscale legt nur eine private Verbindung zwischen deinen
@@ -201,7 +211,7 @@ Remote-Mac muss dafür wach sein (Wach halten).
 
 ### Tailscale im Fenster
 
-Der untere Teil des Bereichs **Remote** steuert Tailscale, ohne dass du die Mac-App brauchst. Es genügt die **Kommandozeilen-Variante**
+Unter **Remote → Tailscale** steuerst du die Verbindung. Es genügt die **Kommandozeilen-Variante**
 (`brew install tailscale`: nur die Programme `tailscale` und `tailscaled`). Die App von tailscale.com geht ebenso; VibeCode erkennt, was da ist.
 
 - **Einrichten…** (nur Kommandozeile): öffnet ein Terminal, das Tailscale per Homebrew installiert, den Systemdienst startet
@@ -585,8 +595,17 @@ Tailscale-Host aus (Name oder 100.x-Adresse); von Hand: `workspace remote ssh se
 | `local-ai.example.json` | Versionierte Vorlage mit MLX-, Ollama- und Frameworkprofilen |
 
 **Usage:**
-- **VibeCode-App → App-Einstellungen → Local Dev** → Verfuegbarkeitsbaum ansehen, Repository, Hosting, Modell und kompatible CLI waehlen
-- **VibeCode-App → App-Einstellungen → Local Dev → Einstellen…** → Anbieter (MLX oder Ollama), Modell und CLI (OpenCode, Codex, Claude)
+- **VibeCode-App → Local Dev → Öffnen** zeigt den Verfügbarkeitsbaum und die Auswahl für Repository, Hosting, Modell und kompatible CLI.
+- **Ollama-Modelle:** Der Reiter **Local Dev** listet die geladenen Modelle mit Größe (aus den Manifesten unter `~/.ollama/models`,
+  ohne Ollama aufzurufen) und darunter, was **noch nicht geladen** ist: das in Local Dev eingestellte Modell und eine kurze
+  Vorschlagsliste (`local-dev/ollama-suggestions.json`). Eine Bibliotheks-Abfrage gibt es nicht; jedes andere Modell lädst du mit
+  **Modell laden…** über seinen Namen. **Laden…** fragt zuerst und öffnet ein Terminal mit `ollama pull` (Modelle sind oft mehrere GB
+  groß, der Fortschritt gehört dorthin). **Entfernen…** fragt zuerst und führt `ollama rm` aus. Beides braucht gefundenes Ollama, und
+  der Ollama-Dienst muss laufen. Nach dem Laden **Aktualisieren** klicken.
+- **Kombinationen:** **Kombination anlegen…** speichert ein Paar aus Modell und CLI (aus derselben Liste wie **Einstellen…**, also nur
+  zueinander passende) in `~/.config/vibecode-workspace/local-combos.json`. Ein noch nicht geladenes Ollama-Modell zeigt die Zeile
+  vorher in Orange; es würde beim ersten Start geladen. Der Preset-Editor unter **Projekte** bietet die Kombinationen als Terminal an.
+- Unter **VibeCode-App → Local Dev → Einstellen…** kannst du Anbieter (MLX oder Ollama), Modell und CLI (OpenCode, Codex, Claude)
   in einem Auswahlmenü festlegen. Das ist die Vorauswahl beim Start von Local Dev (sie landet in `local-ai.json`, die Statuszeile zeigt
   sie sofort). Das Menü listet **alle** konfigurierten, zueinander passenden Kombinationen, auch nicht installierte (Hinweis „Anbieter
   fehlt“ oder „CLI fehlt“), damit man MLX oder OpenCode einstellen kann, bevor sie da sind. Ein unpassendes Paar (z. B. Codex mit MLX)

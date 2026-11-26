@@ -15,9 +15,23 @@ function shellQuote(value) {
     return "'" + value.replace(/'/g, "'\\''") + "'";
 }
 
+// Local Dev: der Prompt ist „Anbieter Modell CLI“, drei Wörter ohne Leerzeichen und ohne Anführungszeichen. Der Befehl enthält keinen
+// Pfad dieses Macs: der Starter ersetzt @LOCAL_DEV_SCRIPT@ und @REPOSITORY@ erst beim Start durch die echten Pfade.
+const LOCAL_DEV_PART = /^[A-Za-z0-9][A-Za-z0-9._:\/@+-]{0,150}$/;
+function localDevParts(prompt) {
+    const parts = typeof prompt === "string" ? prompt.split(" ") : [];
+    return parts.length === 3 && parts.every((part) => LOCAL_DEV_PART.test(part)) ? parts : null;
+}
+
 function terminalCommand(type, prompt, remote = false) {
     const shell = remote ? "bash" : "zsh";
     if (type === "Shell") return `exec ${shell} -l`;
+    if (type === "Local Dev") {
+        const parts = localDevParts(prompt);
+        if (!parts) throw new Error("Local Dev braucht Anbieter, Modell und CLI.");
+        return `LOCAL_DEV_PROVIDER=${shellQuote(parts[0])} LOCAL_DEV_MODEL=${shellQuote(parts[1])} ` +
+            `LOCAL_DEV_FRAMEWORK=${shellQuote(parts[2])} LOCAL_DEV_REPOSITORY_PATH=@REPOSITORY@ exec /bin/zsh @LOCAL_DEV_SCRIPT@ start`;
+    }
     if (type === "Eigener Befehl") return prompt;
     if (type === "Antigravity") {
         const argument = prompt ? ` --prompt-interactive ${shellQuote(prompt)}` : "";
@@ -79,8 +93,9 @@ function normalizeEntry(raw) {
 
 function validateTerminals(terminals, projectName) {
     if (!Array.isArray(terminals) || terminals.some((entry) => !entry ||
-        !["Shell", "Claude Code", "Codex", "Codex 2", "Antigravity", "Eigener Befehl"].includes(entry.type) ||
+        !["Shell", "Claude Code", "Codex", "Codex 2", "Antigravity", "Eigener Befehl", "Local Dev"].includes(entry.type) ||
         [entry.name, entry.prompt, entry.command, entry.cwd].some((value) => typeof value !== "string") ||
+        (entry.type === "Local Dev" && !localDevParts(entry.prompt)) ||
         (entry.placement !== undefined && !TERMINAL_PLACEMENTS.includes(entry.placement)))) {
         throw new Error(`Ungültige Terminals für ${projectName}.`);
     }
@@ -116,7 +131,8 @@ function configureProject(app, project, existing) {
         const chosen = app.chooseFromList(types, {
             withTitle: terminalTitle,
             withPrompt: "Was soll in diesem Terminal starten?",
-            defaultItems: [previous ? previous.type : "Shell"],
+            // Ein Local-Dev-Terminal aus dem Preset-Editor gibt es hier nicht zur Auswahl: dann beginnt der Assistent bei „Shell“.
+            defaultItems: [previous && types.includes(previous.type) ? previous.type : "Shell"],
         });
         if (chosen === false) return null;
         const type = chosen[0];

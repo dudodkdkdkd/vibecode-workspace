@@ -1,0 +1,12 @@
+{
+  "models": [
+    {"name": "qwen2.5-coder:7b", "note": "Code, klein"},
+    {"name": "qwen2.5-coder:14b", "note": "Code, mittel"},
+    {"name": "qwen3-coder:30b", "note": "Code, groß"},
+    {"name": "deepseek-coder:6.7b", "note": "Code, klein"},
+    {"name": "devstral:24b", "note": "Agenten, groß"},
+    {"name": "gpt-oss:20b", "note": "Allgemein, groß"},
+    {"name": "gemma3:4b", "note": "Allgemein, klein"},
+    {"name": "llama3.1:8b", "note": "Allgemein, mittel"}
+  ]
+}

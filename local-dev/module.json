@@ -2,6 +2,8 @@
   "entries": [
     {"id": "local", "order": 40, "title": "Local Dev: MLX/Ollama mit Agent starten",
      "run": ["/bin/zsh", "{module}/launcher.zsh"], "menu": true,
-     "status": ["python3", "{module}/summary.py"]}
+     "status": ["python3", "{module}/summary.py"]},
+    {"id": "local-models", "title": "Ollama-Modelle (Auflistung, Laden, Entfernen)",
+     "run": ["python3", "{module}/models.py"]}
   ]
 }

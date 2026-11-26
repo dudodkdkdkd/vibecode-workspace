@@ -6,10 +6,30 @@ import sys
 
 
 SESSION_TTY = 'VIBECODE_TERMINAL_SESSION_TTY'
+MINIMIZE_SCRIPT = '''on run argv
+    if application "Terminal" is not running then return false
+    set targetTTY to item 1 of argv
+    set minimizeWindow to (item 2 of argv is "minimize")
+    tell application "Terminal"
+        repeat with terminalWindow in windows
+            set terminalTabs to tabs of terminalWindow
+            if (count of terminalTabs) is 1 then
+                if (tty of item 1 of terminalTabs) is targetTTY then
+                    if (miniaturized of terminalWindow) is minimizeWindow then return false
+                    set miniaturized of terminalWindow to minimizeWindow
+                    return true
+                end if
+            end if
+        end repeat
+    end tell
+    return false
+end run
+'''
 CLOSE_SCRIPT = '''on run argv
     set targetTTY to item 1 of argv
+    set restoreWindow to ((count of argv) > 1)
     delay 0.7
-    repeat 30 times
+    repeat with attempt from 1 to 30
         if application "Terminal" is not running then return
         set foundTab to false
         tell application "Terminal"
@@ -25,6 +45,10 @@ CLOSE_SCRIPT = '''on run argv
                                 close terminalWindow saving no
                             end if
                             return
+                        end if
+                        -- If a manual shell is still open, undo our temporary minimization.
+                        if restoreWindow and attempt is 30 and (count of (get tabs of terminalWindow)) is 1 then
+                            set miniaturized of terminalWindow to false
                         end if
                     end if
                 end repeat
@@ -46,18 +70,32 @@ def terminal_tty():
         return None
 
 
-def schedule_close(tty):
+def minimize_terminal_window(tty, minimize):
+    action = 'minimize' if minimize else 'restore'
+    try:
+        result = subprocess.run(['/usr/bin/osascript', '-e', MINIMIZE_SCRIPT, tty, action],
+                                stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=2)
+        return result.returncode == 0 and result.stdout.strip() == 'true'
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def schedule_close(tty, restore=False):
     """Wait for our wrapper and Finder's shell to exit; leave shared windows alone."""
-    subprocess.Popen(['/usr/bin/osascript', '-e', CLOSE_SCRIPT, tty],
+    argv = ['/usr/bin/osascript', '-e', CLOSE_SCRIPT, tty]
+    if restore:
+        argv.append('restore')
+    subprocess.Popen(argv,
                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                      start_new_session=True)
 
 
-def run_command(argv):
+def run_command(argv, minimize_window=False):
     tty = terminal_tty()
     env = dict(os.environ)
     if tty:
         env[SESSION_TTY] = tty
+    minimized = bool(tty and minimize_window and minimize_terminal_window(tty, True))
     try:
         code = subprocess.call(argv, env=env)
     except KeyboardInterrupt:
@@ -70,10 +108,14 @@ def run_command(argv):
     if tty:
         if code == 0:
             try:
-                schedule_close(tty)
+                schedule_close(tty, restore=minimized)
             except OSError as exc:
+                if minimized:
+                    minimize_terminal_window(tty, False)
                 print(f'VibeCode: Terminal konnte nicht geschlossen werden: {exc}', file=sys.stderr)
         else:
+            if minimized:
+                minimize_terminal_window(tty, False)
             # Keep a process alive even for Terminal profiles that close on every exit.
             print(f'\nVibeCode: Fehler (Exit-Code {code}). Das Terminal bleibt zur Diagnose geöffnet.', file=sys.stderr)
             try:
@@ -83,11 +125,11 @@ def run_command(argv):
     return code
 
 
-def wrap_if_needed(argv):
+def wrap_if_needed(argv, minimize_window=False):
     """Also covers existing generated Desktop starters, which call vibecode.py directly."""
     tty = terminal_tty()
     if tty and os.environ.get(SESSION_TTY) != tty:
-        raise SystemExit(run_command(argv))
+        raise SystemExit(run_command(argv, minimize_window=minimize_window))
 
 
 if __name__ == '__main__':

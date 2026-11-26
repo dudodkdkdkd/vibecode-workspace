@@ -15,10 +15,12 @@ import shlex
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
 import time
+from contextlib import contextmanager
 
 ROOT = Path(__file__).resolve().parent
 BASE = Path(os.environ.get(
@@ -27,10 +29,11 @@ LABEL = 'com.vibecode-workspace.remote'
 PLIST = Path.home() / 'Library/LaunchAgents' / (LABEL + '.plist')
 DAYS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']
 PLATFORM_PRESETS = ['Claude', 'Claude Code', 'Codex', 'OpenCode']
-CLI_PLATFORMS = {'Claude Code': 'claude', 'Codex': 'codex', 'OpenCode': 'opencode'}
+CLI_PLATFORMS = {'Claude Code': 'claude', 'OpenCode': 'opencode'}
+CODEX_APP_ID = 'com.openai.codex'
 MANUAL_END = 253402300799  # 9999-12-31 23:59:59 UTC; displayed as "bis AUS".
-WAKE_SETTINGS = ('keep_awake', 'apps', 'close_apps_on_off', 'switch_at', 'cycle')
-CONTROLLER_VERSION = 3
+WAKE_SETTINGS = ('keep_awake', 'start_apps', 'apps', 'close_apps_on_off', 'switch_at', 'cycle')
+CONTROLLER_VERSION = 4
 INTERNAL_DEFAULTS = {
     # Kept internally so installations from the former scheduled mode can be
     # detected and safely migrated/cancelled. They are not user-facing config.
@@ -41,7 +44,8 @@ INTERNAL_DEFAULTS = {
     'wake_mac': True,
     'open_workspace': False,
     'open_terminals': False,
-    'open_control_terminal': True,
+    'open_control_terminal': False,
+    'start_apps': True,
 }
 
 
@@ -160,6 +164,8 @@ def run(*args, check=True):
 
 
 def app_running(name):
+    if name == 'Codex':
+        return bool(app_pids(name))
     # Match the desktop executable's bundle path, not arbitrary CLI sessions of the same name.
     pattern = r'/' + re.escape(name) + r'\.app/Contents/'
     return run('/usr/bin/pgrep', '-f', pattern, check=False).returncode == 0
@@ -167,8 +173,16 @@ def app_running(name):
 
 def app_pids(name):
     """Return only processes whose executable path belongs to the named .app."""
-    pattern = r'/' + re.escape(name) + r'\.app/Contents/'
-    result = run('/usr/bin/pgrep', '-f', pattern, check=False)
+    if name == 'Codex':
+        # LaunchServices also resolves renamed copies of the app.
+        result = run('/usr/bin/osascript', '-l', 'JavaScript', '-e',
+                     'function run(argv) { ObjC.import("AppKit"); '
+                     'return ObjC.unwrap($.NSRunningApplication.runningApplicationsWithBundleIdentifier($(argv[0])))'
+                     '.map(app => Number(app.processIdentifier)).join("\\n"); }',
+                     CODEX_APP_ID, check=False)
+    else:
+        pattern = r'/' + re.escape(name) + r'\.app/Contents/'
+        result = run('/usr/bin/pgrep', '-f', pattern, check=False)
     return [int(value) for value in result.stdout.split() if value.isdigit()]
 
 
@@ -295,6 +309,8 @@ def launch_cli_platform(platform):
     executable = cli_executable(platform)
     token = os.urandom(16).hex()
     host = [sys.executable, str(ROOT / 'remote.py'), '_cli_host', token, executable]
+    if platform == 'Claude Code':
+        host.append('remote-control')
     command = 'exec ' + shlex.join(host)
     result = run(
         '/usr/bin/osascript',
@@ -359,6 +375,8 @@ def platform_running(name):
 
 
 def platform_label(name):
+    if name == 'Claude Code':
+        return 'Claude Code (Remote Control)'
     if name in CLI_PLATFORMS:
         optional = 'optional, ' if name == 'OpenCode' else ''
         return f'{name} ({optional}Terminal)'
@@ -377,7 +395,7 @@ def status(output=print):
     live = now - health.get('updated', 0) < 75
     end = window(c, state, now)
     active = live and end and health.get('until', 0) > now
-    output('WACHHALTEN & APPS')
+    output('WACHHALTEN & APPS' if c['start_apps'] else 'NUR WACHHALTEN')
     output(f'Status          {"AKTIV" if active else ("STARTET" if end else "AUS")}')
     output('Mac-Ruhezustand ' +
            ('BLOCKIERT' if active and health.get('awake') else 'nicht durch VibeCode blockiert'))
@@ -390,9 +408,9 @@ def status(output=print):
         on_minutes = cycle['on_seconds'] // 60
         off_minutes = cycle['off_seconds'] // 60
         output(f'Automatik       AN {on_minutes} min · AUS {off_minutes} min')
-    for app in c['apps']:
+    for app in c['apps'] if c['start_apps'] else ():
         output(f'{platform_label(app):<31}{"LÄUFT" if platform_running(app) else "AUS"}')
-    if not c['apps']:
+    if not c['start_apps'] or not c['apps']:
         output('Plattformen     keine')
     if live and health.get('error'):
         output(f'Fehler          {health["error"]}')
@@ -1077,8 +1095,10 @@ def ssh_pair(verify=False):
 def summary():
     """One status line for the VibeCode window: {"text", "level"}."""
     active = wake_active()
-    apps = ', '.join(config()['apps']) or 'keine Apps gewählt'
-    print(json.dumps({'text': f'Wachhalten {"AN" if active else "AUS"} · Apps: {apps}',
+    c = config()
+    apps = ', '.join(c['apps']) or 'keine Apps gewählt'
+    mode = f'Apps: {apps}' if c['start_apps'] else 'Nur wachhalten'
+    print(json.dumps({'text': f'Wachhalten {"AN" if active else "AUS"} · {mode}',
                       'level': 'ok' if active else 'off'}, ensure_ascii=False))
 
 
@@ -1087,12 +1107,19 @@ def wake_state():
     c = config()
     enabled = bool(window(c, read('request.json', {}), time.time()))
     active = wake_active()
-    apps = ', '.join(c['apps']) or 'keine Apps gewählt'
-    text = f'Wachhalten {"AN" if enabled else "AUS"} · Apps: {apps}'
+    apps = [platform_label(app) for app in c['apps']]
+    text = f'Wachhalten {"AN" if enabled else "AUS"}'
+    if c['start_apps']:
+        text += ' · Apps: ' + (', '.join(c['apps']) or 'keine Apps gewählt')
+    else:
+        text += ' · Nur wachhalten'
     if enabled and not active:
         text += ' · Controller startet oder ist nicht erreichbar'
-    print(json.dumps({'enabled': enabled, 'active': active, 'text': text,
-                      'level': 'warn' if enabled and not active else 'ok' if enabled else 'off'},
+    error = read('health.json', {}).get('error', '') if active and enabled and c['start_apps'] else ''
+    if error:
+        text += ' · ' + error
+    print(json.dumps({'enabled': enabled, 'active': active, 'withApps': c['start_apps'], 'apps': apps, 'text': text,
+                      'level': 'warn' if enabled and (not active or error) else 'ok' if enabled else 'off'},
                      ensure_ascii=False))
 
 
@@ -1186,15 +1213,14 @@ def clipboard(text):
 def ssh_share(args):
     """Prepare THIS Mac to be reached over SSH and print the one line the other Mac needs.
 
-    --wake keeps the Mac awake (like `workspace remote on`). --json prints the state as JSON for the VibeCode window instead of
+    --wake keeps the Mac awake (like `workspace remote on --wake-only`). --json prints the state as JSON for the VibeCode window instead of
     text. --no-open does not open System Settings again (the window's "check again")."""
     flags = set(args)
     if flags - {'--wake', '--json', '--no-open'} or len(flags) != len(args):
         raise ValueError('Aufruf: workspace remote ssh share [--wake] [--json] [--no-open]')
     waking = '--wake' in flags
     if waking:
-        # Same switch as `workspace remote on`: it also starts the configured apps.
-        activate()
+        activate(start_apps=False)
     if '--json' in flags:
         facts = ssh_facts(waking)
         opened = copied = False
@@ -1246,6 +1272,79 @@ def append_line(path, line):
         f.write(separator + line.encode() + b'\n')
 
 
+@contextmanager
+def lock_authorized_keys():
+    SSH_DIR.mkdir(mode=0o700, exist_ok=True)
+    with (SSH_DIR / '.vibecode-authorized-keys.lock').open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield SSH_DIR / 'authorized_keys'
+
+
+def authorized_key_exists(path, key):
+    blob = key.split()[1].encode()
+    try:
+        return any(blob in line.split() for line in path.read_bytes().splitlines())
+    except FileNotFoundError:
+        return False
+
+
+def add_authorized_key(key):
+    with lock_authorized_keys() as path:
+        if not authorized_key_exists(path, key):
+            append_line(path, key)
+
+
+def authorized_key_entries(lines):
+    """Recognize the unrestricted public-key lines that VibeCode can authorize."""
+    for index, line in enumerate(lines):
+        try:
+            key, fingerprint = checked_public_key(' '.join(line.decode().split(maxsplit=2)))
+        except ValueError:
+            continue
+        parts = key.split(' ', 2)
+        yield index, {'name': clean_text(parts[2]) if len(parts) == 3 else '(ohne Name)',
+                      'fingerprint': fingerprint}
+
+
+def ssh_access():
+    path = SSH_DIR / 'authorized_keys'
+    try:
+        lines = path.read_bytes().splitlines(keepends=True)
+    except FileNotFoundError:
+        lines = []
+    grants = {}
+    for _, entry in authorized_key_entries(lines):
+        grants.setdefault(entry['fingerprint'], entry)
+    print(json.dumps(list(grants.values()), ensure_ascii=False))
+
+
+def ssh_revoke(args):
+    if len(args) != 2 or args[0] != '--yes' or not FINGERPRINT.fullmatch(args[1]):
+        raise ValueError('Aufruf nach Bestätigung: workspace remote ssh revoke --yes SHA256:…')
+    with lock_authorized_keys() as authorized:
+        path = authorized.resolve()
+        try:
+            original = path.read_bytes()
+        except FileNotFoundError:
+            original = b''
+        lines = original.splitlines(keepends=True)
+        remove = {index for index, entry in authorized_key_entries(lines) if entry['fingerprint'] == args[1]}
+        if not remove:
+            print('Diese SSH-Freigabe ist bereits entfernt.')
+            return
+        fd, temporary = tempfile.mkstemp(dir=path.parent)
+        try:
+            with os.fdopen(fd, 'wb') as output:
+                os.fchmod(output.fileno(), stat.S_IMODE(path.stat().st_mode))
+                output.writelines(line for index, line in enumerate(lines) if index not in remove)
+            if path.read_bytes() != original:
+                raise ValueError('Die SSH-Freigaben wurden inzwischen geändert. Bitte erneut prüfen.')
+            os.replace(temporary, path)
+        finally:
+            Path(temporary).unlink(missing_ok=True)
+    print('SSH-Freigabe widerrufen.')
+
+
 def own_public_key():
     for name in ('id_ed25519', 'id_ecdsa', 'id_rsa'):
         path = SSH_DIR / (name + '.pub')
@@ -1258,8 +1357,7 @@ def ssh_allow(args):
     """Authorize ONE public key on THIS Mac (run on the remote Mac). Shows the fingerprint first."""
     key, fingerprint = checked_public_key(' '.join(arg for arg in args if arg not in ('--yes', '--check')))
     path = SSH_DIR / 'authorized_keys'
-    blob = key.split()[1]
-    known = path.exists() and any(blob in line.split() for line in path.read_text().splitlines())
+    known = authorized_key_exists(path, key)
     name = key.split(' ', 2)[2] if key.count(' ') >= 2 else '(ohne Name)'
     if '--check' in args:
         # Für das Hauptfenster: Name und Fingerprint zum Bestätigen zeigen, nichts schreiben.
@@ -1274,7 +1372,7 @@ def ssh_allow(args):
             raise ValueError('Bestätigung nötig: Fingerprint dem Besitzer zeigen, dann mit --yes wiederholen.')
         if input('Diesem Schlüssel Zugriff geben? [j/N] ').strip().lower() not in ('j', 'ja', 'y', 'yes'):
             raise ValueError('Abgebrochen, nichts geändert.')
-    append_line(path, key)
+    add_authorized_key(key)
     print('Freigegeben. Auf dem anderen Mac jetzt: workspace remote ssh join')
 
 
@@ -1679,15 +1777,12 @@ def ssh_grant(args):
     if sent is None or answer is None:
         raise ValueError('Zu dieser Antwort gibt es keine offene Einladung (abgelaufen, schon benutzt oder nie verschickt).')
     key, fingerprint = checked_public_key(answer['publicKey'])
-    path = SSH_DIR / 'authorized_keys'
-    blob = key.split()[1]
-    known = path.exists() and any(blob in line.split() for line in path.read_text().splitlines())
     if args[0] == '--check':
+        known = authorized_key_exists(SSH_DIR / 'authorized_keys', key)
         print(json.dumps({'name': sent['name'], 'fingerprint': fingerprint, 'known': known,
                           'comment': key.split(' ', 2)[2] if key.count(' ') >= 2 else ''}, ensure_ascii=False))
         return
-    if not known:
-        append_line(path, key)
+    add_authorized_key(key)
     del state['sent'][args[1]]
     del state['answers'][args[1]]
     taildrop_save(state)
@@ -1804,10 +1899,10 @@ def save_settings(**changes):
         return c
 
 
-def activate():
+def activate(*, start_apps=True):
     """Enable indefinite wake/app mode until the user explicitly turns it off."""
+    save_settings(keep_awake=True, start_apps=start_apps, switch_at=0, cycle=None)
     install()
-    save_settings(keep_awake=True, switch_at=0, cycle=None)
 
 
 def deactivate():
@@ -1852,7 +1947,7 @@ def platforms_menu(input_fn, output):
         c = config()
         output('')
         output('PLATTFORMEN / APPS')
-        output('Bei AN werden diese Apps vollständig geöffnet und überwacht.')
+        output('Im Modus „Wachhalten mit Apps“ werden diese Apps geöffnet und überwacht.')
         for index, name in enumerate(PLATFORM_PRESETS, 1):
             marker = 'x' if name in c['apps'] else ' '
             label = platform_label(name)
@@ -1900,10 +1995,10 @@ def control_loop(input_fn=input, output=print):
         active = bool(window(c, read('request.json', {}), now))
         _, next_switch = timer_phase(c, now)
         output('')
-        output(f'Wachhalten + Apps  {setting(active)}')
+        output(f'Wachhalten         {setting(active)} · {"mit Apps" if c["start_apps"] else "nur wachhalten"}')
         output(f'Ausgewählte Apps   {", ".join(c["apps"]) if c["apps"] else "keine"}')
         output('')
-        output(f'  [1] Wachhalten + Apps {"AUSSCHALTEN" if active else "EINSCHALTEN"}')
+        output(f'  [1] {"Wachhalten ausschalten" if active else "Wachhalten mit Apps einschalten"}')
         output('  [2] Apps auswählen')
         output(f'  [3] Apps bei AUS schließen ({"JA" if c["close_apps_on_off"] else "NEIN"})')
         output('  [4] AN für eine bestimmte Zeit, dann AUS')
@@ -1911,6 +2006,7 @@ def control_loop(input_fn=input, output=print):
         if next_switch:
             output('  [6] Timer aufheben und aktuellen Zustand behalten')
         output('  [7] Automatischen Wechsel zwischen AN und AUS einstellen')
+        output('  [8] Nur wachhalten')
         output('  [s] Status aktualisieren')
         output('  [q] Kontrollterminal schließen')
         try:
@@ -1939,6 +2035,8 @@ def control_loop(input_fn=input, output=print):
                 if on_seconds is not None:
                     off_seconds = read_duration(input_fn, 'Dauer für AUS (Enter übernimmt die AN-Dauer): ')
                     start_cycle(on_seconds, off_seconds or on_seconds)
+            elif answer == '8':
+                activate(start_apps=False)
             elif answer == 'q':
                 return
             elif answer not in ('s', ''):
@@ -1989,6 +2087,8 @@ def controller():
         terminal_handles = cli_handles()
         service_error = ''
         close_apps_on_off = True
+        start_apps = False
+
         def release():
             nonlocal coffee, coffee_key
             if coffee and coffee.poll() is None:
@@ -2014,6 +2114,7 @@ def controller():
                 try:
                     c, state, now = config(), read('request.json', {}), time.time()
                     close_apps_on_off = c['close_apps_on_off']
+                    start_apps = c['start_apps']
                     end = window(c, state, now)
                     if end:
                         wanted_coffee = ('manual',) if end == MANUAL_END else ('until', end)
@@ -2026,58 +2127,70 @@ def controller():
                             coffee = subprocess.Popen(command)
                             coffee_key = wanted_coffee
 
-                        configured_platforms = tuple(c['apps'])
-                        removed_platforms = set(active_platforms) - set(configured_platforms)
-                        configured_apps = set(configured_platforms) - set(CLI_PLATFORMS)
-                        removed_apps = ((removed_platforms - set(CLI_PLATFORMS)) |
-                                        (managed_apps - configured_apps))
-                        if removed_apps:
-                            quit_apps(sorted(removed_apps))
-                            managed_apps.difference_update(removed_apps)
-                            save_managed_apps(managed_apps)
-                        handles_changed = False
-                        removed_cli = ((removed_platforms & set(CLI_PLATFORMS)) |
-                                       (set(terminal_handles) - set(configured_platforms)))
-                        for platform in removed_cli:
-                            handle = terminal_handles.pop(platform, None)
-                            if handle:
-                                close_cli_platform(handle)
-                                handles_changed = True
-                        if handles_changed:
-                            save_cli_handles(terminal_handles)
+                        if start_apps:
+                            configured_platforms = tuple(c['apps'])
+                            removed_platforms = set(active_platforms) - set(configured_platforms)
+                            configured_apps = set(configured_platforms) - set(CLI_PLATFORMS)
+                            removed_apps = ((removed_platforms - set(CLI_PLATFORMS) - {'Codex'}) |
+                                            (managed_apps - configured_apps))
+                            if removed_apps:
+                                quit_apps(sorted(removed_apps))
+                                managed_apps.difference_update(removed_apps)
+                                save_managed_apps(managed_apps)
+                            handles_changed = False
+                            removed_cli = ((removed_platforms & set(CLI_PLATFORMS)) |
+                                           (set(terminal_handles) - set(configured_platforms)))
+                            for platform in removed_cli:
+                                handle = terminal_handles.pop(platform, None)
+                                if handle:
+                                    close_cli_platform(handle)
+                                    handles_changed = True
+                            if handles_changed:
+                                save_cli_handles(terminal_handles)
 
-                        platforms_changed = configured_platforms != active_platforms
-                        active_platforms = configured_platforms
-                        previous_managed_apps = set(managed_apps)
-                        managed_apps.update(configured_apps)
-                        if managed_apps != previous_managed_apps:
-                            save_managed_apps(managed_apps)
-                        if not previous or platforms_changed or now - last_check >= 60:
-                            last_check = now
-                            errors = []
-                            for platform in active_platforms:
-                                try:
-                                    if platform in CLI_PLATFORMS:
-                                        handle = terminal_handles.get(platform)
-                                        if not handle or not cli_handle_alive(handle):
-                                            if handle:
-                                                close_cli_platform(handle)
-                                            terminal_handles[platform] = launch_cli_platform(platform)
-                                            save_cli_handles(terminal_handles)
-                                    elif not app_running(platform):
-                                        run('/usr/bin/open', '-g', '-a', platform)
-                                except Exception as exc:
-                                    errors.append(f'{platform}: {exc}')
-                            service_error = '; '.join(errors)
+                            platforms_changed = configured_platforms != active_platforms
+                            added_platforms = set(configured_platforms) - set(active_platforms)
+                            active_platforms = configured_platforms
+                            previous_managed_apps = set(managed_apps)
+                            managed_apps.update(configured_apps - {'Codex'})
+                            if managed_apps != previous_managed_apps:
+                                save_managed_apps(managed_apps)
+                            if not previous or platforms_changed or now - last_check >= 60:
+                                last_check = now
+                                errors = []
+                                for platform in active_platforms:
+                                    try:
+                                        if platform in CLI_PLATFORMS:
+                                            handle = terminal_handles.get(platform)
+                                            if not handle or not cli_handle_alive(handle):
+                                                if handle:
+                                                    close_cli_platform(handle)
+                                                terminal_handles[platform] = launch_cli_platform(platform)
+                                                save_cli_handles(terminal_handles)
+                                        elif platform == 'Codex':
+                                            running = app_running(platform)
+                                            if not running or platform in added_platforms:
+                                                run('/usr/bin/open', '-b', CODEX_APP_ID)
+                                            if not running:
+                                                managed_apps.add(platform)
+                                                save_managed_apps(managed_apps)
+                                        elif not app_running(platform):
+                                            run('/usr/bin/open', '-g', '-a', platform)
+                                    except Exception as exc:
+                                        errors.append(f'{platform}: {exc}')
+                                service_error = '; '.join(errors)
+                        else:
+                            active_platforms = ()
+                            service_error = ''
                         if not previous:
                             # Mark the transition before UI side effects to avoid duplicate windows on errors.
                             previous = end
-                            if c['open_control_terminal'] and not c.get('switch_at'):
+                            if start_apps and c['open_control_terminal'] and not c.get('switch_at'):
                                 try:
                                     terminal()
                                 except Exception as exc:
                                     service_error += ' ' + str(exc)
-                            if c['open_workspace']:
+                            if start_apps and c['open_workspace']:
                                 env = dict(os.environ, VIBE_REMOTE_TERMINALS=str(c['open_terminals']).lower())
                                 with (BASE / 'workspace.log').open('a') as log:
                                     subprocess.Popen([str(ROOT / 'VibeCode Workspace.command'), '--remote-workspace'],
@@ -2089,7 +2202,7 @@ def controller():
                         previous = 0
                         active_platforms = ()
                         service_error = ''
-                        if close_apps_on_off:
+                        if start_apps and close_apps_on_off:
                             close_managed_platforms()
                 except Exception as exc:
                     error = str(exc)
@@ -2104,7 +2217,7 @@ def controller():
                 time.sleep(2)
         finally:
             release()
-            if close_apps_on_off:
+            if start_apps and close_apps_on_off:
                 close_managed_platforms()
             write('health.json', {'version': CONTROLLER_VERSION, 'updated': time.time(),
                                  'until': 0, 'awake': False})
@@ -2113,11 +2226,11 @@ def controller():
 def main(args):
     cmd = args[0] if args else 'control'
     if cmd == '_cli_host':
-        if (len(args) != 3 or re.fullmatch(r'[0-9a-f]{32}', args[1]) is None or
+        if (len(args) < 3 or args[3:] not in ([], ['remote-control']) or re.fullmatch(r'[0-9a-f]{32}', args[1]) is None or
                 not Path(args[2]).is_file() or not os.access(args[2], os.X_OK)):
             raise ValueError('Ungültiger interner CLI-Start.')
         # Preserve failures so the shared terminal wrapper can keep their diagnosis visible.
-        raise SystemExit(subprocess.call([args[2]]))
+        raise SystemExit(subprocess.call(args[2:]))
     elif cmd == 'controller':
         controller()
     elif cmd == 'status':
@@ -2125,7 +2238,9 @@ def main(args):
     elif cmd in ('menu', 'control', 'config'):
         control()
     elif cmd == 'on':
-        activate()
+        if args[1:] not in ([], ['--wake-only']):
+            raise ValueError('Aufruf: workspace remote on [--wake-only]')
+        activate(start_apps='--wake-only' not in args)
         time.sleep(2.2)
         status()
     elif cmd == 'install':
@@ -2166,13 +2281,17 @@ def main(args):
             ssh_allow(args[2:])
         elif sub == 'show':
             ssh_show()
+        elif sub == 'access' and len(args) == 2:
+            ssh_access()
+        elif sub == 'revoke':
+            ssh_revoke(args[2:])
         elif sub == 'set':
             ssh_set(args[2:])
         elif sub == 'info':
             ssh_info()
         else:
             raise ValueError('ssh-Befehle: ssh share [--wake] | ssh join benutzer@host [SHA256:…] | '
-                             'ssh allow \'<schlüssel>\' | ssh run -- <befehl> | ssh | ssh pair | '
+                             'ssh allow \'<schlüssel>\' | ssh access | ssh revoke --yes SHA256:… | ssh run -- <befehl> | ssh | ssh pair | '
                              'ssh set benutzer@host [port] | ssh info | ssh tailnet benutzer@gerät | ssh pair [--verify] | ' + INBOX_USAGE.replace('Aufruf: workspace remote ', ''))
     elif cmd == 'tailscale':
         tailscale_main(args[1:])
@@ -2182,7 +2301,7 @@ def main(args):
         wake_state()
     elif cmd == 'off':
         c = deactivate()
-        apps_action = 'werden beendet' if c['close_apps_on_off'] else 'bleiben geöffnet'
+        apps_action = 'werden beendet' if c['start_apps'] and c['close_apps_on_off'] else 'bleiben geöffnet'
         print(f'AUS. Wachhaltesperre gelöst. Ausgewählte Apps {apps_action}.')
     elif cmd == 'uninstall':
         stop(disable=True)

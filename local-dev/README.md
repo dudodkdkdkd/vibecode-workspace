@@ -26,6 +26,25 @@ Kombination, mit Tabs getrennt: Anbieter-ID, Anbietername, Modell, lokal 1/0, CL
 installierte, erreichbare und zueinander passende Paare. Läuft schon ein anderes MLX-Modell, startet der Starter es mit dem
 gewählten neu (wie bei jedem Start). Die Speicherfreigabe (z. B. Chrome schließen) gilt auch hier.
 
+## Modelle und Kombinationen im Fenster
+
+Der Reiter **Local Dev** zeigt die Ollama-Modelle und gespeicherte Kombinationen. `models.py` (neben `launcher.zsh`, nur Standardbibliothek)
+liest dafür die Manifeste unter `${OLLAMA_MODELS:-~/.ollama/models}/manifests`, also ohne `ollama` aufzurufen und ohne Netz:
+
+| Befehl | Funktion |
+|---|---|
+| `python3 local-dev/models.py list` | JSON: geladene Modelle (Name, Größe in Byte, Datum) und noch nicht geladene (eingestellt, Vorschlag) |
+| `python3 local-dev/models.py check NAME` | prüft den Namen und ob Ollama da ist, ohne Nebenwirkung |
+| `python3 local-dev/models.py remove NAME` | `ollama rm NAME` (nur für ein geladenes Modell) |
+| `python3 local-dev/models.py pull NAME` | ersetzt sich durch `ollama pull NAME` (das Fenster startet es in einem Terminal) |
+
+Namen sind `modell:tag` (mit Registry und Namensraum, wenn nicht die Standardbibliothek), ohne Leerzeichen, ohne führendes `-`. Der Endpunkt
+kommt aus dem Ollama-Anbieter in `local-ai.json` (`OLLAMA_HOST`). Die Vorschläge stehen in `ollama-suggestions.json`.
+
+Gespeicherte **Kombinationen** (Anbieter, Modell, CLI) liegen nicht hier, sondern in `~/.config/vibecode-workspace/local-combos.json`.
+Ein Preset-Terminal vom Typ „Local Dev“ startet `launcher.zsh start` mit `LOCAL_DEV_PROVIDER`, `LOCAL_DEV_MODEL`, `LOCAL_DEV_FRAMEWORK` und
+`LOCAL_DEV_REPOSITORY_PATH`, genau wie das Local-Dev-Terminal eines Workspaces.
+
 ## Einstellen im Fenster
 
 Statt `--setup` im Terminal: **Übersicht → App-Einstellungen → Local Dev → Einstellen…**. Ein Auswahlmenü zeigt jede konfigurierte,

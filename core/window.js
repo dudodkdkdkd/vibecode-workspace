@@ -14,6 +14,15 @@ const PRESET_PLACEMENTS = [
     { value: "grid", label: "Editor-Raster" },
 ];
 const PRESET_ROWS = { min: 6, max: 12 };
+// Anzeigenamen für die Kombinationen; ein unbekannter Anbieter oder eine unbekannte CLI erscheint unter ihrer ID.
+const PROVIDER_NAMES = { mlx: "MLX", ollama: "Ollama" };
+const FRAMEWORK_NAMES = { opencode: "OpenCode", codex: "Codex", claude: "Claude Code" };
+// Wie in terminal-setup.js (localDevParts): drei Wörter ohne Leerzeichen und Anführungszeichen, sie reisen im Prompt des Terminals.
+const COMBO_PART = /^[A-Za-z0-9][A-Za-z0-9._:\/@+-]{0,150}$/;
+const comboValid = (combo) => ["provider", "model", "framework"].every((key) => COMBO_PART.test(String(combo[key])));
+const comboLabel = (combo) => `${combo.model} → ${FRAMEWORK_NAMES[combo.framework] || combo.framework}`;
+const comboPrompt = (combo) => `${combo.provider} ${combo.model} ${combo.framework}`;
+const sameCombo = (a, b) => a.provider === b.provider && a.model === b.model && a.framework === b.framework;
 const PRESET_WIDTH = 780;
 
 function shellQuote(value) {
@@ -66,6 +75,11 @@ function makeBackend(app, python, core) {
         agents: (scope) => JSON.parse(call("agents", scope)),
         // Tailscale: eine feste Aktion (up, down, login, logout, auto-on, auto-off, setup); die Antwort ist Text, bei "login" JSON {url}.
         tailscale: (action) => call("tailscale", action),
+        // Ollama-Modelle: "pull" öffnet ein Terminal (der Fortschritt gehört dorthin), "remove" läuft sofort. Antwort ist Text.
+        model: (action, name) => call("models", action, name),
+        // Gespeicherte Kombinationen (Anbieter, Modell, CLI): "add" oder "remove"; Antwort ist die neue Liste.
+        combo: (action, value) => JSON.parse(call("combos", action, `--provider=${value.provider}`, `--model=${value.model}`,
+            `--framework=${value.framework}`)),
         // Ergebnis ist immer {code, out, err}: Exit-Code 2 von "join" heißt "noch nicht freigegeben".
         ssh: (action, line) => JSON.parse(call("_ssh", action, ...(line === undefined ? [] : [`--line=${line}`]))),
     };
@@ -150,6 +164,12 @@ function resetEffect(presets, general) {
         "Das Repository selbst bleibt unberührt.";
 }
 
+// Die Kombinationen, die der Preset-Editor als Terminal anbietet. Local Dev läuft nur auf diesem Mac: für ein SSH-Repository
+// gibt es keine (ein schon eingetragenes Terminal bleibt sichtbar, der Editor behandelt es getrennt).
+function localDevCombos(state, repo) {
+    return repo.remote ? [] : ((state.combos && state.combos.items) || []);
+}
+
 function presetLoop(ui, backend, state, repo) {
     const presets = state.presets;
     const existing = repo.general ? presets.general || null : presets.items.find((item) => item.path === repo.path) || null;
@@ -163,7 +183,7 @@ function presetLoop(ui, backend, state, repo) {
     }
     let note = "";
     for (;;) {
-        const result = ui.editPreset(repo, draft, Boolean(existing), note);
+        const result = ui.editPreset(repo, draft, Boolean(existing), note, localDevCombos(state, repo));
         if (!result) return;
         if (result.reset) {
             if (ui.confirmResetPreset(repo.name, resetEffect(presets, repo.general))) {
@@ -190,12 +210,11 @@ function presetLoop(ui, backend, state, repo) {
 function sshItems(ssh) {
     const items = ssh.hosts.map((host) => ({
         kind: "host", name: host.host, title: host.host,
-        detail: `${host.root} · ${host.repos} ${host.repos === 1 ? "Repository" : "Repositories"}`,
-        label: `${host.host} — ${host.root} · ${host.repos} Repositories`,
+        detail: "SSH-Host",
     }));
     if (ssh.mac) {
         const who = ssh.mac.user ? `${ssh.mac.user}@${ssh.mac.host}` : ssh.mac.host;
-        items.push({ kind: "mac", name: ssh.mac.host, title: who, detail: "Mac · direkter Zugang", label: `${who} (Mac)` });
+        items.push({ kind: "mac", name: ssh.mac.host, title: who, detail: "Mac · direkter Zugang" });
     }
     return items;
 }
@@ -419,7 +438,7 @@ function perform(ui, backend, state, choice) {
     case "new":
     case "edit": {
         if (!state.projects.length) {
-            ui.error("Der Launcher kennt noch keine Projekte. Füge unter „Repository-Suche“ einen Ordner mit deinen Repositories hinzu.");
+            ui.error("Der Launcher kennt noch keine Projekte. Füge im Reiter „Projekte“ einen Suchordner hinzu.");
             return false;
         }
         const existing = choice.action === "edit"
@@ -458,11 +477,12 @@ function perform(ui, backend, state, choice) {
         // Der Host des verbundenen Macs ist vorbelegt (derselbe Text wie im SSH-Ziel, also auch ein Tailscale-Name): so steht er überall
         // gleich geschrieben, und Remote-Projekte heißen „… [SSH: host]“. Nur bei Port 22, denn ein Port passt nicht in den Host-Text.
         const mac = state.ssh && state.ssh.mac;
-        const entry = ui.askRemoteFolder("", mac && (mac.port || 22) === 22 ? `${mac.user ? mac.user + "@" : ""}${mac.host}` : undefined);
+        const entry = ui.askRemoteFolder("", mac && (mac.port || 22) === 22 ? `${mac.user ? mac.user + "@" : ""}${mac.host}` : undefined,
+            knownRemoteHosts(state));
         if (!entry) return false;
         const result = backend.folder("add-remote", { host: entry.host, root: entry.root });
         ui.info(result.message + (result.warning
-            ? `\n\n⚠︎ ${result.warning}\n\nDie Anmeldung ohne Passwort richtest du im Bereich Remote unter „Neue Verbindung…“ → Geführte Einrichtung ein.`
+            ? `\n\n⚠︎ ${result.warning}\n\nDie Anmeldung ohne Passwort richtest du über „Remote“ → „Geführte Einrichtung…“ ein.`
             : ""));
         return false;
     }
@@ -516,6 +536,39 @@ function perform(ui, backend, state, choice) {
     case "agents":
         agentsFlow(ui, backend, state);
         return false;
+    case "refresh":
+        return false;                                   // die Übersicht liest den Stand ohnehin neu
+    case "comboAdd": {
+        const found = backend.localSettings();
+        if (found.error) {
+            ui.error(found.error);
+            return false;
+        }
+        const saved = (state.combos && state.combos.items) || [];
+        const options = found.options.filter((option) => comboValid(option) && !saved.some((combo) => sameCombo(combo, option)));
+        if (!options.length) {
+            ui.info(found.options.length ? "Alle passenden Kombinationen sind schon gespeichert."
+                : "Local Dev kennt keine passende Kombination aus Anbieter, Modell und CLI. Prüfe die Einrichtung unter „Öffnen“.");
+            return false;
+        }
+        const chosen = ui.pickLocalDev(localDevChoices(options, null, false), "combo");
+        if (chosen) backend.combo("add", chosen);
+        return false;
+    }
+    case "comboRemove":
+        backend.combo("remove", choice.combo);
+        return false;
+    case "modelPull":
+        if (ui.confirmModelPull(choice.name)) ui.info(backend.model("pull", choice.name));
+        return false;
+    case "modelPullAsk": {
+        const name = ui.askModelName();
+        if (name) ui.info(backend.model("pull", name));
+        return false;
+    }
+    case "modelRemove":
+        if (ui.confirmModelRemove(choice.name)) ui.info(backend.model("remove", choice.name));
+        return false;
     case "tailscaleSetup":
         if (ui.confirmTailscale("setup")) ui.info(backend.tailscale("setup"));
         return false;
@@ -564,7 +617,7 @@ function perform(ui, backend, state, choice) {
         if (result.code === 0) {
             const connected = /Verbunden mit (.+?)\. Befehle/.exec(result.out);
             ui.info(`Verbunden${connected ? ` mit ${connected[1]}` : ""} ✓\n\nIm Bereich Remote kannst du jetzt auf „Verbinden“ klicken oder ` +
-                "„Remote-Ordner hinzufügen…“ wählen: der Host ist dort schon eingetragen.");
+                "im Reiter Projekte „Remote-Ordner hinzufügen…“ wählen. Der Host ist dort vorbelegt.");
         } else if (result.code === 2) {
             if (ui.confirmTailscale("pair")) backend.sshOpen("pair");
         } else {
@@ -576,9 +629,20 @@ function perform(ui, backend, state, choice) {
         return false;                                   // die Übersicht liest den Stand ohnehin neu
     case "sshNew":
         return newConnection(ui, backend, state.ssh);
+    case "sshGuide":
+        backend.sshOpen("guided");
+        return true;
     case "sshShare":
         shareFlow(ui, backend, state.tailscale);
         return false;
+    case "sshRevoke": {
+        const grant = choice.grant;
+        if (!ui.confirmRevoke(grant.name, grant.fingerprint)) return false;
+        const result = backend.ssh("revoke", grant.fingerprint);
+        if (result.code === 0) ui.info(result.out);
+        else ui.error(result.err || result.out);
+        return false;
+    }
     default:
         return false;
     }
@@ -732,40 +796,49 @@ function sshDevices(tailscale) {
     return (tailscale.devices || []).filter((device) => device.online && device.ip && !MOBILE_OS.includes(String(device.os).toLowerCase()));
 }
 
-// „Aktualisieren“ immer; „Gerät per SSH verbinden…“ und „Einladungen abholen“ nur, solange Tailscale läuft (das Verbinden außerdem nur,
-// wenn es überhaupt andere Geräte gibt).
-function tailscaleFooter(tailscale) {
-    const running = tailscale.state === "running";
-    const buttons = (running && (tailscale.devices || []).length
-        ? [{ label: "Gerät per SSH verbinden…", action: { action: "tailscaleConnectDevice" } }] : [])
-        .concat(running ? [{ label: "Einladungen abholen", action: { action: "tailscaleInbox" } }] : []);
-    return { type: "footer", buttons: buttons.concat(TAILSCALE_REFRESH.buttons) };
+// Hosts, die das Dropdown bei „Remote-Ordner hinzufügen…“ anbietet: erst die schon verbundenen (der direkte Mac, gespeicherte Hosts),
+// dann die Macs, die im Tailnet gerade online sind (als benutzer@name, wie bei „Gerät per SSH verbinden…“). Dieselbe Schreibweise wie
+// in den Zielen, damit ein Host überall gleich heißt; doppelte fallen weg. Ein Port passt nicht in den Host-Text.
+function knownRemoteHosts(state) {
+    const ssh = state.ssh;
+    const tailscale = state.tailscale;
+    const found = [];
+    const add = (host) => {
+        if (host && !found.some((known) => known.toLowerCase() === host.toLowerCase())) found.push(host);
+    };
+    const mac = ssh && ssh.mac;
+    if (mac && mac.host && (mac.port || 22) === 22) add(`${mac.user ? mac.user + "@" : ""}${mac.host}`);
+    ((ssh && ssh.hosts) || []).forEach((entry) => add(entry.host));
+    const user = tailscale && tailscale.available && tailscale.state === "running" && tailscale.localUser ? `${tailscale.localUser}@` : "";
+    if (tailscale && tailscale.available && tailscale.state === "running") {
+        sshDevices(tailscale).forEach((device) => add(`${user}${String(device.dns || "").replace(/\.$/, "") || device.ip}`));
+    }
+    return found.slice(0, 40);
 }
 
 function tailscaleRows(tailscale) {
-    const rows = [];                       // ohne eigene Überschrift: der Bereich heißt „Remote“
+    const rows = [{ type: "section", text: "Tailscale" }];
     if (tailscale.error) {
-        rows.push({ type: "note", text: `⚠︎ ${tailscale.error}`, level: "warn" }, tailscaleFooter(tailscale));
+        rows.push({ type: "note", text: `⚠︎ ${tailscale.error}`, level: "warn" }, TAILSCALE_REFRESH);
         return rows;
     }
     const known = TAILSCALE_STATES[tailscale.state] || TAILSCALE_STATES.unknown;
-    // Das Wichtige zuerst: der lange Tailnet-Name steht hinten, denn dort wird die Zeile gekürzt.
     const detail = [known.text];
     if (tailscale.variant === "app" || tailscale.variant === "cli") detail.push(tailscale.variant === "app" ? "App" : "Kommandozeile");
     if (tailscale.ours) detail.push("von VibeCode gestartet");
-    if (tailscale.state === "running") detail.push(...[tailscale.ip, tailscale.name].filter(Boolean));
-    rows.push({ type: "item", title: "Tailscale", detail: detail.join(" · "), level: known.level,
+    rows.push({ type: "item", title: "Verbindung", detail: detail.join(" · "), level: known.level,
         buttons: known.buttons.map((name) => TAILSCALE_BUTTONS[name]) });
     if (known.note) rows.push({ type: "note", text: known.note });
     // Der Schalter: Tailscale startet mit einem Workspace und endet, wenn dessen letztes Editor-Fenster zu ist.
-    rows.push({ type: "item", title: "Mit VibeCode starten und beenden", level: tailscale.auto ? "ok" : "off",
+    // Eine Einstellung, kein Zustand: das Kästchen zeigt, ob sie an ist; ein Punkt daneben wäre doppelt.
+    rows.push({ type: "item", title: "Mit VibeCode starten und beenden", level: "none",
         detail: tailscale.auto
             ? "Startet mit jedem Workspace, endet nach dem letzten VibeCode-Editor-Fenster."
             : "Aus. Tailscale bleibt, wie du es eingestellt hast.",
         buttons: [{ label: "Aktiv", checkbox: true, checked: Boolean(tailscale.auto),
             action: { action: "tailscaleAuto", enabled: !tailscale.auto } }] });
     if (tailscale.autoError) rows.push({ type: "note", text: `⚠︎ ${tailscale.autoError}`, level: "warn" });
-    rows.push(tailscaleFooter(tailscale));
+    rows.push(TAILSCALE_REFRESH);
     return rows;
 }
 
@@ -781,11 +854,8 @@ function tailscaleDevicesText(tailscale) {
 
 // ---------------------------------------------------------------- Übersicht (Modell, ohne Widgets)
 
-function dashboardModel(state) {
-    const rows = [{ type: "title", text: "VibeCode Workspace",
-        sub: "Was eingerichtet ist, siehst du hier. Alles Weitere ist ein Klick entfernt." }];
-
-    rows.push({ type: "section", text: "Workspaces" });
+function workspaceRows(state) {
+    const rows = [{ type: "section", text: "Workspaces" }];
     if (!state.workspaces.length) rows.push({ type: "note", text: "Noch kein Workspace angelegt." });
     state.workspaces.forEach((workspace) => {
         // Das Wichtige zuerst: bei langen Projektlisten wird das Ende der Zeile gekürzt.
@@ -800,13 +870,13 @@ function dashboardModel(state) {
             // Quick-Öffnen: das Kästchen legt einen zweiten Shortcut an, der die Projekte zum Ankreuzen zeigt statt alles zu starten.
             buttons: [{ label: "Quick-Öffnen", checkbox: true, checked: Boolean(workspace.quickOpen),
                     action: { action: "quickWorkspace", name: workspace.name, enabled: !workspace.quickOpen } },
-                { label: "Starten", action: { action: "start", name: workspace.name } },
+                { label: "Starten", primary: true, action: { action: "start", name: workspace.name } },
                 { label: "Bearbeiten…", action: { action: "edit", name: workspace.name } }],
         });
     });
     rows.push({
         type: "footer",
-        buttons: [{ label: "Workspace anlegen…", action: { action: "new" } }].concat(
+        buttons: [{ label: "Workspace anlegen…", primary: !state.workspaces.length, action: { action: "new" } }].concat(
             state.canLaunch ? [{ label: "Einmaliger Workspace…", action: { action: "open", id: "launch" } }] : [],
             // Auch ein Suchordner mit Quick-Öffnen hat einen Schreibtisch-Shortcut, den „erneuern“ neu anlegt (z. B. unter dem Namen dieses Macs).
             state.workspaces.some((workspace) => workspace.shortcut || workspace.quickOpen)
@@ -815,20 +885,26 @@ function dashboardModel(state) {
     });
 
     if (state.agents && state.agents.available) agentRows(state.agents).forEach((row) => rows.push(row));
+    const wake = state.settings && state.settings.wake;
+    if (wake) {
+        rows.push({ type: "section", text: "Wachhalten & Apps" }, ...wakeRows(wake));
+    }
+    return rows;
+}
 
+function projectRows(state) {
+    const rows = [];
     const folders = state.folders;
-    if (folders && (folders.canAddLocal || folders.canAddRemote || folders.local.length || folders.remote.length)) {
-        rows.push({ type: "section", text: "Repository-Suche" });
-        if (!folders.local.length && !folders.remote.length) {
-            rows.push({ type: "note", text: "Noch kein Suchordner: füge einen Ordner mit deinen Repositories hinzu." });
-        }
-        const repositories = (count) => `${count} ${count === 1 ? "Repository" : "Repositories"}`;
+    const repositories = (count) => `${count} ${count === 1 ? "Repository" : "Repositories"}`;
+    if (folders && (folders.canAddLocal || folders.local.length)) {
+        rows.push({ type: "section", text: "Lokale Suchordner" });
+        if (!folders.local.length) rows.push({ type: "note", text: "Noch kein lokaler Suchordner eingerichtet." });
         folders.local.forEach((folder) => {
-            let detail = `Lokal · ${repositories(folder.repos)}`;
+            let detail = repositories(folder.repos);
             let level = "ok";
             if (!folder.exists) { detail = "⚠︎ Ordner nicht gefunden"; level = "warn"; }
             else if (folder.truncated) { detail += " · ⚠︎ Ordner sehr groß, Suche abgebrochen"; level = "warn"; }
-            else if (!folder.repos) { detail = "Lokal · ⚠︎ keine Repositories gefunden"; level = "warn"; }
+            else if (!folder.repos) { detail = "⚠︎ keine Repositories gefunden"; level = "warn"; }
             // Quick-Öffnen: das Kästchen legt einen Shortcut auf dem Schreibtisch an (oder entfernt ihn). Ein Doppelklick darauf
             // zeigt die Repositories dieses Ordners zum Ankreuzen und öffnet sie.
             if (folder.quickOpen && folder.shortcut && level === "ok") detail += ` · Schreibtisch: „${folder.shortcut}“`;
@@ -840,19 +916,25 @@ function dashboardModel(state) {
             buttons.push({ label: "Entfernen", action: { action: "removeFolder", kind: "local", path: folder.path, label: folder.path } });
             rows.push({ type: "item", title: folder.path, detail, level, middle: true, buttons });
         });
+        if (folders.canAddLocal) {
+            rows.push({ type: "footer", buttons: [{ label: "Ordner hinzufügen…", action: { action: "addFolder" } }] });
+        }
+    }
+    if (folders && (folders.canAddRemote || folders.remote.length)) {
+        rows.push({ type: "section", text: "Remote-Suchordner" });
+        if (!folders.remote.length) rows.push({ type: "note", text: "Noch kein Suchordner auf einem SSH-Host eingerichtet." });
         folders.remote.forEach((folder) => rows.push({
             type: "item", title: `${folder.host}:${folder.root}`, middle: true,
-            detail: folder.repos ? `SSH · ${repositories(folder.repos)} (zuletzt gefunden)` : "SSH · ⚠︎ noch keine Repositories gefunden",
+            detail: folder.repos ? `${repositories(folder.repos)} (zuletzt gefunden)` : "⚠︎ noch keine Repositories gefunden",
             level: folder.repos ? "ok" : "warn",
             buttons: [{ label: "Entfernen", action: { action: "removeFolder", kind: "remote", host: folder.host,
                 label: `${folder.host}:${folder.root}` } }],
         }));
-        (folders.errors || []).forEach((text) => rows.push({ type: "note", text: `⚠︎ ${text}`, level: "warn" }));
-        const footer = [];
-        if (folders.canAddLocal) footer.push({ label: "Ordner hinzufügen…", action: { action: "addFolder" } });
-        if (folders.canAddRemote) footer.push({ label: "Remote-Ordner hinzufügen…", action: { action: "addRemoteFolder" } });
-        if (footer.length) rows.push({ type: "footer", buttons: footer });
+        if (folders.canAddRemote) {
+            rows.push({ type: "footer", buttons: [{ label: "Remote-Ordner hinzufügen…", action: { action: "addRemoteFolder" } }] });
+        }
     }
+    ((folders && folders.errors) || []).forEach((text) => rows.push({ type: "note", text: `⚠︎ ${text}`, level: "warn" }));
 
     const presets = state.presets;
     if (presets && presets.available) {
@@ -891,45 +973,177 @@ function dashboardModel(state) {
             rows.push({ type: "footer", buttons: [{ label: "Preset anlegen…", action: { action: "newPreset" } }] });
         }
     }
+    const other = state.entries.filter((entry) => entry.id !== "local");
+    if (other.length) rows.push({ type: "section", text: "Weitere Werkzeuge" }, ...other.map(moduleRow));
+    if (!rows.length) rows.push({ type: "note", text: "Die Module für Suchordner und Presets sind nicht verfügbar." });
+    return rows;
+}
 
-    // Ein Bereich „Remote“: SSH-Verbindungen und Tailscale gehören zusammen (Tailscale ist der Weg zum anderen Mac, SSH die Verbindung).
-    const hasSsh = Boolean(state.ssh && state.ssh.available);
-    const hasTailscale = Boolean(state.tailscale && state.tailscale.available);
-    if (hasSsh || hasTailscale) rows.push({ type: "section", text: "Remote" });
-    if (hasSsh) {
-        const items = sshItems(state.ssh);
-        if (!items.length) rows.push({ type: "note", text: "Noch keine Verbindung eingerichtet." });
-        items.forEach((item) => rows.push({
-            type: "item", title: item.title, detail: item.detail, level: "ok",
-            buttons: [{ label: "Verbinden", action: { action: "connect", item } }],
-        }));
-        (state.ssh.errors || []).forEach((text) => rows.push({ type: "note", text: `⚠︎ ${text}`, level: "warn" }));
-        const footer = [{ label: "Neue Verbindung…", action: { action: "sshNew" } }];
-        if (state.ssh.share) footer.push({ label: "Diesen Mac freigeben…", action: { action: "sshShare" } });
-        rows.push({ type: "footer", buttons: footer });
+// Gehört dieser Host (Name, MagicDNS-Name oder Adresse) zu einem Gerät aus Tailscale? Das gibt den Punkt eines Ziels her, ohne dass das
+// Fenster einen SSH-Host kontaktiert: online/offline kommt aus dem Tailnet. Ohne laufendes Tailscale oder ohne Treffer: kein Gerät.
+function tailnetDevice(tailscale, host) {
+    const wanted = String(host || "").trim().toLowerCase().replace(/\.$/, "");
+    if (!wanted || !tailscale || !tailscale.available || tailscale.state !== "running") return null;
+    const bare = wanted.replace(/\.local$/, "");
+    return (tailscale.devices || []).find((device) => {
+        const dns = String(device.dns || "").toLowerCase().replace(/\.$/, "");
+        return wanted === dns || wanted === device.ip || bare === String(device.name || "").toLowerCase();
+    }) || null;
+}
+
+// Punkt = Zustand jetzt: grün online, grau offline (beides aus dem Tailnet), keiner, wenn das Ziel nicht im Tailnet steht.
+// Wer erreichbar ist, steht oben; sonst bleibt die Reihenfolge, in der die Ziele eingerichtet wurden.
+function targetRows(ssh, tailscale) {
+    const entries = sshItems(ssh).map((item, index) => {
+        const device = tailnetDevice(tailscale, item.name);
+        return { item, index, device, rank: device ? (device.online ? 0 : 2) : 1 };
+    });
+    entries.sort((a, b) => a.rank - b.rank || a.index - b.index);
+    return entries.map(({ item, device }) => ({
+        type: "item", title: item.title, level: device ? (device.online ? "ok" : "off") : "none",
+        detail: [item.detail, device ? `${device.online ? "online" : "offline"} im Tailnet` : ""].filter(Boolean).join(" · "),
+        buttons: [{ label: "Verbinden", primary: true, action: { action: "connect", item } }],
+    }));
+}
+
+// Remote nach Richtung: erst das Netz (Tailscale), dann „von hier zu anderen“, dann „von anderen auf diesen Mac“. Ein Punkt steht nur
+// für einen Zustand, der gerade stimmt (verbunden, online, wachgehalten). Einstellungen, Freigaben und Aktionen haben keinen Punkt.
+function remoteRows(state) {
+    const ssh = state.ssh;
+    const tailscale = state.tailscale;
+    const hasSsh = Boolean(ssh && ssh.available);
+    const running = tailscale && tailscale.available && tailscale.state === "running";
+    const hasDevices = running && (tailscale.devices || []).length;
+    const rows = tailscale && tailscale.available ? tailscaleRows(tailscale) : [];
+
+    const setup = [];
+    if (hasDevices) setup.push({ label: "Gerät per SSH verbinden…", action: { action: "tailscaleConnectDevice" } });
+    if (ssh && ssh.share) setup.push({ label: "Neue Verbindung…", action: { action: "sshNew" } });
+    if (ssh && ssh.guided) setup.push({ label: "Geführte Einrichtung…", action: { action: "sshGuide" } });
+    if (hasSsh || setup.length) {
+        rows.push({ type: "section", text: "Verbindungen von diesem Mac" });
+        const targets = hasSsh ? targetRows(ssh, tailscale) : [];
+        if (targets.length) rows.push(...targets);
+        else rows.push({ type: "note", text: "Noch keine Verbindung zu einem anderen Mac oder Server eingerichtet." });
+        if (setup.length) rows.push({ type: "footer", buttons: setup });
     }
 
-    if (hasTailscale) tailscaleRows(state.tailscale).forEach((row) => rows.push(row));
+    if ((ssh && ssh.share) || running) {
+        rows.push({ type: "section", text: "Zugriff auf diesen Mac" });
+        const grants = (ssh && ssh.grants) || [];
+        if (!grants.length && ssh && ssh.share) rows.push({ type: "note", text: "Keine SSH-Schlüssel freigegeben." });
+        grants.forEach((grant) => rows.push({
+            type: "item", title: grant.name, detail: "SSH-Schlüssel freigegeben", level: "none",
+            buttons: [{ label: "Widerrufen…", action: { action: "sshRevoke", grant } }],
+        }));
+        const buttons = [];
+        if (ssh && ssh.share) buttons.push({ label: "Diesen Mac freigeben…", action: { action: "sshShare" } });
+        if (running) buttons.push({ label: "Einladungen abholen", action: { action: "tailscaleInbox" } });
+        rows.push({ type: "footer", buttons });
+    }
+    ((ssh && ssh.errors) || []).forEach((text) => rows.push({ type: "note", text: `⚠︎ ${text}`, level: "warn" }));
+    if (!rows.length) rows.push({ type: "note", text: "Für Remote steht kein Modul zur Verfügung." });
+    return rows;
+}
 
-    const wake = state.settings && state.settings.wake;
-    if (wake || state.entries.length) {
-        rows.push({ type: "section", text: "App-Einstellungen" });
-        if (wake) {
-            rows.push({ type: "item", title: "Wachhalten & Apps", detail: wake.text, level: wake.level,
-                buttons: (typeof wake.enabled === "boolean"
-                    ? [{ label: wake.enabled ? "Ausschalten" : "Einschalten",
-                        action: { action: "setting", name: "keep-awake", enabled: !wake.enabled } }] : [])
-                    .concat([{ label: "Apps wählen…", action: { action: "open", id: "remote" } }]) });
-            rows.push({ type: "note", text: "Ein: Mac bleibt wach, gewählte Apps starten. Aus: gewählte Apps werden beendet." });
-        }
-        state.entries.forEach((entry) => rows.push({
-            type: "item", title: entry.title, detail: entry.status ? entry.status.text : "",
-            level: entry.status ? entry.status.level : "none",
-            buttons: (entry.id === "local" ? [{ label: "Einstellen…", action: { action: "localSetup" } }] : [])
-                .concat([{ label: "Öffnen", action: { action: "open", id: entry.id } }]),
+function wakeButton(wake, name, enabled) {
+    return typeof wake.enabled === "boolean"
+        ? [{ label: enabled ? "Ausschalten" : "Einschalten", action: { action: "setting", name, enabled: !enabled } }]
+        : [];
+}
+
+function wakeRows(wake) {
+    const withApps = wake.withApps !== false;
+    const wakeOnly = wake.enabled && !withApps;
+    const appsRunning = wake.enabled && withApps;
+    const apps = (wake.apps || []).join(" · ");
+    return [
+        { type: "item", title: "Nur wachhalten", level: wakeOnly || wake.enabled === null ? wake.level : "off",
+            detail: wake.level === "warn" && !appsRunning ? wake.text : wakeOnly ? "Aktiv" : "",
+            buttons: wakeButton(wake, "keep-awake", wakeOnly) },
+        { type: "item", title: "Wachhalten mit Apps", level: appsRunning ? wake.level : "off",
+            detail: appsRunning && wake.level === "warn" ? wake.text : apps || "Keine Apps ausgewählt",
+            buttons: wakeButton(wake, "keep-awake-apps", appsRunning)
+                .concat([{ label: "Apps wählen…", action: { action: "open", id: "remote" } }]) },
+    ];
+}
+
+function moduleRow(entry) {
+    return {
+        type: "item", title: entry.title, detail: entry.status ? entry.status.text : "",
+        level: entry.status ? entry.status.level : "none",
+        buttons: (entry.id === "local" ? [{ label: "Einstellen…", action: { action: "localSetup" } }] : [])
+            .concat([{ label: "Öffnen", action: { action: "open", id: entry.id } }]),
+    };
+}
+
+// Ollama nennt Größen dezimal (GB = 10^9 Byte).
+function modelSize(bytes) {
+    if (!Number.isFinite(bytes) || bytes <= 0) return "";
+    return bytes >= 1e9 ? `${(bytes / 1e9).toFixed(1).replace(".", ",")} GB` : `${Math.max(1, Math.round(bytes / 1e6))} MB`;
+}
+
+// Installierte und noch nicht geladene Modelle. Laden und Entfernen gehen nur mit gefundenem Ollama. Ein Punkt gäbe hier nichts her:
+// „installiert“ ist kein Zustand, der sich ändert, während man hinsieht.
+function modelRows(models) {
+    if (!models || !models.available) return [];
+    const rows = [{ type: "section", text: "Ollama-Modelle" }];
+    if (models.error) rows.push({ type: "note", text: `⚠︎ ${models.error}`, level: "warn" });
+    else if (!models.cli) rows.push({ type: "note", text: "Ollama wurde nicht gefunden. Laden und Entfernen gehen, sobald es installiert ist (ollama.com).", level: "warn" });
+    else if (!models.models.length) rows.push({ type: "note", text: "Noch kein Ollama-Modell geladen." });
+    models.models.forEach((model) => rows.push({
+        type: "item", title: model.name, level: "none", middle: true,
+        detail: [modelSize(model.size), model.modified ? `geladen ${String(model.modified).slice(0, 10)}` : ""].filter(Boolean).join(" · "),
+        buttons: models.cli ? [{ label: "Entfernen…", action: { action: "modelRemove", name: model.name } }] : [],
+    }));
+    rows.push({ type: "footer", buttons: (models.cli ? [{ label: "Modell laden…", action: { action: "modelPullAsk" } }] : [])
+        .concat([{ label: "Aktualisieren", action: { action: "refresh" } }]) });
+    if (models.missing.length) {
+        rows.push({ type: "section", text: "Noch nicht geladen" });
+        models.missing.forEach((model) => rows.push({
+            type: "item", title: model.name, level: "none", middle: true,
+            detail: model.why === "eingestellt" ? "In Local Dev eingestellt, aber nicht geladen" : ["Vorschlag", model.note].filter(Boolean).join(" · "),
+            buttons: models.cli ? [{ label: "Laden…", action: { action: "modelPull", name: model.name } }] : [],
         }));
     }
     return rows;
+}
+
+// Gespeicherte Paare aus Modell und CLI. Der Preset-Editor (Projekte) bietet sie als Terminal an. Ein Ollama-Modell, das noch nicht
+// geladen ist, wird beim ersten Start geladen (mehrere GB im Terminal): das zeigt die Zeile vorher.
+function comboRows(state) {
+    const combos = state.combos;
+    if (!combos) return [];
+    const rows = [{ type: "section", text: "Kombinationen aus Modell und CLI" }];
+    if (combos.error) rows.push({ type: "note", text: `⚠︎ ${combos.error}`, level: "warn" });
+    else if (!combos.items.length) rows.push({ type: "note", text: "Noch keine Kombination. Gespeicherte erscheinen unter Projekte im Preset-Editor als Terminal." });
+    const installed = state.models && state.models.available && !state.models.error ? state.models.models.map((model) => model.name) : null;
+    combos.items.forEach((combo) => {
+        const missing = combo.provider === "ollama" && installed !== null && !installed.includes(combo.model);
+        rows.push({
+            type: "item", title: comboLabel(combo), middle: true, level: missing ? "warn" : "none",
+            detail: [PROVIDER_NAMES[combo.provider] || combo.provider, missing ? "Modell noch nicht geladen (wird beim ersten Start geladen)" : ""].filter(Boolean).join(" · "),
+            buttons: [{ label: "Entfernen", action: { action: "comboRemove", combo } }],
+        });
+    });
+    if (!combos.error) rows.push({ type: "footer", buttons: [{ label: "Kombination anlegen…", action: { action: "comboAdd" } }] });
+    return rows;
+}
+
+function localDevRows(state) {
+    const local = state.entries.find((entry) => entry.id === "local");
+    return local
+        ? [{ type: "section", text: "Anbieter, Modell und CLI" }, moduleRow(local), ...modelRows(state.models), ...comboRows(state)]
+        : [{ type: "note", text: "Das Local-Dev-Modul ist nicht verfügbar." }];
+}
+
+function dashboardModel(state) {
+    return [
+        { id: "workspaces", label: "Workspaces", rows: workspaceRows(state) },
+        { id: "projects", label: "Projekte", rows: projectRows(state) },
+        { id: "remote", label: "Remote", rows: remoteRows(state) },
+        { id: "localDev", label: "Local Dev", rows: localDevRows(state) },
+    ];
 }
 
 // ---------------------------------------------------------------- Widgets
@@ -1028,23 +1242,49 @@ function collectEdit(built) {
     return result;
 }
 
-function buildLocalDevSetting(choices) {
+function buildLocalDevSetting(choices, kind) {
     const popup = $.NSPopUpButton.alloc.initWithFramePullsDown($.NSMakeRect(0, 0, 540, 26), false);   // breit: die Hinweise stehen am Ende
     choices.forEach((choice) => popup.addItemWithTitle($(choice.label)));
     const current = choices.findIndex((choice) => choice.selected);
     popup.selectItemAtIndex(current >= 0 ? current : 0);
     const alert = $.NSAlert.alloc.init;
-    alert.messageText = $("Local Dev einstellen");
-    alert.informativeText = $("Das ist die Vorauswahl beim Start von Local Dev: Anbieter (MLX oder Ollama), Modell und CLI " +
-        "(OpenCode, Codex, Claude). Nicht installierte Einträge lassen sich einstellen und starten, sobald sie installiert sind. " +
-        "Für einen einzelnen Workspace wählst du Local Dev im Dialog des Workspaces.");
+    alert.messageText = $(kind === "combo" ? "Kombination anlegen" : "Local Dev einstellen");
+    alert.informativeText = $(kind === "combo"
+        ? "Eine Kombination aus Anbieter, Modell und CLI. Der Preset-Editor unter Projekte bietet sie danach als Terminal an; " +
+          "das Terminal startet den lokalen Modellserver und darauf die CLI im Repository."
+        : "Das ist die Vorauswahl beim Start von Local Dev: Anbieter (MLX oder Ollama), Modell und CLI " +
+          "(OpenCode, Codex, Claude). Nicht installierte Einträge lassen sich einstellen und starten, sobald sie installiert sind. " +
+          "Für einen einzelnen Workspace wählst du Local Dev im Dialog des Workspaces.");
     alert.accessoryView = popup;
-    alert.addButtonWithTitle($("Speichern"));
+    alert.addButtonWithTitle($(kind === "combo" ? "Anlegen" : "Speichern"));
     alert.addButtonWithTitle($("Abbrechen"));
     return { alert, popup, choices };
 }
 
-function buildPresetEditor(repo, draft, custom, note) {
+// Die Auswahl „Terminal“: „–“, die festen Typen, dann die gespeicherten Kombinationen als „Local Dev · Modell → CLI“. Ein Local-Dev-
+// Terminal im Preset, dessen Kombination nicht (mehr) gespeichert ist, bleibt als eigener Eintrag stehen: Speichern löscht es nie still.
+function localDevItems(draft, combos) {
+    const used = new Set(PRESET_TYPES.concat(["–"]));
+    const unique = (text) => {
+        let result = text;
+        for (let n = 2; used.has(result); n += 1) result = `${text} (${n})`;   // NSPopUpButton ersetzt gleiche Titel
+        used.add(result);
+        return result;
+    };
+    const items = (combos || []).map((combo) => ({ prompt: comboPrompt(combo),
+        title: unique(`Local Dev · ${comboLabel(combo)} · ${PROVIDER_NAMES[combo.provider] || combo.provider}`) }));
+    draft.terminals.filter((terminal) => terminal.type === "Local Dev").forEach((terminal) => {
+        if (!items.some((item) => item.prompt === terminal.prompt)) {
+            const [provider, model, framework] = terminal.prompt.split(" ");
+            items.push({ prompt: terminal.prompt,
+                title: unique(`Local Dev · ${comboLabel({ model, framework })} · ${PROVIDER_NAMES[provider] || provider} (nicht gespeichert)`) });
+        }
+    });
+    return items;
+}
+
+function buildPresetEditor(repo, draft, custom, note, combos) {
+    const localItems = localDevItems(draft, combos);
     const count = Math.max(PRESET_ROWS.min, Math.min(PRESET_ROWS.max, draft.terminals.length));
     const rowHeight = 28;
     const total = 20 + count * rowHeight + 12 + 18 + 4 + 24;
@@ -1057,8 +1297,12 @@ function buildPresetEditor(repo, draft, custom, note) {
         const terminal = draft.terminals[index];
         const y = total - 20 - (index + 1) * rowHeight + 2;
         const popup = $.NSPopUpButton.alloc.initWithFramePullsDown($.NSMakeRect(0, y, 130, 24), false);
-        ["–"].concat(PRESET_TYPES).forEach((type) => popup.addItemWithTitle($(type)));
-        if (terminal) popup.selectItemWithTitle($(terminal.type));
+        ["–"].concat(PRESET_TYPES, localItems.map((item) => item.title)).forEach((type) => popup.addItemWithTitle($(type)));
+        if (terminal && terminal.type === "Local Dev") {
+            popup.selectItemAtIndex(1 + PRESET_TYPES.length + localItems.findIndex((item) => item.prompt === terminal.prompt));
+        } else if (terminal) {
+            popup.selectItemWithTitle($(terminal.type));
+        }
         const placement = $.NSPopUpButton.alloc.initWithFramePullsDown($.NSMakeRect(650, y, 130, 24), false);
         PRESET_PLACEMENTS.forEach(({ label: title }) => placement.addItemWithTitle($(title)));
         const selected = PRESET_PLACEMENTS.findIndex((option) => option.value === terminal?.placement);
@@ -1073,7 +1317,7 @@ function buildPresetEditor(repo, draft, custom, note) {
         view.addSubview(popup);
         view.addSubview(placement);
         rows.push({ popup, placement, name: field(140, 110, terminal && terminal.name, "Name"),
-            prompt: field(260, 250, terminal && terminal.prompt, "leer = ohne Vorgabe"),
+            prompt: field(260, 250, terminal && terminal.type !== "Local Dev" ? terminal.prompt : "", "leer = ohne Vorgabe (bei Local Dev: aus der Kombination)"),
             cwd: field(520, 120, terminal && terminal.cwd, "z. B. frontend") });
     }
     const tabsY = 0;
@@ -1087,19 +1331,22 @@ function buildPresetEditor(repo, draft, custom, note) {
         ? "Welche Terminals und Browser-Tabs starten für jedes Repository, das kein eigenes Preset hat? Ein Unterordner, den ein Repository nicht hat, wird dort übersprungen (Start im Repository-Ordner). "
         : "Welche Terminals und Browser-Tabs starten für dieses Repository? ";
     alert.informativeText = $(note || `${scope}Typ „–“ lässt die Zeile aus. ` +
-        "Claude Code und Antigravity starten ohne Sicherheitsabfragen, beide Codex-Profile mit vollem Zugriff ohne Sandbox.");
+        "Claude Code und Antigravity starten ohne Sicherheitsabfragen, beide Codex-Profile mit vollem Zugriff ohne Sandbox." +
+        (localItems.length ? " „Local Dev · …“ startet den lokalen Modellserver und darauf die CLI, nur auf diesem Mac." : ""));
     alert.accessoryView = view;
     alert.addButtonWithTitle($("Speichern"));
     alert.addButtonWithTitle($("Abbrechen"));
     if (custom) alert.addButtonWithTitle($("Standard wiederherstellen"));
-    return { alert, rows, urls };
+    return { alert, rows, urls, localItems };
 }
 
 function collectPreset(built) {
+    // Eine gewählte Kombination wird zum Typ „Local Dev“ mit „Anbieter Modell CLI“ als Prompt; der Name bleibt, was dasteht.
+    const chosen = (row) => built.localItems[Number(row.popup.indexOfSelectedItem) - 1 - PRESET_TYPES.length];
     return {
-        terminals: built.rows.filter((row) => ObjC.unwrap(row.popup.titleOfSelectedItem) !== "–").map((row) => ({
-            type: ObjC.unwrap(row.popup.titleOfSelectedItem), name: ObjC.unwrap(row.name.stringValue).trim(),
-            prompt: ObjC.unwrap(row.prompt.stringValue), cwd: ObjC.unwrap(row.cwd.stringValue).trim(),
+        terminals: built.rows.filter((row) => Number(row.popup.indexOfSelectedItem) !== 0).map((row) => ({
+            type: chosen(row) ? "Local Dev" : ObjC.unwrap(row.popup.titleOfSelectedItem), name: ObjC.unwrap(row.name.stringValue).trim(),
+            prompt: chosen(row) ? chosen(row).prompt : ObjC.unwrap(row.prompt.stringValue), cwd: ObjC.unwrap(row.cwd.stringValue).trim(),
             placement: PRESET_PLACEMENTS[row.placement.indexOfSelectedItem]?.value,
         })),
         urls: ObjC.unwrap(built.urls.stringValue).split(",").map((url) => url.trim()).filter(Boolean),
@@ -1126,10 +1373,18 @@ function buildTailscaleDevice(note, devices, user) {
     return { alert, popup, user: field };
 }
 
-function buildRemoteFolder(note, draft) {
+// Der Host ist eine Combo-Box: ein Feld zum Tippen (Alias aus ~/.ssh/config oder benutzer@host) mit einer Liste der Geräte, die schon
+// verbunden sind. Ohne bekannte Geräte ist es einfach das Feld wie vorher.
+function buildRemoteFolder(note, draft, known) {
+    const choices = Array.isArray(known) ? known : [];
     const view = $.NSView.alloc.initWithFrame($.NSMakeRect(0, 0, WIDTH, 118));
-    view.addSubview(label("SSH-Host (Alias aus ~/.ssh/config oder benutzer@host)", $.NSMakeRect(0, 100, WIDTH, 18), true));
-    const host = $.NSTextField.alloc.initWithFrame($.NSMakeRect(0, 70, WIDTH, 24));
+    view.addSubview(label(choices.length ? "SSH-Host (Liste öffnen oder Alias / benutzer@host eintippen)"
+        : "SSH-Host (Alias aus ~/.ssh/config oder benutzer@host)", $.NSMakeRect(0, 100, WIDTH, 18), true));
+    const host = $.NSComboBox.alloc.initWithFrame($.NSMakeRect(0, 70, WIDTH, 24));
+    choices.forEach((choice) => host.addItemWithObjectValue($(choice)));
+    host.numberOfVisibleItems = 8;
+    host.hasVerticalScroller = true;
+    host.completes = true;                                  // beim Tippen ergänzt die Liste
     host.stringValue = $(draft.host);
     view.addSubview(host);
     view.addSubview(label("Ordner auf dem Server (leer = Home-Verzeichnis)", $.NSMakeRect(0, 44, WIDTH, 18), true));
@@ -1194,10 +1449,11 @@ function buildShare(share, notice, canInvite) {
 
 // ---------------------------------------------------------------- Übersicht (Widgets)
 
-const PANEL = 640;
+const PANEL = 724;
 const PAD = 20;
-const BUTTON_WIDTH = 112;
+const BUTTON_WIDTH = 90;
 const BAR = 52;
+const TAB_BAR = 48;
 
 // So hoch, wie der Bildschirm es zulässt: die Knöpfe am Ende eines Bereichs sollen nicht erst hinter dem Scrollen liegen.
 function maxContent() {
@@ -1205,12 +1461,13 @@ function maxContent() {
     const available = screen ? Number(screen.visibleFrame.size.height) : 800;
     return Math.max(420, Math.min(780, Math.floor(available - 140)));
 }
-const HEIGHTS = { title: 64, section: 38, item: 52, note: 26, footer: 42 };
+const HEIGHTS = { section: 43, item: 54, note: 29, footer: 44 };
 
 // Knöpfe im Fenster brauchen ein Ziel für ihre Aktion. Das Ergebnis wandert in dashboardAction;
 // danach beendet das Fenster seine modale Schleife.
 let dashboardActions = [];
 let dashboardAction = null;
+let selectDashboardTab;
 ObjC.registerSubclass({
     name: "VibeWorkspaceHandler",
     superclass: "NSObject",
@@ -1220,6 +1477,12 @@ ObjC.registerSubclass({
             implementation: function (sender) {
                 dashboardAction = dashboardActions[Number(sender.tag)] || { action: "close" };
                 $.NSApp.stopModalWithCode(1);
+            },
+        },
+        "selectTab:": {
+            types: ["void", ["id"]],
+            implementation: function (sender) {
+                selectDashboardTab(Number(sender.tag));
             },
         },
         "windowWillClose:": {
@@ -1251,47 +1514,28 @@ function styled(text, frame, options) {
     return field;
 }
 
-function buildDashboard(rows) {
-    const handler = $.VibeWorkspaceHandler.alloc.init;
-    dashboardActions = [];
-    dashboardAction = null;
-    const buttons = [];
-    const total = rows.reduce((sum, row) => sum + HEIGHTS[row.type], 12);
-    const document = $.NSView.alloc.initWithFrame($.NSMakeRect(0, 0, PANEL, total));
-    const makeButton = (title, x, y, width, action, checkbox) => {
-        const view = $.NSButton.alloc.initWithFrame($.NSMakeRect(x, y, width, 26));
-        view.title = $(title);
-        if (checkbox) {
-            view.setButtonType($.NSSwitchButton);
-            view.state = checkbox.checked ? $.NSControlStateValueOn : $.NSControlStateValueOff;
-        } else {
-            view.bezelStyle = $.NSBezelStyleRounded;
-        }
-        view.tag = dashboardActions.length;
-        view.target = handler;
-        view.action = "act:";
-        dashboardActions.push(action);
-        buttons.push({ view, title, action });
-        return view;
-    };
-
-    let y = total;
+function dashboardPage(rows, total, frame, makeButton) {
+    const scroll = $.NSScrollView.alloc.initWithFrame(frame);
+    scroll.hasVerticalScroller = total > Number(frame.size.height);
+    scroll.drawsBackground = false;
+    scroll.borderType = $.NSNoBorder;
+    const width = Number(scroll.contentSize.width);
+    const documentHeight = Math.max(total, Number(scroll.contentSize.height));
+    const document = $.NSView.alloc.initWithFrame($.NSMakeRect(0, 0, width, documentHeight));
+    const inner = width - 2 * PAD;
+    const buttonWidth = (button) => Math.max(BUTTON_WIDTH, button.label.length * 7 + 28);
+    let y = documentHeight - 6;
     rows.forEach((row) => {
         const height = HEIGHTS[row.type];
         y -= height;
-        const inner = PANEL - 2 * PAD;
-        if (row.type === "title") {
-            document.addSubview(styled(row.text, $.NSMakeRect(PAD, y + height - 38, inner, 28), { bold: true, size: 20 }));
-            document.addSubview(styled(row.sub, $.NSMakeRect(PAD, y + height - 60, inner, 18),
-                { color: $.NSColor.secondaryLabelColor }));
-        } else if (row.type === "section") {
-            document.addSubview(styled(row.text, $.NSMakeRect(PAD, y + 12, inner, 18), { bold: true, size: 13 }));
+        if (row.type === "section") {
+            document.addSubview(styled(row.text, $.NSMakeRect(PAD, y + 12, inner, 21), { bold: true, size: 15 }));
             const line = $.NSBox.alloc.initWithFrame($.NSMakeRect(PAD, y + 6, inner, 1));
             line.boxType = $.NSBoxSeparator;
             document.addSubview(line);
         } else if (row.type === "item") {
-            const count = row.buttons.length;
-            const textWidth = Math.max(120, PANEL - 2 * PAD - 20 - count * (BUTTON_WIDTH + 8));
+            const actionsWidth = row.buttons.reduce((sum, button) => sum + buttonWidth(button) + 8, 0);
+            const textWidth = inner - 20 - actionsWidth;
             // Mit Detailzeile oben, ohne Detailzeile mittig neben den Knöpfen.
             const titleY = row.detail ? y + height - 28 : y + (height - 16) / 2;
             const dotY = row.detail ? y + height - 30 : y + (height - 18) / 2;
@@ -1304,10 +1548,11 @@ function buildDashboard(rows) {
                 document.addSubview(styled(row.detail, $.NSMakeRect(PAD + 20, y + height - 46, textWidth, 15),
                     { size: 11, color: $.NSColor.secondaryLabelColor, truncate: true }));
             }
-            row.buttons.forEach((button, index) => {
-                const x = PANEL - PAD - BUTTON_WIDTH - (count - 1 - index) * (BUTTON_WIDTH + 8);
-                document.addSubview(makeButton(button.label, x, y + (height - 26) / 2, BUTTON_WIDTH, button.action,
-                    button.checkbox ? button : null));
+            let x = width - PAD - actionsWidth + 8;
+            row.buttons.forEach((button) => {
+                const size = buttonWidth(button);
+                document.addSubview(makeButton(button, x, y + (height - 26) / 2, size));
+                x += size + 8;
             });
         } else if (row.type === "note") {
             document.addSubview(styled(row.text, $.NSMakeRect(PAD + 20, y + 4, inner - 20, 18),
@@ -1315,34 +1560,99 @@ function buildDashboard(rows) {
         } else if (row.type === "footer") {
             let x = PAD + 20;
             row.buttons.forEach((button) => {
-                const width = Math.max(BUTTON_WIDTH, button.label.length * 8 + 28);
-                document.addSubview(makeButton(button.label, x, y + 8, width, button.action));
-                x += width + 8;
+                const size = buttonWidth(button);
+                document.addSubview(makeButton(button, x, y + 8, size));
+                x += size + 8;
             });
         }
     });
+    scroll.documentView = document;
+    scroll.contentView.scrollToPoint($.NSMakePoint(0, documentHeight - Number(scroll.contentSize.height)));
+    return scroll;
+}
 
-    const visible = Math.min(total, maxContent());
+function buildDashboard(pages, selected = "workspaces") {
+    const handler = $.VibeWorkspaceHandler.alloc.init;
+    dashboardActions = [];
+    dashboardAction = null;
+    const buttons = [];
+    const makeButton = (button, x, y, width) => {
+        const view = $.NSButton.alloc.initWithFrame($.NSMakeRect(x, y, width, 26));
+        view.title = $(button.label);
+        if (button.checkbox) {
+            view.setButtonType($.NSSwitchButton);
+            view.state = button.checked ? $.NSControlStateValueOn : $.NSControlStateValueOff;
+        } else {
+            view.bezelStyle = $.NSBezelStyleRounded;
+            if (button.primary) {
+                view.bezelColor = $.NSColor.controlAccentColor;
+                view.font = $.NSFont.boldSystemFontOfSize(12);
+            }
+        }
+        view.tag = dashboardActions.length;
+        view.target = handler;
+        view.action = "act:";
+        dashboardActions.push(button.action);
+        buttons.push({ view, title: button.label, action: button.action });
+        return view;
+    };
+    const totals = pages.map((page) => page.rows.reduce((sum, row) => sum + HEIGHTS[row.type], 18));
+    const total = Math.max(...totals);
+    const visible = Math.min(Math.max(320, total), maxContent() - TAB_BAR);
     const window = $.NSWindow.alloc.initWithContentRectStyleMaskBackingDefer(
-        $.NSMakeRect(0, 0, PANEL, visible + BAR), $.NSWindowStyleMaskTitled | $.NSWindowStyleMaskClosable,
+        $.NSMakeRect(0, 0, PANEL, visible + TAB_BAR + BAR), $.NSWindowStyleMaskTitled | $.NSWindowStyleMaskClosable,
         $.NSBackingStoreBuffered, false);
     window.title = $("VibeCode Workspace");
     window.releasedWhenClosed = false;
     window.delegate = handler;
-    const scroll = $.NSScrollView.alloc.initWithFrame($.NSMakeRect(0, BAR, PANEL, visible));
-    scroll.hasVerticalScroller = true;
-    scroll.drawsBackground = false;
-    scroll.borderType = $.NSNoBorder;
-    scroll.documentView = document;
-    scroll.contentView.scrollToPoint($.NSMakePoint(0, Math.max(0, total - visible)));
-    window.contentView.addSubview(scroll);
-    const bar = $.NSBox.alloc.initWithFrame($.NSMakeRect(0, BAR - 1, PANEL, 1));
-    bar.boxType = $.NSBoxSeparator;
-    window.contentView.addSubview(bar);
-    const close = makeButton("Schließen", PANEL - PAD - BUTTON_WIDTH, 13, BUTTON_WIDTH, { action: "close" });
+    const tabs = $.NSTabView.alloc.initWithFrame($.NSMakeRect(0, BAR, PANEL, visible));
+    tabs.tabViewType = $.NSNoTabsNoBorder;
+    const content = tabs.contentRect;
+    const frame = $.NSMakeRect(0, 0, content.size.width, content.size.height);
+    pages.forEach((page, index) => {
+        const tab = $.NSTabViewItem.alloc.initWithIdentifier($(page.id));
+        tab.label = $(page.label);
+        tab.view = dashboardPage(page.rows, totals[index], frame, makeButton);
+        tabs.addTabViewItem(tab);
+    });
+    window.contentView.addSubview(tabs);
+
+    const tabY = BAR + visible;
+    const rule = $.NSBox.alloc.initWithFrame($.NSMakeRect(PAD, tabY, PANEL - 2 * PAD, 1));
+    rule.boxType = $.NSBoxSeparator;
+    window.contentView.addSubview(rule);
+    const segmentWidth = Math.floor((PANEL - 2 * PAD) / pages.length);
+    const navigation = pages.map((page, index) => {
+        const x = PAD + index * segmentWidth;
+        const view = $.NSButton.alloc.initWithFrame($.NSMakeRect(x, tabY + 6, segmentWidth, 36));
+        view.title = $(page.label);
+        view.bordered = false;
+        view.setButtonType($.NSPushOnPushOffButton);
+        view.target = handler;
+        view.action = "selectTab:";
+        view.tag = index;
+        const indicator = $.NSBox.alloc.initWithFrame($.NSMakeRect(x + 12, tabY, segmentWidth - 24, 3));
+        indicator.boxType = $.NSBoxCustom;
+        indicator.borderWidth = 0;
+        indicator.fillColor = $.NSColor.controlAccentColor;
+        window.contentView.addSubview(view);
+        window.contentView.addSubview(indicator);
+        return { view, indicator };
+    });
+    selectDashboardTab = (index) => {
+        tabs.selectTabViewItemAtIndex(index);
+        navigation.forEach(({ view, indicator }, i) => {
+            const active = i === index;
+            view.state = active ? $.NSControlStateValueOn : $.NSControlStateValueOff;
+            view.font = active ? $.NSFont.boldSystemFontOfSize(14) : $.NSFont.systemFontOfSize(14);
+            indicator.hidden = !active;
+        });
+    };
+    selectDashboardTab(Math.max(0, pages.findIndex((page) => page.id === selected)));
+    const close = makeButton({ label: "Schließen", action: { action: "close" } }, PANEL - PAD - BUTTON_WIDTH, 13, BUTTON_WIDTH);
     close.keyEquivalent = $("\u001b");
     window.contentView.addSubview(close);
-    return { window, buttons, total };
+    return { window, buttons, tabs, navigation, total };
 }
 
 // Einziger Ort, an dem die Übersicht wirklich angezeigt wird; Tests ersetzen ihn.
@@ -1351,15 +1661,21 @@ function presentDashboard(built) {
     const application = $.NSApplication.sharedApplication;
     application.activateIgnoringOtherApps(true);
     built.window.center;
+    // Die App-Aktivierung ist eine Anfrage. Die Übersicht soll trotzdem vor dem Startterminal liegen.
+    built.window.orderFrontRegardless;
     application.runModalForWindow(built.window);
     built.window.orderOut(null);
     return dashboardAction || { action: "close" };
 }
 
 function nativeUi(app) {
+    let selectedTab = "workspaces";
     return {
         dashboard(state) {
-            return presentDashboard(buildDashboard(dashboardModel(state)));
+            const built = buildDashboard(dashboardModel(state), selectedTab);
+            const choice = presentDashboard(built);
+            selectedTab = ObjC.unwrap(built.tabs.selectedTabViewItem.identifier);
+            return choice;
         },
         edit(state, draft, existing, message, local) {
             let note = message;
@@ -1375,8 +1691,8 @@ function nativeUi(app) {
                 else return current;
             }
         },
-        pickLocalDev(choices) {
-            const built = buildLocalDevSetting(choices);
+        pickLocalDev(choices, kind) {
+            const built = buildLocalDevSetting(choices, kind);
             const response = present(built.alert, built);
             if (!isButton(response, $.NSAlertFirstButtonReturn)) return null;
             return built.choices[Number(built.popup.indexOfSelectedItem)].value;
@@ -1461,8 +1777,17 @@ function nativeUi(app) {
             alert.addButtonWithTitle($("Abbrechen"));
             return isButton(present(alert, null), $.NSAlertFirstButtonReturn);
         },
-        editPreset(repo, draft, custom, note) {
-            const built = buildPresetEditor(repo, draft, custom, note);
+        confirmRevoke(name, fingerprint) {
+            const alert = $.NSAlert.alloc.init;
+            alert.messageText = $("SSH-Freigabe widerrufen?");
+            alert.informativeText = $(`Name: ${name}\nFingerprint: ${fingerprint}\n\nNeue Anmeldungen über diese Freigabe sind danach gesperrt. Laufende SSH-Sitzungen bleiben offen.`);
+            alert.alertStyle = $.NSAlertStyleWarning;
+            alert.addButtonWithTitle($("Abbrechen"));
+            alert.addButtonWithTitle($("Widerrufen"));
+            return isButton(present(alert, null), $.NSAlertSecondButtonReturn);
+        },
+        editPreset(repo, draft, custom, note, combos) {
+            const built = buildPresetEditor(repo, draft, custom, note, combos);
             const response = present(built.alert, built);
             if (isButton(response, $.NSAlertSecondButtonReturn)) return null;
             if (isButton(response, $.NSAlertThirdButtonReturn) && custom) return { reset: true };
@@ -1502,11 +1827,11 @@ function nativeUi(app) {
                 throw error;
             }
         },
-        askRemoteFolder(note, suggestedHost) {
+        askRemoteFolder(note, suggestedHost, known) {
             let message = note;
             let draft = { host: suggestedHost || "", root: "" };
             for (;;) {
-                const built = buildRemoteFolder(message, draft);
+                const built = buildRemoteFolder(message, draft, known);
                 const response = present(built.alert, built);
                 if (!isButton(response, $.NSAlertFirstButtonReturn)) return null;
                 draft = { host: ObjC.unwrap(built.host.stringValue).trim(), root: ObjC.unwrap(built.root.stringValue).trim() };
@@ -1583,6 +1908,43 @@ function nativeUi(app) {
             alert.addButtonWithTitle($(texts[2]));
             alert.addButtonWithTitle($("Abbrechen"));
             return isButton(present(alert, null), $.NSAlertFirstButtonReturn);
+        },
+        confirmModelPull(name) {
+            const alert = $.NSAlert.alloc.init;
+            alert.messageText = $(`Modell „${name}“ laden?`);
+            alert.informativeText = $("Ein Terminal öffnet sich und lädt das Modell mit „ollama pull“. Das kann mehrere GB groß sein und " +
+                "dauert, bis es fertig ist. Danach hier unter Local Dev auf „Aktualisieren“ klicken.");
+            alert.addButtonWithTitle($("Laden"));
+            alert.addButtonWithTitle($("Abbrechen"));
+            return isButton(present(alert, null), $.NSAlertFirstButtonReturn);
+        },
+        confirmModelRemove(name) {
+            const alert = $.NSAlert.alloc.init;
+            alert.messageText = $(`Modell „${name}“ entfernen?`);
+            alert.informativeText = $("Das Modell wird von dieser Platte gelöscht. Zum erneuten Verwenden muss es wieder geladen werden. " +
+                "Kombinationen und Terminals, die es nennen, bleiben gespeichert und warten dann auf das Modell.");
+            alert.alertStyle = $.NSAlertStyleWarning;
+            alert.addButtonWithTitle($("Abbrechen"));
+            alert.addButtonWithTitle($("Entfernen"));
+            return isButton(present(alert, null), $.NSAlertSecondButtonReturn);
+        },
+        // Ein Modellname zum Laden (jeder Name aus der Ollama-Bibliothek). Ergebnis: der Name oder null.
+        askModelName() {
+            let note = "";
+            for (;;) {
+                const field = $.NSTextField.alloc.initWithFrame($.NSMakeRect(0, 0, WIDTH, 24));
+                field.placeholderString = $("zum Beispiel qwen2.5-coder:7b");
+                const alert = $.NSAlert.alloc.init;
+                alert.messageText = $("Ollama-Modell laden");
+                alert.informativeText = $(note || "Name wie bei „ollama pull“. Ein Terminal öffnet sich und lädt das Modell; das kann mehrere GB groß sein.");
+                alert.accessoryView = field;
+                alert.addButtonWithTitle($("Laden"));
+                alert.addButtonWithTitle($("Abbrechen"));
+                if (!isButton(present(alert, { field }), $.NSAlertFirstButtonReturn)) return null;
+                const name = ObjC.unwrap(field.stringValue).trim();
+                if (name) return name;
+                note = "Bitte einen Modellnamen eingeben, zum Beispiel qwen2.5-coder:7b.";
+            }
         },
         confirmRemoveFolder(label) {
             const alert = $.NSAlert.alloc.init;

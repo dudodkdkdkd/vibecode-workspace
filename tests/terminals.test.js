@@ -164,6 +164,30 @@ function run() { return JSON.stringify(defaultTerminals()); }
     }
 });
 
+test('terminal setup: a Local Dev terminal from the preset editor does not break the type list (default falls back to Shell)', (t) => {
+    const files = fixture(t);
+    fs.writeFileSync(files.saved, JSON.stringify({ version: 2, projects: { [files.a]: { urls: [], terminals: [
+        { name: 'Modell', type: 'Local Dev', prompt: 'ollama qwen2.5-coder:7b opencode', cwd: '',
+            command: 'LOCAL_DEV_PROVIDER=ollama exec /bin/zsh @LOCAL_DEV_SCRIPT@ start' }] } } }));
+    const source = `
+const lists = [];
+const answers = [['A'], '1', ['Shell'], 'Name', ''];
+const testApp = {
+    chooseFromList: function (items, options) { lists.push([items.length, options.defaultItems]); return answers.shift(); },
+    displayDialog: function () { return { textReturned: answers.shift() }; },
+    displayAlert: function () {},
+};
+` + setupSource.replace('Application.currentApplication()', 'testApp')
+        .replace('function run(argv) {', 'function configureRun(argv) {') + `
+function run(argv) {
+    try { configureRun(argv); } catch (error) { /* the scripted answers end here */ }
+    return JSON.stringify(lists);
+}
+`;
+    const lists = JSON.parse(jxa(source, [files.projects, files.saved, files.output]));
+    assert.deepEqual(lists[1], [6, ['Shell']]);                       // the type list is unchanged and its default is a listed type
+});
+
 test('terminal setup opens with no repositories preselected', (t) => {
     const files = fixture(t);
     const source = `

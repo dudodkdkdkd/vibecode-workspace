@@ -367,6 +367,100 @@ test('Local Dev: der echte Launcher startet es als letztes Terminal des ersten R
     assert.ok(!terminalsOf(files, 'A').some((terminal) => terminal.name.endsWith('Local Dev')));
 });
 
+// Ein Preset-Terminal vom Typ „Local Dev“: Anbieter, Modell und CLI stehen im Preset, die Pfade setzt der Launcher beim Start ein.
+const LOCAL_PRESET = (prompt = 'ollama qwen2.5-coder:7b opencode', extra = {}) => ({
+    terminals: [{ name: 'Lokal', type: 'Local Dev', prompt, cwd: '', ...extra }], urls: [] });
+
+test('Preset „Local Dev“: der gespeicherte Befehl hat keine Pfade, der Start setzt Modul und Repository ein', (t) => {
+    const files = fixture(t);
+    const script = withLocalDevModule(files);
+    savePreset(files, files.a, LOCAL_PRESET());
+    const stored = JSON.parse(fs.readFileSync(path.join(files.dir, 'terminals.json'), 'utf8')).projects[files.a].terminals[0];
+    assert.equal(stored.type, 'Local Dev');
+    assert.ok(stored.command.includes('@LOCAL_DEV_SCRIPT@') && stored.command.includes('@REPOSITORY@'));
+    assert.ok(!stored.command.includes(files.dir));                                  // nichts von diesem Mac im gespeicherten Befehl
+    const result = launch(files, '--project', 'A');
+    assert.equal(result.status, 0, result.stderr);
+    const [terminal] = terminalsOf(files, 'A');
+    assert.equal(terminal.name, 'Lokal');
+    assert.equal(terminal.command, "LOCAL_DEV_PROVIDER='ollama' LOCAL_DEV_MODEL='qwen2.5-coder:7b' LOCAL_DEV_FRAMEWORK='opencode' " +
+        `LOCAL_DEV_REPOSITORY_PATH='${files.a}' exec /bin/zsh '${script}' start`);
+    assert.ok(!terminal.command.includes('@'));
+    assert.equal(terminal.cwd, files.a);
+    assert.equal(terminalsOf(files, 'A').length, 1);                                 // ein Preset ersetzt die Standard-Terminals
+});
+
+test('Preset „Local Dev“: ein Pfad mit Anführungszeichen bleibt ein einziges Wort', (t) => {
+    const files = fixture(t);
+    const script = withLocalDevModule(files);
+    const odd = path.join(files.dir, "Mein 'Repo'");
+    fs.mkdirSync(odd);
+    fs.writeFileSync(path.join(files.dir, 'projects.tsv'), `A\t${files.a}\nodd\t${odd}\n`);
+    savePreset(files, odd, LOCAL_PRESET());
+    assert.equal(launch(files, '--project', 'odd').status, 0);
+    const [terminal] = terminalsOf(files, 'odd');
+    const quoted = `'${odd.replace(/'/g, "'\\''")}'`;
+    assert.ok(terminal.command.includes(`LOCAL_DEV_REPOSITORY_PATH=${quoted} exec`));
+    // Die Shell liest daraus genau den Pfad (nicht mehr, nicht weniger).
+    const read = spawnSync('/bin/zsh', ['-c', `print -r -- ${quoted}`], { encoding: 'utf8' });
+    assert.equal(read.stdout.trim(), odd);
+    assert.ok(script);
+});
+
+test('Preset „Local Dev“: ohne das Modul bleibt ein Terminal mit dem Grund, und es startet nichts', (t) => {
+    const files = fixture(t);                                                        // kein local-dev/ neben dem Launcher
+    savePreset(files, files.a, LOCAL_PRESET());
+    const result = launch(files, '--project', 'A');
+    assert.equal(result.status, 0, result.stderr);
+    const [terminal] = terminalsOf(files, 'A');
+    assert.equal(terminal.command, "echo 'Local Dev ist nicht installiert (Ordner local-dev/ fehlt).'; exec zsh -l");
+    assert.doesNotMatch(result.stderr, /Local Dev ist nicht installiert/);          // der Hinweis gehört zu --local-dev, nicht hierher
+});
+
+test('Preset „Local Dev“ und --local-dev: dieselbe Kombination startet im Repository nur einmal, eine andere zusätzlich', (t) => {
+    const files = fixture(t);
+    withLocalDevModule(files);
+    savePreset(files, files.a, LOCAL_PRESET());
+    assert.equal(launch(files, '--project', 'A', '--local-dev', 'ollama', 'qwen2.5-coder:7b', 'opencode').status, 0);
+    assert.deepEqual(terminalsOf(files, 'A').map((terminal) => terminal.name), ['Lokal']);               // nicht zusätzlich „Local Dev“
+    assert.equal(launch(files, '--project', 'A', '--local-dev', 'ollama', 'gemma3:4b', 'opencode').status, 0);
+    assert.deepEqual(terminalsOf(files, 'A').map((terminal) => terminal.name), ['Lokal', 'Local Dev']);  // andere Kombination: beide
+    assert.equal(launch(files, '--project', 'B', '--local-dev', 'ollama', 'qwen2.5-coder:7b', 'opencode').status, 0);
+    assert.equal(terminalsOf(files, 'B').filter((terminal) => terminal.name === 'Local Dev').length, 1); // anderes Repository: wie bisher
+});
+
+test('Preset „Local Dev“ im allgemeinen Standard: lokal wird es eingesetzt, auf einem SSH-Host bleibt ein Hinweis', (t) => {
+    const files = withHosts(fixture(t));
+    const script = withLocalDevModule(files);
+    fs.renameSync(path.join(files.dir, 'remote-hosts.py'), path.join(files.dir, 'workspaces', 'remote-hosts.py'));   // der Launcher sucht es neben sich
+    fs.writeFileSync(path.join(files.dir, 'general.json'), JSON.stringify(LOCAL_PRESET()));
+    const saved = spawnSync('/usr/bin/osascript', ['-l', 'JavaScript', path.join(root, 'workspaces', 'presets.js'),
+        path.join(root, 'workspaces'), 'save-general', files.dir, path.join(files.dir, 'general.json')], { encoding: 'utf8' });
+    assert.equal(saved.status, 0, saved.stderr);
+    const result = launch(files, '--project', 'A', '--project', 'repo [SSH: spark]');
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(terminalsOf(files, 'A')[0].command.includes(`exec /bin/zsh '${script}' start`));
+    // SSH-Projekte öffnen in einem eigenen Fenster pro Host (eigene Workspace-Datei).
+    const remote = JSON.parse(fs.readFileSync(path.join(files.dir, 'Vibe-Session-SSH-spark.code-workspace'), 'utf8'))
+        .settings['vibecodeWorkspace.autoStartTerminals'];
+    assert.equal(remote.length, 1);
+    assert.equal(remote[0].command, "echo 'Local Dev läuft nur auf diesem Mac, nicht auf SSH-Hosts.'; exec bash -l");
+    assert.ok(!remote[0].command.includes(script));
+});
+
+test('Preset „Local Dev“: ohne drei Wörter wird das Preset abgelehnt und nichts gespeichert', (t) => {
+    const files = fixture(t);
+    for (const prompt of ['', 'ollama', 'ollama qwen opencode extra', 'ollama  qwen opencode', "ollama qwen 'opencode'", 'a;b c d',
+        'ollama qwen opencode\nx', '$(x) y z']) {
+        fs.writeFileSync(path.join(files.dir, 'preset.json'), JSON.stringify(LOCAL_PRESET(prompt)));
+        const result = spawnSync('/usr/bin/osascript', ['-l', 'JavaScript', path.join(root, 'workspaces', 'presets.js'),
+            path.join(root, 'workspaces'), 'save', files.dir, files.a, path.join(files.dir, 'preset.json')], { encoding: 'utf8' });
+        assert.notEqual(result.status, 0, JSON.stringify(prompt));
+        assert.match(result.stderr, /Local Dev braucht Anbieter, Modell und CLI/, JSON.stringify(prompt));
+    }
+    assert.ok(!fs.existsSync(path.join(files.dir, 'terminals.json')));
+});
+
 test('Local Dev: --local-dev ohne drei Werte ist ein Fehler und startet nichts', (t) => {
     const files = fixture(t);
     for (const args of [['--local-dev'], ['--local-dev', 'ollama'], ['--local-dev', 'ollama', 'qwen:7b'],

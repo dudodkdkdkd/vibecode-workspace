@@ -39,10 +39,8 @@ const SSH = {
     hosts: [{ host: 'spark', root: '~/projects', repos: 12 }],
     mac: { user: 'user', host: 'remote-mac.local', port: 22 },
 };
-const SPARK = { kind: 'host', name: 'spark', title: 'spark', detail: '~/projects · 12 Repositories',
-    label: 'spark — ~/projects · 12 Repositories' };
-const REMOTE_MAC = { kind: 'mac', name: 'remote-mac.local', title: 'user@remote-mac.local', detail: 'Mac · direkter Zugang',
-    label: 'user@remote-mac.local (Mac)' };
+const SPARK = { kind: 'host', name: 'spark', title: 'spark', detail: 'SSH-Host' };
+const REMOTE_MAC = { kind: 'mac', name: 'remote-mac.local', title: 'user@remote-mac.local', detail: 'Mac · direkter Zugang' };
 const SSH_JSON = JSON.stringify(SSH);
 const ssh = (overrides = {}) => STATE({ ssh: Object.assign({}, SSH, overrides) });
 const result = (code, out, err = '') => ({ code, out, err });
@@ -102,15 +100,19 @@ const ui = {
     infoWithCopy: (text, copyText) => calls.push(['infoWithCopy', text, copyText]),
     clipboardAllowLine: () => script.clipboardAllowLine || '',
     confirmAllow: (name, fingerprint) => { calls.push(['confirmAllow', name, fingerprint]); return next('confirmAllow'); },
+    confirmRevoke: (name, fingerprint) => { calls.push(['confirmRevoke', name, fingerprint]); return next('confirmRevoke'); },
     pickFolders: () => { calls.push(['pickFolders']); return next('pickFolders'); },
-    askRemoteFolder: (note, host) => { calls.push(host === undefined ? ['askRemoteFolder', note] : ['askRemoteFolder', note, host]); return next('askRemoteFolder'); },
+    askRemoteFolder: (note, host, known) => { calls.push(['askRemoteFolder', note, host, known]); return next('askRemoteFolder'); },
     confirmRemoveFolder: (label) => { calls.push(['confirmRemoveFolder', label]); return next('confirmRemoveFolder'); },
-    editPreset: (repo, draft, custom, note) => { calls.push(['editPreset', repo.name, draft, custom, note]); return next('editPreset'); },
+    editPreset: (repo, draft, custom, note, combos) => { calls.push(['editPreset', repo.name, draft, custom, note]); if (combos && combos.length) calls.push(['presetCombos', combos]); return next('editPreset'); },
     pickRepo: (repos) => { calls.push(['pickRepo', repos.map((repo) => repo.name)]); return next('pickRepo'); },
-    pickLocalDev: (choices) => { calls.push(['pickLocalDev', choices]); return next('pickLocalDev'); },
+    pickLocalDev: (choices, kind) => { calls.push(kind === undefined ? ['pickLocalDev', choices] : ['pickLocalDev', choices, kind]); return next('pickLocalDev'); },
     confirmResetPreset: (label, effect) => { calls.push(['confirmResetPreset', label, effect]); return next('confirmResetPreset'); },
     confirmMovePreset: (label, target) => { calls.push(['confirmMovePreset', label, target]); return next('confirmMovePreset'); },
     confirmTailscale: (kind) => { calls.push(['confirmTailscale', kind]); return next('confirmTailscale'); },
+    confirmModelPull: (name) => { calls.push(['confirmModelPull', name]); return next('confirmModelPull'); },
+    confirmModelRemove: (name) => { calls.push(['confirmModelRemove', name]); return next('confirmModelRemove'); },
+    askModelName: () => { calls.push(['askModelName']); return next('askModelName'); },
     showAgents: (model) => { calls.push(['showAgents', model.text, model.remoteLabel]); return next('showAgents'); },
     askTailscaleDevice: (devices, user) => { calls.push(['askTailscaleDevice', devices.map((d) => d.name), user]); return next('askTailscaleDevice'); },
 };
@@ -149,6 +151,8 @@ const backend = {
     sshOpen: (kind, name) => calls.push(['sshOpen', kind, name || null]),
     agents: (scope) => { calls.push(['agents', scope]); return next('agentsResults'); },
     tailscale: (action) => { calls.push(['tailscale', action]); const answer = next('tailscaleResults'); if (answer && answer.throw) throw new Error(answer.throw); return answer; },
+    combo: (action, value) => { calls.push(['combo', action, value]); const answer = next('comboResults'); if (answer && answer.throw) throw new Error(answer.throw); return answer; },
+    model: (action, name) => { calls.push(['model', action, name]); const answer = next('modelResults'); if (answer && answer.throw) throw new Error(answer.throw); return answer; },
     ssh: (action, line) => { calls.push(['ssh', action, line === undefined ? null : line]); return next('sshResults'); },
 };
 function run() { flow(ui, backend); return JSON.stringify(calls); }
@@ -214,7 +218,7 @@ test('ohne bekannte Projekte erklärt das Fenster, was zu tun ist, statt einen l
         state: STATE({ projects: [] }), dashboard: [{ action: 'new' }, { action: 'close' }],
     });
     assert.ok(!kinds(calls).includes('edit'));
-    assert.match(calls.find((c) => c[0] === 'error')[1], /Repository-Suche/);
+    assert.match(calls.find((c) => c[0] === 'error')[1], /Reiter „Projekte“.*Suchordner/);
 });
 
 test('Öffnen startet das Modul im Terminal und schließt das Fenster', () => {
@@ -505,10 +509,30 @@ test('Suchordner: der Host des verbundenen Macs ist vorbelegt (auch ein Tailscal
     const asked = (mac) => flowRun({ state: Object.assign(withFolders(), { ssh: Object.assign({}, SSH, { mac }) }), dashboard: [{ action: 'addRemoteFolder' }, back], askRemoteFolder: [null] })
         .filter((c) => c[0] === 'askRemoteFolder');
     assert.deepEqual(asked({ user: 'user', host: 'remote-mac.example-tailnet.ts.net', port: 22 }),
-        [['askRemoteFolder', '', 'user@remote-mac.example-tailnet.ts.net']]);
-    assert.deepEqual(asked({ user: '', host: '100.64.0.5', port: 22 }), [['askRemoteFolder', '', '100.64.0.5']]);
-    assert.deepEqual(asked({ user: 'user', host: '100.64.0.5', port: 2222 }), [['askRemoteFolder', '']]);   // ein Port passt nicht in den Host-Text
-    assert.deepEqual(asked(null), [['askRemoteFolder', '']]);
+        [['askRemoteFolder', '', 'user@remote-mac.example-tailnet.ts.net', ['user@remote-mac.example-tailnet.ts.net', 'spark']]]);
+    assert.deepEqual(asked({ user: '', host: '100.64.0.5', port: 22 }), [['askRemoteFolder', '', '100.64.0.5', ['100.64.0.5', 'spark']]]);
+    assert.deepEqual(asked({ user: 'user', host: '100.64.0.5', port: 2222 }), [['askRemoteFolder', '', null, ['spark']]]);   // ein Port passt nicht in den Host-Text
+    assert.deepEqual(asked(null), [['askRemoteFolder', '', null, ['spark']]]);
+});
+
+test('Suchordner: das Dropdown nennt erst die verbundenen Geräte, dann online erreichbare Macs aus dem Tailnet, ohne Doppelte', () => {
+    const devices = [DEVICE('studio', { ip: '100.64.0.9' }), DEVICE('nas', { dns: '', ip: '100.64.0.6' }),
+        DEVICE('alt', { online: false, ip: '100.64.0.7' }), DEVICE('phone', { os: 'iOS', ip: '100.64.0.8' }),
+        DEVICE('studio-zwei', { dns: 'Studio.example-tailnet.ts.net.', ip: '100.64.0.10' })];
+    const known = (extra) => flowRun({
+        state: Object.assign(withFolders(), extra), dashboard: [{ action: 'addRemoteFolder' }, back], askRemoteFolder: [null] })
+        .find((c) => c[0] === 'askRemoteFolder')[3];
+    const mac = { user: 'user', host: 'remote-mac.local', port: 22 };
+    assert.deepEqual(known({ ssh: Object.assign({}, SSH, { mac }), tailscale: TS({ devices, localUser: 'user' }) }), [
+        'user@remote-mac.local', 'spark',                                              // schon verbunden
+        'user@studio.example-tailnet.ts.net', 'user@100.64.0.6',                       // online im Tailnet (ohne Namen: die Adresse)
+        // „alt“ ist offline und „phone“ ein Telefon; „studio-zwei“ ist derselbe Name wie „studio“ (Großschreibung, Punkt am Ende)
+    ]);
+    // Ohne laufendes Tailscale nur die verbundenen; ohne bekannten Benutzer ohne „benutzer@“; ein anderer Port fehlt.
+    assert.deepEqual(known({ ssh: Object.assign({}, SSH, { mac }), tailscale: TS({ state: 'stopped', devices, localUser: 'user' }) }), ['user@remote-mac.local', 'spark']);
+    assert.deepEqual(known({ ssh: Object.assign({}, SSH, { mac: Object.assign({}, mac, { port: 2222 }) }), tailscale: TS({ devices: [DEVICE('studio')] }) }),
+        ['spark', 'studio.example-tailnet.ts.net']);
+    assert.deepEqual(known({ ssh: Object.assign({}, SSH, { mac: null, hosts: [] }), tailscale: { available: false } }), []);
 });
 
 // ------------------------------------------------------------------ Tailscale
@@ -517,8 +541,8 @@ const TS = (extra = {}) => Object.assign({ available: true, variant: 'cli', stat
     ip: '100.64.0.5', tailnet: 'example-tailnet.ts.net', auto: false, autoError: '', ours: false, devices: [] }, extra);
 
 test('Übersicht: der Tailscale-Bereich zeigt je Zustand Punkt, Text und genau die passenden Knöpfe', () => {
-    const rows = (tailscale) => JSON.parse(widgets(`return JSON.stringify(dashboardModel(Object.assign({}, STATE, { tailscale: ${JSON.stringify(tailscale)} })));`));
-    const item = (tailscale) => rows(tailscale).find((row) => row.type === 'item' && row.title === 'Tailscale');
+    const rows = (tailscale) => JSON.parse(widgets(`return JSON.stringify(dashboardRows(Object.assign({}, STATE, { tailscale: ${JSON.stringify(tailscale)} })));`));
+    const item = (tailscale) => rows(tailscale).find((row) => row.type === 'item' && row.title === 'Verbindung');
     const cases = [
         ['missing', 'off', 'nicht installiert', ['Einrichten…']],
         ['daemon-down', 'warn', 'Dienst antwortet nicht', ['Einrichten…']],
@@ -542,53 +566,99 @@ test('Übersicht: der Tailscale-Bereich zeigt je Zustand Punkt, Text und genau d
         assert.deepEqual(footers[0].buttons.at(-1).action, { action: 'tailscaleRefresh' });                  // „Aktualisieren“ steht immer zuletzt
     });
     const running = item(TS({ ours: true }));
-    assert.equal(running.detail, 'verbunden · Kommandozeile · von VibeCode gestartet · 100.64.0.5 · remote-mac.example-tailnet.ts.net');
+    assert.equal(running.detail, 'verbunden · Kommandozeile · von VibeCode gestartet');
     assert.match(item(TS({ state: 'stopped', variant: 'app' })).detail, /getrennt · App$/);
     assert.ok(!/100\.64/.test(item(TS({ state: 'stopped' })).detail));               // Name und Adresse nur, solange verbunden
 });
 
 test('Übersicht: der Schalter „Mit VibeCode starten und beenden“ ist ein Kästchen und sagt, was er tut', () => {
-    const rows = (tailscale) => JSON.parse(widgets(`return JSON.stringify(dashboardModel(Object.assign({}, STATE, { tailscale: ${JSON.stringify(tailscale)} })));`));
+    const rows = (tailscale) => JSON.parse(widgets(`return JSON.stringify(dashboardRows(Object.assign({}, STATE, { tailscale: ${JSON.stringify(tailscale)} })));`));
     const sw = (tailscale) => rows(tailscale).find((row) => row.title === 'Mit VibeCode starten und beenden');
     const off = sw(TS());
     assert.deepEqual(off.buttons.map((b) => [b.label, b.checkbox, b.checked]), [['Aktiv', true, false]]);
     assert.deepEqual(off.buttons[0].action, { action: 'tailscaleAuto', enabled: true });
-    assert.equal(off.level, 'off');
+    assert.equal(off.level, 'none');                                                  // eine Einstellung ist kein Zustand: kein Punkt
     const on = sw(TS({ auto: true }));
+    assert.equal(on.level, 'none');
     assert.deepEqual(on.buttons[0].action, { action: 'tailscaleAuto', enabled: false });
     assert.match(on.detail, /Startet mit jedem Workspace, endet nach dem letzten VibeCode-Editor-Fenster/);
     assert.ok(sw(TS({ state: 'missing' })));                                          // auch vor der Einrichtung einstellbar
     assert.ok(rows(TS({ autoError: 'tailscale.json ist ungültig.' })).some((row) => row.type === 'note' && /⚠︎ tailscale\.json ist ungültig/.test(row.text)));
 });
 
-test('Übersicht: SSH und Tailscale stehen in einem Bereich „Remote“, SSH zuerst', () => {
-    const rows = JSON.parse(widgets(`return JSON.stringify(dashboardModel(Object.assign({}, STATE, { ssh: ${JSON.stringify(SSH)}, tailscale: ${JSON.stringify(TS())} })));`));
+const remoteTab = (extra) => JSON.parse(widgets(`return JSON.stringify(tabRows(Object.assign({}, STATE, ${JSON.stringify(extra)}), "remote"));`));
+
+test('Remote ordnet nach Richtung: erst Tailscale, dann Verbindungen von diesem Mac, dann Zugriff auf diesen Mac', () => {
+    const rows = remoteTab({ ssh: SSH, tailscale: TS() });
     const sections = rows.filter((row) => row.type === 'section').map((row) => row.text);
-    assert.equal(sections.filter((name) => name === 'Remote').length, 1);                 // genau eine Überschrift
-    assert.ok(!sections.includes('SSH') && !sections.includes('Tailscale'));               // die alten Überschriften gibt es nicht mehr
-    const start = rows.findIndex((row) => row.type === 'section' && row.text === 'Remote');
-    const end = rows.findIndex((row, index) => index > start && row.type === 'section');
-    const inside = rows.slice(start + 1, end);
-    const titles = inside.filter((row) => row.type === 'item').map((row) => row.title);
-    assert.ok(titles.includes('Tailscale') && titles.includes('Mit VibeCode starten und beenden'));
-    const footerLabels = inside.filter((row) => row.type === 'footer').map((row) => row.buttons.map((b) => b.label));
-    assert.deepEqual(footerLabels, [['Neue Verbindung…', 'Diesen Mac freigeben…'], ['Einladungen abholen', 'Aktualisieren']]);   // SSH-Knöpfe vor dem Tailscale-Teil
-    assert.ok(inside.findIndex((row) => row.title === 'Tailscale') > inside.findIndex((row) => row.type === 'footer'));
-    // Nur Tailscale (ohne SSH-Modul) oder nur SSH: weiter ein Bereich „Remote“.
-    const only = (extra) => JSON.parse(widgets(`return JSON.stringify(dashboardModel(Object.assign({}, STATE, ${extra})));`))
-        .filter((row) => row.type === 'section').map((row) => row.text);
-    assert.ok(only(`{ tailscale: ${JSON.stringify(TS())} }`).includes('Remote'));
-    assert.ok(only(`{ ssh: ${JSON.stringify(SSH)} }`).includes('Remote'));
+    assert.deepEqual(sections, ['Tailscale', 'Verbindungen von diesem Mac', 'Zugriff auf diesen Mac']);
+    // Jeder Bereich endet mit den Knöpfen, die zu ihm gehören; die Einrichtung steht bei den Zielen, nicht in einem eigenen Bereich.
+    const footerLabels = rows.filter((row) => row.type === 'footer').map((row) => row.buttons.map((b) => b.label));
+    assert.deepEqual(footerLabels, [['Aktualisieren'], ['Neue Verbindung…', 'Geführte Einrichtung…'], ['Diesen Mac freigeben…', 'Einladungen abholen']]);
+    const guide = rows.flatMap((row) => row.buttons || []).find((button) => button.label === 'Geführte Einrichtung…');
+    const calls = flowRun({ state: ssh(), dashboard: [guide.action] });
+    assert.deepEqual(calls.filter((call) => call[0] === 'sshOpen'), [['sshOpen', 'guided', null]]);
+    // Ohne Ziele steht dort ein Satz statt einer leeren Fläche, und die Knöpfe bleiben.
+    const empty = remoteTab({ ssh: Object.assign({}, SSH, { hosts: [], mac: null }), tailscale: TS() });
+    assert.ok(empty.some((row) => row.type === 'note' && /Noch keine Verbindung/.test(row.text)));
+    assert.deepEqual(empty.filter((row) => row.type === 'footer').map((row) => row.buttons.length), [1, 2, 2]);
+});
+
+test('Remote: ein Punkt steht nur für einen Zustand, der jetzt stimmt', () => {
+    const rows = remoteTab({ ssh: Object.assign({}, SSH, { grants: [{ name: 'user@client.local', fingerprint: 'SHA256:abc' }] }),
+        tailscale: TS({ auto: true }) });
+    const level = (title) => rows.find((row) => row.type === 'item' && row.title === title).level;
+    assert.equal(level('Verbindung'), 'ok');                                      // Tailscale läuft
+    assert.equal(level('Mit VibeCode starten und beenden'), 'none');               // eine Einstellung: das Kästchen zeigt es
+    assert.equal(level('user@client.local'), 'none');                              // eine Freigabe ist kein Zustand und sagt nichts über „online“
+});
+
+test('Remote: Ziele zeigen online/offline aus dem Tailnet, ohne einen SSH-Host zu kontaktieren, und erreichbare stehen oben', () => {
+    const devices = [DEVICE('spark', { ip: '100.64.0.6' }),
+        DEVICE('remote-mac', { online: false, ip: '100.64.0.7' }),
+        DEVICE('station', { ip: '100.64.0.8' })];
+    const ssh = Object.assign({}, SSH, {
+        hosts: [{ host: 'build-server', root: '~', repos: 1 }, { host: 'spark', root: '~', repos: 1 }, { host: '100.64.0.8', root: '~', repos: 1 }],
+        mac: { user: 'user', host: 'remote-mac.local', port: 22 } });
+    const isTarget = (row) => row.buttons && row.buttons[0].action.action === 'connect';
+    const targets = (tailscale) => remoteTab({ ssh, tailscale }).filter(isTarget);
+    assert.deepEqual(targets(TS({ devices })).map((row) => [row.title, row.level, row.detail]), [
+        ['spark', 'ok', 'SSH-Host · online im Tailnet'],                              // Name im Tailnet
+        ['100.64.0.8', 'ok', 'SSH-Host · online im Tailnet'],                         // Adresse im Tailnet
+        ['build-server', 'none', 'SSH-Host'],                                         // nicht im Tailnet: keine Aussage
+        ['user@remote-mac.local', 'off', 'Mac · direkter Zugang · offline im Tailnet'],   // <name>.local gehört zum Gerät, das aber aus ist
+    ]);
+    // Dieselbe Zeile wie vorher: die Aktion bekommt unverändert das Ziel (kein Punkt oder Text darin).
+    assert.deepEqual(targets(TS({ devices })).find((row) => row.title === 'spark').buttons[0].action, { action: 'connect', item: SPARK });
+    // MagicDNS-Name, Großschreibung und ein Punkt am Ende zählen als derselbe Host.
+    const dns = remoteTab({ ssh: Object.assign({}, SSH, { hosts: [], mac: { user: 'user', host: 'Remote-Mac.example-tailnet.ts.net.', port: 22 } }),
+        tailscale: TS({ devices }) }).find(isTarget);
+    assert.equal(dns.level, 'off');
+    // Ohne laufendes Tailscale (oder ohne Geräteliste) gibt es nichts zu sagen: weder Punkt noch Text.
+    for (const tailscale of [TS({ state: 'stopped', devices }), TS({ devices: [] }), { available: false }]) {
+        assert.deepEqual(targets(tailscale).map((row) => [row.level, row.detail.includes('Tailnet')]).filter(([level, text]) => level !== 'none' || text), []);
+    }
+});
+
+test('Wachhalten & Apps steht nur im Reiter Workspaces', () => {
+    const wake = { enabled: true, text: 'An', level: 'ok', withApps: false };
+    const state = STATE({ ssh: SSH, tailscale: TS(), settings: { wake } });
+    const pages = JSON.parse(widgets(`return JSON.stringify(dashboardModel(${JSON.stringify(state)}));`));
+    const tabsWithWakeSection = pages.filter((page) => page.rows.some((row) => row.type === 'section' && row.text === 'Wachhalten & Apps'));
+    const tabsWithWakeControls = pages.filter((page) => page.rows.some((row) => (row.buttons || [])
+        .some((button) => ['keep-awake', 'keep-awake-apps'].includes(button.action.name))));
+    assert.deepEqual(tabsWithWakeSection.map((page) => page.id), ['workspaces']);
+    assert.deepEqual(tabsWithWakeControls.map((page) => page.id), ['workspaces']);
 });
 
 test('Übersicht: ohne Remote-Modul gibt es keinen Tailscale-Bereich, ein Lesefehler zeigt nur eine Warnung', () => {
-    const rows = (tailscale) => JSON.parse(widgets(`return JSON.stringify(dashboardModel(Object.assign({}, STATE, ${tailscale === undefined ? '{}' : `{ tailscale: ${JSON.stringify(tailscale)} }`})));`));
-    assert.ok(!rows({ available: false }).some((row) => row.text === 'Remote'));          // ohne SSH und ohne Tailscale gibt es den Bereich nicht
-    assert.ok(!rows(undefined).some((row) => row.text === 'Remote'));                 // ältere Antwort ohne Feld
+    const rows = (tailscale) => JSON.parse(widgets(`return JSON.stringify(dashboardRows(Object.assign({}, STATE, ${tailscale === undefined ? '{}' : `{ tailscale: ${JSON.stringify(tailscale)} }`})));`));
+    assert.ok(!rows({ available: false }).some((row) => row.text === 'Tailscale'));
+    assert.ok(!rows(undefined).some((row) => row.text === 'Tailscale'));
     const broken = rows({ available: true, error: 'Tailscale: Ungültige Antwort' });
-    assert.ok(broken.some((row) => row.type === 'section' && row.text === 'Remote'));
+    assert.ok(broken.some((row) => row.type === 'section' && row.text === 'Tailscale'));
     assert.deepEqual(broken.filter((row) => row.type === 'note' && /Ungültige Antwort/.test(row.text)).map((row) => row.level), ['warn']);
-    assert.ok(!broken.some((row) => row.title === 'Tailscale'));
+    assert.ok(!broken.some((row) => row.title === 'Verbindung'));
     assert.ok(broken.some((row) => row.type === 'footer' && row.buttons[0].label === 'Aktualisieren'));         // auch ein Lesefehler lässt sich neu laden
 });
 
@@ -646,13 +716,225 @@ test('Tailscale: Abmelden fragt zuerst, ändert ohne Ja nichts und Geräte zeigt
     assert.match(empty.find((c) => c[0] === 'info')[1], /Keine weiteren Geräte im Tailnet gefunden/);
 });
 
+// ------------------------------------------------------------------ Ollama-Modelle
+
+const MODELS = (extra = {}) => Object.assign({ available: true, provider: 'ollama', providerName: 'Ollama (lokal)', cli: true,
+    models: [{ name: 'qwen2.5-coder:7b', size: 4683087332, modified: '2026-11-01T10:00:00Z' },
+        { name: 'tiny:latest', size: 640000000, modified: '' }],
+    missing: [{ name: 'deepseek-coder:6.7b', why: 'eingestellt' }, { name: 'gemma3:4b', why: 'Vorschlag', note: 'Allgemein, klein' }] }, extra);
+const localDevTab = (models) => JSON.parse(widgets(`return JSON.stringify(tabRows(Object.assign({}, STATE,
+    { models: ${JSON.stringify(models)} }), "localDev"));`));
+
+test('Local Dev zeigt installierte und noch nicht geladene Ollama-Modelle mit Größe, ohne Punkte', () => {
+    const rows = localDevTab(MODELS());
+    assert.deepEqual(rows.filter((row) => row.type === 'section').map((row) => row.text),
+        ['Anbieter, Modell und CLI', 'Ollama-Modelle', 'Noch nicht geladen']);
+    const items = rows.filter((row) => row.type === 'item' && row.buttons[0] && /Entfernen|Laden/.test(row.buttons[0].label));
+    assert.deepEqual(items.map((row) => [row.title, row.detail, row.level, row.buttons[0].label]), [
+        ['qwen2.5-coder:7b', '4,7 GB · geladen 2026-11-01', 'none', 'Entfernen…'],
+        ['tiny:latest', '640 MB', 'none', 'Entfernen…'],
+        ['deepseek-coder:6.7b', 'In Local Dev eingestellt, aber nicht geladen', 'none', 'Laden…'],
+        ['gemma3:4b', 'Vorschlag · Allgemein, klein', 'none', 'Laden…'],
+    ]);
+    assert.deepEqual(items[0].buttons[0].action, { action: 'modelRemove', name: 'qwen2.5-coder:7b' });
+    assert.deepEqual(items[3].buttons[0].action, { action: 'modelPull', name: 'gemma3:4b' });
+    const footer = rows.find((row) => row.type === 'footer');
+    assert.deepEqual(footer.buttons.map((b) => b.label), ['Modell laden…', 'Aktualisieren']);
+});
+
+test('Local Dev: ohne Ollama, ohne Modelle oder bei einem Lesefehler steht ein Satz da und es gibt nichts Unmögliches zu klicken', () => {
+    const labels = (rows) => rows.flatMap((row) => (row.buttons || []).map((b) => b.label));
+    const none = localDevTab(MODELS({ models: [], missing: [] }));
+    assert.ok(none.some((row) => row.type === 'note' && row.text === 'Noch kein Ollama-Modell geladen.'));
+    assert.ok(!none.some((row) => row.text === 'Noch nicht geladen'));
+    const gone = localDevTab(MODELS({ cli: false }));
+    assert.ok(gone.some((row) => row.type === 'note' && /Ollama wurde nicht gefunden/.test(row.text) && row.level === 'warn'));
+    assert.deepEqual(labels(gone).filter((label) => /laden|Laden|Entfernen/.test(label)), []);                  // ohne Ollama weder Laden noch Entfernen
+    assert.ok(labels(gone).includes('Aktualisieren'));                                                         // aber neu lesen geht immer
+    const broken = localDevTab({ available: true, error: 'Ollama-Modelle: kaputt', models: [], missing: [] });
+    assert.ok(broken.some((row) => row.type === 'note' && row.text === '⚠︎ Ollama-Modelle: kaputt' && row.level === 'warn'));
+    assert.deepEqual(localDevTab({ available: false }).filter((row) => row.type === 'section').map((row) => row.text), ['Anbieter, Modell und CLI']);
+    assert.deepEqual(localDevTab(undefined).filter((row) => row.type === 'section').map((row) => row.text), ['Anbieter, Modell und CLI']);
+});
+
+test('Ollama-Modelle: Laden und Entfernen fragen zuerst und tun ohne Ja nichts', () => {
+    const calls = flowRun({ state: STATE({ models: MODELS() }),
+        dashboard: [{ action: 'modelPull', name: 'gemma3:4b' }, { action: 'modelPull', name: 'gemma3:4b' },
+            { action: 'modelRemove', name: 'tiny:latest' }, { action: 'modelRemove', name: 'tiny:latest' }, { action: 'refresh' }, back],
+        confirmModelPull: [false, true], confirmModelRemove: [false, true],
+        modelResults: ['Terminal geöffnet. Dort wird „gemma3:4b“ geladen.', '„tiny:latest“ wurde entfernt.'] });
+    assert.deepEqual(calls.filter((c) => c[0] === 'model'), [['model', 'pull', 'gemma3:4b'], ['model', 'remove', 'tiny:latest']]);   // nur nach dem Ja
+    assert.deepEqual(calls.filter((c) => c[0] === 'info').map((c) => c[1]),
+        ['Terminal geöffnet. Dort wird „gemma3:4b“ geladen.', '„tiny:latest“ wurde entfernt.']);
+    assert.equal(kinds(calls).filter((k) => k === 'dashboard').length, 6);                                      // danach liest die Übersicht neu
+});
+
+test('Ollama-Modelle: „Modell laden…“ fragt nach einem Namen; Abbruch tut nichts; Fehler erscheinen lesbar', () => {
+    const calls = flowRun({ state: STATE({ models: MODELS() }),
+        dashboard: [{ action: 'modelPullAsk' }, { action: 'modelPullAsk' }, { action: 'modelRemove', name: 'tiny:latest' }, back],
+        askModelName: [null, 'llama3.1:8b'], confirmModelRemove: [true],
+        modelResults: ['Terminal geöffnet.', { throw: 'execution error: VibeCode: Ollama konnte „tiny:latest“ nicht entfernen: connection refused (1)' }] });
+    assert.deepEqual(calls.filter((c) => c[0] === 'model'), [['model', 'pull', 'llama3.1:8b'], ['model', 'remove', 'tiny:latest']]);
+    assert.equal(calls.find((c) => c[0] === 'error')[1], 'Ollama konnte „tiny:latest“ nicht entfernen: connection refused (1)');
+});
+
+test('Modellname-Dialog: ein leerer Name fragt noch einmal, Abbrechen liefert null', () => {
+    const out = JSON.parse(widgets(`
+        steps.push({ response: FIRST, text: '  ' }, { response: FIRST, text: ' qwen2.5-coder:7b ' });
+        const named = nativeUi({}).askModelName();
+        steps.push({ response: FIRST + 1, text: 'egal' });
+        const cancelled = nativeUi({}).askModelName();
+        return JSON.stringify({ named, cancelled, notes });`, `
+        const steps = [];
+        const notes = [];
+        function scriptedPresent(alert, built) {
+            notes.push(ObjC.unwrap(alert.informativeText));
+            const step = steps.shift();
+            if (step.text !== undefined) built.field.stringValue = $(step.text);
+            return step.response;
+        }`));
+    assert.equal(out.named, 'qwen2.5-coder:7b');
+    assert.equal(out.cancelled, null);
+    assert.match(out.notes[0], /Name wie bei „ollama pull“/);
+    assert.equal(out.notes[1], 'Bitte einen Modellnamen eingeben, zum Beispiel qwen2.5-coder:7b.');
+});
+
+test('Ollama-Modelle: das Backend ruft genau „models pull|remove NAME“ auf', () => {
+    const out = JSON.parse(jxa(`${library}
+function run() {
+    const commands = [];
+    const backend = makeBackend({ doShellScript: (command) => { commands.push(command); return ''; } }, '/usr/bin/python3', '/c/vibecode.py');
+    backend.model('pull', 'qwen2.5-coder:7b');
+    backend.model('remove', "x'; rm -rf ~; '");
+    return JSON.stringify(commands);
+}`));
+    assert.deepEqual(out, ["'/usr/bin/python3' '/c/vibecode.py' 'models' 'pull' 'qwen2.5-coder:7b'",
+        "'/usr/bin/python3' '/c/vibecode.py' 'models' 'remove' 'x'\\''; rm -rf ~; '\\'''"]);
+});
+
+// ------------------------------------------------------------------ Kombinationen aus Modell und CLI
+
+const COMBO = (model, framework = 'opencode', provider = 'ollama') => ({ provider, model, framework });
+const localDevWith = (extra) => JSON.parse(widgets(`return JSON.stringify(tabRows(Object.assign({}, STATE, ${JSON.stringify(extra)}), "localDev"));`));
+
+test('Local Dev zeigt gespeicherte Kombinationen; ein noch nicht geladenes Ollama-Modell wird vorher gesagt', () => {
+    const rows = localDevWith({ models: MODELS(), combos: { items: [COMBO('qwen2.5-coder:7b'), COMBO('gemma3:4b', 'codex'), COMBO('x/y', 'claude', 'mlx')], error: null } });
+    assert.ok(rows.some((row) => row.type === 'section' && row.text === 'Kombinationen aus Modell und CLI'));
+    const items = rows.filter((row) => row.buttons && row.buttons[0] && row.buttons[0].action.action === 'comboRemove');
+    assert.deepEqual(items.map((row) => [row.title, row.detail, row.level]), [
+        ['qwen2.5-coder:7b → OpenCode', 'Ollama', 'none'],
+        ['gemma3:4b → Codex', 'Ollama · Modell noch nicht geladen (wird beim ersten Start geladen)', 'warn'],    // nicht installiert
+        ['x/y → Claude Code', 'MLX', 'none'],                                                                       // nur Ollama-Modelle kennt das Fenster
+    ]);
+    assert.deepEqual(items[0].buttons[0].action, { action: 'comboRemove', combo: COMBO('qwen2.5-coder:7b') });
+    const footers = rows.filter((row) => row.type === 'footer').flatMap((row) => row.buttons.map((b) => b.label));
+    assert.ok(footers.includes('Kombination anlegen…'));
+    // Ohne Modellliste (kein Ollama-Modul) gibt es keine Warnung, und eine leere Liste sagt, wozu sie dient.
+    assert.ok(localDevWith({ combos: { items: [COMBO('gemma3:4b')], error: null } }).every((row) => row.level !== 'warn'));
+    const empty = localDevWith({ combos: { items: [], error: null } });
+    assert.ok(empty.some((row) => row.type === 'note' && /Noch keine Kombination.*Preset-Editor/.test(row.text)));
+    const broken = localDevWith({ combos: { items: [], error: 'Kombinationen: kaputt' } });
+    assert.ok(broken.some((row) => row.type === 'note' && row.level === 'warn' && row.text === '⚠︎ Kombinationen: kaputt'));
+    assert.ok(!broken.some((row) => row.buttons && row.buttons.some((b) => b.label === 'Kombination anlegen…')));     // bei kaputter Datei nichts überschreiben
+    assert.ok(!localDevWith({}).some((row) => row.text === 'Kombinationen aus Modell und CLI'));                       // alter Stand ohne Schlüssel
+});
+
+test('Kombination anlegen: wählt aus den passenden Kombinationen ohne die schon gespeicherten; Entfernen ruft direkt auf', () => {
+    const options = [
+        { provider: 'ollama', providerName: 'Ollama (lokal)', model: 'qwen2.5-coder:7b', local: true, framework: 'opencode', frameworkName: 'OpenCode', active: false, providerReady: true, frameworkReady: true },
+        { provider: 'ollama', providerName: 'Ollama (lokal)', model: 'gemma3:4b', local: true, framework: 'codex', frameworkName: 'Codex', active: false, providerReady: true, frameworkReady: true },
+        { provider: 'mlx', providerName: 'MLX', model: "org/mo del", local: true, framework: 'opencode', frameworkName: 'OpenCode', active: false, providerReady: true, frameworkReady: true },
+    ];
+    const calls = flowRun({ state: STATE({ combos: { items: [COMBO('qwen2.5-coder:7b')], error: null } }),
+        dashboard: [{ action: 'comboAdd' }, { action: 'comboAdd' }, { action: 'comboRemove', combo: COMBO('qwen2.5-coder:7b') }, back],
+        localSettings: { available: true, options, current: null, error: null },
+        pickLocalDev: [COMBO('gemma3:4b', 'codex'), null], comboResults: [[], []] });
+    const picked = calls.filter((c) => c[0] === 'pickLocalDev');
+    assert.equal(picked.length, 2);
+    assert.deepEqual(picked[0][1].map((choice) => choice.value), [COMBO('gemma3:4b', 'codex')]);        // gespeicherte und unzulässige (Leerzeichen) fehlen
+    assert.equal(picked[0][2], 'combo');
+    assert.deepEqual(calls.filter((c) => c[0] === 'combo'), [['combo', 'add', COMBO('gemma3:4b', 'codex')],
+        ['combo', 'remove', COMBO('qwen2.5-coder:7b')]]);                                                 // Abbrechen (null) speichert nichts
+});
+
+test('Kombination anlegen: sagt, wenn nichts mehr zu wählen ist oder Local Dev nichts kennt, und zeigt Lesefehler', () => {
+    const one = { provider: 'ollama', providerName: 'Ollama', model: 'a:1b', local: true, framework: 'codex', frameworkName: 'Codex', active: false, providerReady: true, frameworkReady: true };
+    const run = (localSettings, items) => flowRun({ state: STATE({ combos: { items, error: null } }), dashboard: [{ action: 'comboAdd' }, back], localSettings });
+    const all = run({ available: true, options: [one], current: null, error: null }, [COMBO('a:1b', 'codex')]);
+    assert.equal(all.find((c) => c[0] === 'info')[1], 'Alle passenden Kombinationen sind schon gespeichert.');
+    const none = run({ available: true, options: [], current: null, error: null }, []);
+    assert.match(none.find((c) => c[0] === 'info')[1], /Local Dev kennt keine passende Kombination/);
+    const failed = run({ available: true, options: [], current: null, error: 'Local Dev: Konfiguration ungültig' }, []);
+    assert.equal(failed.find((c) => c[0] === 'error')[1], 'Local Dev: Konfiguration ungültig');
+    for (const calls of [all, none, failed]) assert.ok(!kinds(calls).includes('pickLocalDev') && !kinds(calls).includes('combo'));
+});
+
+test('Preset-Editor: gespeicherte Kombinationen stehen als „Local Dev · …“ in der Auswahl und werden als Typ „Local Dev“ gespeichert', () => {
+    const out = JSON.parse(widgets(`
+        const combos = [${JSON.stringify(COMBO('qwen2.5-coder:7b'))}, ${JSON.stringify(COMBO('gemma3:4b', 'codex'))}];
+        const built = buildPresetEditor({ name: 'alpha' }, { terminals: [], urls: [] }, false, '', combos);
+        const titles = [];
+        for (let i = 0; i < built.rows[0].popup.numberOfItems; i += 1) titles.push(ObjC.unwrap(built.rows[0].popup.itemTitleAtIndex(i)));
+        built.rows[0].popup.selectItemWithTitle($(titles[7]));
+        built.rows[0].name.stringValue = $('Modell');
+        built.rows[0].prompt.stringValue = $('wird ignoriert');
+        built.rows[1].popup.selectItemWithTitle($('Shell'));
+        const plain = buildPresetEditor({ name: 'alpha' }, { terminals: [], urls: [] }, false, '');
+        return JSON.stringify({ titles, collected: collectPreset(built), plainCount: Number(plain.rows[0].popup.numberOfItems),
+            hint: ObjC.unwrap(built.alert.informativeText) });`));
+    assert.deepEqual(out.titles, ['–', 'Shell', 'Claude Code', 'Codex', 'Codex 2', 'Antigravity', 'Eigener Befehl', 'Local Dev · qwen2.5-coder:7b → OpenCode · Ollama',
+        'Local Dev · gemma3:4b → Codex · Ollama']);
+    assert.deepEqual(out.collected.terminals, [{ type: 'Local Dev', name: 'Modell', prompt: 'ollama qwen2.5-coder:7b opencode', cwd: '' },
+        { type: 'Shell', name: '', prompt: '', cwd: '' }]);                     // der Prompt kommt aus der Kombination, nicht aus dem Feld
+    assert.equal(out.plainCount, 7);                                              // ohne Kombinationen ist die Auswahl wie vorher
+    assert.match(out.hint, /„Local Dev · …“ startet den lokalen Modellserver/);
+});
+
+test('Preset-Editor: ein Local-Dev-Terminal, dessen Kombination nicht gespeichert ist, bleibt sichtbar und wird nie still verworfen', () => {
+    const out = JSON.parse(widgets(`
+        const draft = { terminals: [{ name: 'Alt', type: 'Local Dev', prompt: 'ollama gone:1b opencode', cwd: '' },
+            { name: 'Neu', type: 'Local Dev', prompt: 'ollama qwen2.5-coder:7b opencode', cwd: 'src' }], urls: [] };
+        const built = buildPresetEditor({ name: 'alpha' }, draft, true, '', [${JSON.stringify(COMBO('qwen2.5-coder:7b'))}]);
+        const shown = built.rows.slice(0, 2).map((row) => [ObjC.unwrap(row.popup.titleOfSelectedItem), ObjC.unwrap(row.prompt.stringValue)]);
+        const withoutAny = buildPresetEditor({ name: 'alpha' }, draft, true, '', []);
+        return JSON.stringify({ shown, collected: collectPreset(built), alone: collectPreset(withoutAny).terminals.map((t) => t.prompt) });`));
+    assert.deepEqual(out.shown, [['Local Dev · gone:1b → OpenCode · Ollama (nicht gespeichert)', ''],
+        ['Local Dev · qwen2.5-coder:7b → OpenCode · Ollama', '']]);
+    assert.deepEqual(out.collected.terminals.map((t) => [t.type, t.name, t.prompt, t.cwd]), [
+        ['Local Dev', 'Alt', 'ollama gone:1b opencode', ''], ['Local Dev', 'Neu', 'ollama qwen2.5-coder:7b opencode', 'src']]);
+    assert.deepEqual(out.alone, ['ollama gone:1b opencode', 'ollama qwen2.5-coder:7b opencode']);              // auch ganz ohne gespeicherte Kombinationen
+});
+
+test('Preset-Editor: Local-Dev-Kombinationen kommen aus dem Stand, für SSH-Repositories gibt es keine', () => {
+    const combos = { items: [COMBO('qwen2.5-coder:7b')], error: null };
+    const local = flowRun({ state: STATE({ combos, presets: PRESETS }), dashboard: [{ action: 'editGeneralPreset' }, back], editPreset: [null] });
+    assert.deepEqual(local.find((c) => c[0] === 'presetCombos'), ['presetCombos', [COMBO('qwen2.5-coder:7b')]]);
+    const remote = flowRun({ state: STATE({ combos, presets: PRESETS }), dashboard: [{ action: 'editPreset', path: 'vscode-remote://ssh-remote+spark/h/r' }, back],
+        editPreset: [null] });
+    assert.ok(!kinds(remote).includes('presetCombos'));
+    assert.equal(kinds(remote).includes('editPreset'), true);
+});
+
+test('Kombinationen: das Backend ruft genau „combos add|remove“ mit festen Optionen auf', () => {
+    const out = JSON.parse(jxa(`${library}
+function run() {
+    const commands = [];
+    const backend = makeBackend({ doShellScript: (command) => { commands.push(command); return '[]'; } }, '/usr/bin/python3', '/c/vibecode.py');
+    backend.combo('add', { provider: 'ollama', model: '-oX', framework: 'opencode' });
+    backend.combo('remove', { provider: 'ollama', model: "m'; rm -rf ~", framework: 'codex' });
+    return JSON.stringify(commands);
+}`));
+    assert.deepEqual(out, ["'/usr/bin/python3' '/c/vibecode.py' 'combos' 'add' '--provider=ollama' '--model=-oX' '--framework=opencode'",
+        "'/usr/bin/python3' '/c/vibecode.py' 'combos' 'remove' '--provider=ollama' '--model=m'\\''; rm -rf ~' '--framework=codex'"]);
+});
+
 // ------------------------------------------------------------------ Agenten
 
 const SESSION = (state, extra = {}) => Object.assign({ project: 'alpha', agent: 'claude', state, age: 5, branch: 'main' }, extra);
 const AG = (sessions, extra = {}) => Object.assign({ available: true, error: null, sessions }, extra);
 
 test('Übersicht: der Agenten-Bereich steht gleich unter den Workspaces und fasst zusammen, was gerade passiert', () => {
-    const rows = (agents) => JSON.parse(widgets(`return JSON.stringify(dashboardModel(Object.assign({}, STATE, { agents: ${JSON.stringify(agents)} })));`));
+    const rows = (agents) => JSON.parse(widgets(`return JSON.stringify(dashboardRows(Object.assign({}, STATE, { agents: ${JSON.stringify(agents)} })));`));
     const sections = (agents) => rows(agents).filter((row) => row.type === 'section').map((row) => row.text);
     assert.deepEqual(sections(AG([])).slice(0, 2), ['Workspaces', 'Agenten']);
     const item = (agents) => rows(agents).find((row) => row.type === 'item' && row.title === 'Claude Code und Codex');
@@ -804,6 +1086,24 @@ test('Einladungen abholen: ein abgelehnter Fingerprint schreibt nichts, ein scho
     assert.match(known.find((c) => c[0] === 'info')[1], /„book“ war schon freigegeben/);
 });
 
+test('Remote: eine eingehende Freigabe ist auch ohne eigenes SSH-Ziel sichtbar und nur bestätigt widerrufbar', () => {
+    const grant = { name: 'user@book', fingerprint: 'SHA256:' + 'A'.repeat(43) };
+    const state = ssh({ hosts: [], mac: null, grants: [grant] });
+    const row = JSON.parse(widgets(`return JSON.stringify(tabRows(${JSON.stringify(state)}, "remote")
+        .find((row) => row.title === "user@book"));`));
+    assert.equal(row.detail, 'SSH-Schlüssel freigegeben');
+    const [{ label, action }] = row.buttons;
+    assert.equal(label, 'Widerrufen…');
+    const script = { state, dashboard: [action, back] };
+    const cancelled = flowRun({ ...script, confirmRevoke: [false] });
+    assert.ok(!kinds(cancelled).includes('ssh'));
+    const confirmed = flowRun({ ...script, confirmRevoke: [true], sshResults: [result(0, 'SSH-Freigabe widerrufen.')] });
+    assert.deepEqual(confirmed.filter((c) => c[0] === 'confirmRevoke' || c[0] === 'ssh'), [
+        ['confirmRevoke', grant.name, grant.fingerprint], ['ssh', 'revoke', grant.fingerprint],
+    ]);
+    assert.equal(confirmed.filter((c) => c[0] === 'state').length, 2);
+});
+
 test('Einladungen abholen: Fehler, nichts da, fehlender Schlüssel und Hinweise auf zur Seite gelegte Dateien', () => {
     const state = STATE({ tailscale: TS() });
     const failed = flowRun({ state, dashboard: [{ action: 'tailscaleInbox' }, back], sshResults: [result(1, '', 'Remote: Taildrop ist auf diesem Mac nicht verfügbar: x')] });
@@ -860,10 +1160,11 @@ test('Einladungs-Dialoge: Auswahl, Annehmen/Später und der Hinweis zum Schlüss
 const DEVICE = (name, extra = {}) => Object.assign({ name, dns: `${name}.example-tailnet.ts.net`, ip: '100.64.0.9', os: 'macOS', online: true, lastSeen: '' }, extra);
 
 test('Tailscale: „Gerät per SSH verbinden…“ gibt es nur, solange Tailscale läuft und es andere Geräte gibt', () => {
-    const footer = (tailscale) => JSON.parse(widgets(`return JSON.stringify(dashboardModel(Object.assign({}, STATE, { tailscale: ${JSON.stringify(tailscale)} })));`))
-        .filter((row) => row.type === 'footer' && row.buttons.some((b) => b.label === 'Aktualisieren'))[0].buttons.map((b) => b.label);
-    assert.deepEqual(footer(TS({ devices: [DEVICE('studio')] })), ['Gerät per SSH verbinden…', 'Einladungen abholen', 'Aktualisieren']);
-    assert.deepEqual(footer(TS({ devices: [] })), ['Einladungen abholen', 'Aktualisieren']);                // allein im Tailnet: nur Antworten könnten warten
+    const footer = (tailscale) => JSON.parse(widgets(`return JSON.stringify(tabRows(Object.assign({}, STATE,
+        { tailscale: ${JSON.stringify(tailscale)} }), "remote"));`))
+        .filter((row) => row.type === 'footer').flatMap((row) => row.buttons.map((button) => button.label));
+    assert.deepEqual(footer(TS({ devices: [DEVICE('studio')] })), ['Aktualisieren', 'Gerät per SSH verbinden…', 'Einladungen abholen']);
+    assert.deepEqual(footer(TS({ devices: [] })), ['Aktualisieren', 'Einladungen abholen']);                // allein im Tailnet: nur Antworten könnten warten
     assert.deepEqual(footer(TS({ state: 'stopped', devices: [DEVICE('studio')] })), ['Aktualisieren']);     // getrennt: nichts anzubieten
     assert.deepEqual(footer(TS({ state: 'needs-login', devices: [DEVICE('studio')] })), ['Aktualisieren']);
 });
@@ -1151,23 +1452,24 @@ test('App-Einstellungen: Schalter bleiben im Fenster, lesen den Zustand neu und 
     assert.deepEqual(failed.find((c) => c[0] === 'error'), ['error', 'Wachhalten konnte nicht geändert werden.']);
 });
 
-test('App-Einstellungen: ein aktiver Schalter bietet Aus an, ein Statusfehler keinen geratenen Schalter', () => {
-    const model = (wake) => JSON.parse(widgets(`return JSON.stringify(dashboardModel(Object.assign({}, STATE,
-        { settings: { wake: ${JSON.stringify(wake)} } })));`));
-    const on = { enabled: true, text: 'AN', level: 'ok' };
-    const rows = model(on);
-    const settings = rows.slice(rows.findIndex((r) => r.text === 'App-Einstellungen'));
-    const actions = settings.flatMap((r) => r.buttons || []).map((b) => b.action);
-    assert.deepEqual(actions.filter((a) => a.action === 'setting'), [{ action: 'setting', name: 'keep-awake', enabled: false }]);
-    assert.ok(!actions.some((a) => ['launch', 'setup'].includes(a.id)));
-    assert.ok(!actions.some((a) => a.action === 'connect'));
+test('Wachhalten: Workspaces zeigt beide Modi und die App-Auswahl', () => {
+    const model = (wake) => JSON.parse(widgets(`return JSON.stringify(dashboardModel(${JSON.stringify(
+        Object.assign(ssh(), { settings: { wake } }))}));`));
+    const wakeItem = (pages, title) => pages.find((page) => page.id === 'workspaces').rows.find((row) => row.title === title);
+    const apps = ['Claude Code (Remote Control)', 'Codex App'];
+    const pure = model({ enabled: true, withApps: false, apps, text: 'AN', level: 'ok' });
+    const only = wakeItem(pure, 'Nur wachhalten');
+    const combined = wakeItem(pure, 'Wachhalten mit Apps');
+    assert.deepEqual(only.buttons[0].action, { action: 'setting', name: 'keep-awake', enabled: false });
+    assert.deepEqual(combined.buttons[0].action, { action: 'setting', name: 'keep-awake-apps', enabled: true });
+    assert.equal(combined.detail, apps.join(' · '));
+    assert.equal(combined.buttons[1].label, 'Apps wählen…');
+    const withApps = model({ enabled: true, withApps: true, apps, text: 'AN', level: 'ok' });
+    assert.equal(wakeItem(withApps, 'Wachhalten mit Apps').buttons[0].label, 'Ausschalten');
+    assert.equal(wakeItem(withApps, 'Nur wachhalten').buttons[0].label, 'Einschalten');
     const unknown = { enabled: null, text: 'Status nicht lesbar', level: 'warn' };
-    assert.ok(!model(unknown).flatMap((r) => r.buttons || []).some((b) => b.action.action === 'setting'));
-    assert.ok(!model(null).some((r) => r.title === 'Wachhalten & Apps'));
-    // Ohne Wachhalten und ohne Modul-Einträge gibt es den Bereich gar nicht (früher stand dort immer der App-Shortcut).
-    const bare = JSON.parse(widgets(`return JSON.stringify(dashboardModel({ workspaces: [], projects: [], entries: [], settings: { wake: null } })
-        .filter((row) => row.type === 'section').map((row) => row.text));`));
-    assert.deepEqual(bare, ['Workspaces']);
+    assert.deepEqual(wakeItem(model(unknown), 'Wachhalten mit Apps').buttons.map((b) => b.label), ['Apps wählen…']);
+    assert.equal(wakeItem(model(null), 'Nur wachhalten'), undefined);
 });
 
 test('App-Einstellungen: Backend setzt gezielt ein oder aus', () => {
@@ -1188,6 +1490,8 @@ function widgets(body, prelude = '') {
         .replace(PRESENT_DASHBOARD, 'function presentDashboard(built) { return scriptedDashboard(built); }')}
 const titles = (alert) => { const out = []; for (let i = 0; i < alert.buttons.count; i += 1) out.push(ObjC.unwrap(alert.buttons.objectAtIndex(i).title)); return out; };
 const STATE = ${JSON.stringify(STATE())};
+const dashboardRows = (state) => dashboardModel(state).flatMap((tab) => tab.rows);
+const tabRows = (state, id) => dashboardModel(state).find((tab) => tab.id === id).rows;
 const FIRST = Number($.NSAlertFirstButtonReturn);   // the bridged constant would concatenate as text with "+"
 function scriptedDashboard() { throw new Error('scriptedDashboard not provided'); }
 ${prelude}
@@ -1202,48 +1506,46 @@ const MODEL_STATE = Object.assign(ssh(), {
     ],
 });
 
-test('Übersicht: alles Eingerichtete steht direkt da, nichts hinter "Mehr…"', () => {
-    const rows = JSON.parse(widgets(`return JSON.stringify(dashboardModel(${JSON.stringify(MODEL_STATE)}));`));
-    const sections = rows.filter((row) => row.type === 'section').map((row) => row.text);
-    assert.deepEqual(sections, ['Workspaces', 'Remote', 'App-Einstellungen']);
-    const items = rows.filter((row) => row.type === 'item');
-    assert.deepEqual(items.map((row) => row.title), [
-        'Demo', 'Alt', 'spark', 'user@remote-mac.local', 'Wachhalten & Apps', 'Local Dev']);
-    // Shortcut und Warnung stehen vor der (langen) Projektliste: dort wird gekürzt.
+test('Übersicht: vier Reiter mit den passenden Aktionen in jedem Bereich', () => {
+    const pages = JSON.parse(widgets(`return JSON.stringify(dashboardModel(${JSON.stringify(MODEL_STATE)}));`));
+    assert.deepEqual(pages.map((page) => page.label), ['Workspaces', 'Projekte', 'Remote', 'Local Dev']);
+    const workspaceRows = pages[0].rows;
+    const workspaceFooter = workspaceRows.findIndex((row) => row.type === 'footer');
+    const items = workspaceRows.slice(0, workspaceFooter).filter((row) => row.type === 'item');
+    assert.deepEqual(items.map((row) => row.title), ['Demo', 'Alt']);
     assert.equal(items[0].detail, 'Schreibtisch ✓ · A, B');
     assert.equal(items[1].detail, 'kein Shortcut · ⚠︎ nicht gefunden: weg · A, weg');
-    assert.deepEqual(items.map((row) => row.level), ['ok', 'warn', 'ok', 'ok', 'off', 'none']);
-    assert.deepEqual(items[2].detail, '~/projects · 12 Repositories');
-    assert.equal(items[4].detail, 'Wachhalten AUS · Apps: Codex');
-    assert.equal(items[5].detail, '');                                            // Modul ohne Status
+    assert.deepEqual(items.map((row) => row.level), ['ok', 'warn']);
     assert.deepEqual(items[0].buttons.map((b) => b.label), ['Quick-Öffnen', 'Starten', 'Bearbeiten…']);
-    assert.deepEqual(items[0].buttons[0].action, { action: 'quickWorkspace', name: 'Demo', enabled: true });   // aus: anklicken schaltet ein
+    assert.deepEqual(items[0].buttons[0].action, { action: 'quickWorkspace', name: 'Demo', enabled: true });
     assert.deepEqual(items[0].buttons[1].action, { action: 'start', name: 'Demo' });
-    assert.deepEqual(items[3].buttons[0].action, { action: 'connect', item: REMOTE_MAC });
-    assert.deepEqual(items[4].buttons[0].action, { action: 'setting', name: 'keep-awake', enabled: true });
-    assert.deepEqual(items[4].buttons[1].action, { action: 'open', id: 'remote' });
-    const footers = rows.filter((row) => row.type === 'footer').map((row) => row.buttons.map((b) => b.label));
-    assert.deepEqual(footers, [['Workspace anlegen…', 'Einmaliger Workspace…', 'Shortcuts erneuern'], ['Neue Verbindung…', 'Diesen Mac freigeben…']]);
+    assert.equal(items[0].buttons[1].primary, true);
+    assert.deepEqual(workspaceRows[workspaceFooter].buttons.map((b) => b.label),
+        ['Workspace anlegen…', 'Einmaliger Workspace…', 'Shortcuts erneuern']);
+    const sshMac = pages[2].rows.find((row) => row.title === REMOTE_MAC.title);
+    assert.deepEqual(sshMac.buttons[0].action, { action: 'connect', item: REMOTE_MAC });
+    const localDev = pages[3].rows.find((row) => row.type === 'item');
+    assert.equal(localDev.title, 'Local Dev');
+    assert.deepEqual(localDev.buttons.map((button) => button.action), [{ action: 'localSetup' }, { action: 'open', id: 'local' }]);
 });
 
-test('Übersicht: leerer Zustand sagt klar, dass nichts eingerichtet ist', () => {
-    const rows = JSON.parse(widgets(`return JSON.stringify(dashboardModel({ workspaces: [], projects: [], entries: [],
+test('Übersicht: der leere Zustand hängt vom Reiter ab', () => {
+    const pages = JSON.parse(widgets(`return JSON.stringify(dashboardModel({ workspaces: [], projects: [], entries: [],
         ssh: { available: true, guided: true, share: false, hosts: [], mac: null, errors: ['hosts: kaputt'] } }));`));
-    const notes = rows.filter((row) => row.type === 'note');
-    assert.deepEqual(notes.map((row) => row.text), [
-        'Noch kein Workspace angelegt.', 'Noch keine Verbindung eingerichtet.', '⚠︎ hosts: kaputt']);
-    assert.equal(notes[2].level, 'warn');
-    const footers = rows.filter((row) => row.type === 'footer').map((row) => row.buttons.map((b) => b.label));
-    assert.deepEqual(footers, [['Workspace anlegen…'], ['Neue Verbindung…']]);   // ohne Freigabe-Modul kein Freigeben
-    assert.ok(!rows.some((row) => row.text === 'App-Einstellungen'));            // ohne Module kein leerer Bereich
+    const remote = pages[2].rows;
+    const notes = remote.filter((row) => row.type === 'note');
+    assert.deepEqual(notes.map((row) => row.text), ['Noch keine Verbindung zu einem anderen Mac oder Server eingerichtet.', '⚠︎ hosts: kaputt']);
+    assert.equal(notes[1].level, 'warn');
+    assert.ok(!remote.some((row) => row.text === 'Zugriff auf diesen Mac'));
+    assert.ok(pages[0].rows.some((row) => row.text === 'Noch kein Workspace angelegt.'));
 });
 
 test('Übersicht: der SSH-Bereich erscheint nur, wenn ein Modul SSH anbietet', () => {
-    const sections = (extra) => JSON.parse(widgets(`return JSON.stringify(dashboardModel(Object.assign({}, STATE, ${extra}))
+    const sections = (extra) => JSON.parse(widgets(`return JSON.stringify(dashboardRows(Object.assign({}, STATE, ${extra}))
         .filter((row) => row.type === 'section').map((row) => row.text));`));
-    assert.ok(!sections('{}').includes('Remote'));
-    assert.ok(!sections('{ ssh: { available: false, hosts: [], mac: null, errors: [] } }').includes('Remote'));
-    assert.ok(sections(`{ ssh: ${SSH_JSON} }`).includes('Remote'));
+    assert.ok(!sections('{}').includes('Verbindungen von diesem Mac'));
+    assert.ok(!sections('{ ssh: { available: false, hosts: [], mac: null, errors: [] } }').includes('Verbindungen von diesem Mac'));
+    assert.ok(sections(`{ ssh: ${SSH_JSON} }`).includes('Verbindungen von diesem Mac'));
 });
 
 test('Übersicht: echte Knöpfe lösen beim Klick genau die Aktion ihrer Zeile aus', () => {
@@ -1260,8 +1562,8 @@ test('Übersicht: echte Knöpfe lösen beim Klick genau die Aktion ihrer Zeile a
         return JSON.stringify({ titles: built.buttons.map((b) => b.title), clicked, escape,
             title: ObjC.unwrap(built.window.title), afterClose: dashboardAction });`));
     assert.deepEqual(out.titles, ['Quick-Öffnen', 'Starten', 'Bearbeiten…', 'Quick-Öffnen', 'Starten', 'Bearbeiten…', 'Workspace anlegen…',
-        'Einmaliger Workspace…', 'Shortcuts erneuern', 'Verbinden', 'Verbinden', 'Neue Verbindung…', 'Diesen Mac freigeben…',
-        'Einschalten', 'Apps wählen…', 'Einstellen…', 'Öffnen', 'Schließen']);
+        'Einmaliger Workspace…', 'Shortcuts erneuern', 'Einschalten', 'Einschalten', 'Apps wählen…', 'Verbinden', 'Verbinden',
+        'Neue Verbindung…', 'Geführte Einrichtung…', 'Diesen Mac freigeben…', 'Einstellen…', 'Öffnen', 'Schließen']);
     for (const click of out.clicked) assert.deepEqual(click.action, click.expected, click.title);
     assert.deepEqual(out.clicked[out.clicked.length - 1].action, { action: 'close' });
     assert.equal(out.escape, '\u001b');                                           // Esc schließt
@@ -1280,23 +1582,28 @@ test('Übersicht: viele Einträge scrollen, statt das Fenster über den Bildschi
     assert.ok(out.max >= 420 && out.max <= 780);          // richtet sich nach dem Bildschirm, aber in festen Grenzen
     assert.equal(out.big, out.max + 52);                  // gedeckelt: sichtbarer Teil + Fußleiste
     assert.ok(out.bigTotal > out.max);
-    assert.equal(out.small, out.smallTotal + 52);         // kleine Übersicht passt genau
+    assert.ok(out.small > out.smallTotal + 52 && out.small < out.big);
 });
 
-test('Übersicht: die native Oberfläche liefert die Aktion der angeklickten Schaltfläche', () => {
+test('Übersicht: native Reiter wechseln im Fenster und bleiben nach einer Aktion ausgewählt', () => {
     const out = JSON.parse(widgets(`
         const ui = nativeUi({});
-        return JSON.stringify({ chosen: ui.dashboard(${JSON.stringify(MODEL_STATE)}), seen });`, `
+        const state = ${JSON.stringify(MODEL_STATE)};
+        return JSON.stringify({ chosen: ui.dashboard(state), again: ui.dashboard(state), seen });`, `
         const seen = [];
         function scriptedDashboard(built) {
-            seen.push(built.buttons.map((button) => button.title).length);
+            const selected = () => ObjC.unwrap(built.tabs.selectedTabViewItem.identifier);
+            seen.push(selected());
+            if (seen.length > 1) return { action: 'close' };
+            built.navigation[2].view.performClick(null);
+            if (dashboardAction !== null || selected() !== 'remote') throw new Error('Tabwechsel muss im Fenster bleiben');
             const target = built.buttons.find((button) => button.title === 'Verbinden');
-            dashboardAction = null;
             target.view.performClick(null);
             return dashboardAction;
         }`));
     assert.deepEqual(out.chosen, { action: 'connect', item: SPARK });
-    assert.deepEqual(out.seen, [18]);
+    assert.deepEqual(out.seen, ['workspaces', 'remote']);
+    assert.deepEqual(out.again, { action: 'close' });
 });
 
 test('Editor: echte Checkboxen, vorbelegt, fehlende Projekte sichtbar, Eingaben auslesbar', () => {
@@ -1673,20 +1980,21 @@ function run() {
 
 // ------------------------------------------------------------------ Suchordner (Modell und Widgets)
 
-test('Übersicht: Repository-Suche zeigt jeden Ordner mit Zahl und Warnung, zwischen Workspaces und SSH', () => {
-    const rows = JSON.parse(widgets(`return JSON.stringify(dashboardModel(${JSON.stringify(
+test('Projekte: lokale und entfernte Suchordner zeigen jeweils Repository-Zahl und Warnung', () => {
+    const rows = JSON.parse(widgets(`return JSON.stringify(dashboardRows(${JSON.stringify(
         Object.assign(ssh(), { folders: FOLDERS }))}));`));
     assert.deepEqual(rows.filter((row) => row.type === 'section').map((row) => row.text),
-        ['Workspaces', 'Repository-Suche', 'Remote', 'App-Einstellungen']);
-    const start = rows.findIndex((row) => row.text === 'Repository-Suche');
+        ['Workspaces', 'Wachhalten & Apps', 'Lokale Suchordner', 'Remote-Suchordner', 'Verbindungen von diesem Mac',
+            'Zugriff auf diesen Mac', 'Anbieter, Modell und CLI']);
+    const start = rows.findIndex((row) => row.text === 'Lokale Suchordner');
     const items = rows.slice(start).filter((row) => row.type === 'item').slice(0, 6);
     assert.deepEqual(items.map((row) => [row.title, row.detail, row.level]), [
-        ['/Users/example/Github', 'Lokal · 14 Repositories', 'ok'],
+        ['/Users/example/Github', '14 Repositories', 'ok'],
         ['/Volumes/Alt', '⚠︎ Ordner nicht gefunden', 'warn'],
-        ['/Users/example/leer', 'Lokal · ⚠︎ keine Repositories gefunden', 'warn'],
-        ['/Users/example/riesig', 'Lokal · 1 Repository · ⚠︎ Ordner sehr groß, Suche abgebrochen', 'warn'],
-        ['spark:~/projects', 'SSH · 12 Repositories (zuletzt gefunden)', 'ok'],
-        ['studio:/srv', 'SSH · ⚠︎ noch keine Repositories gefunden', 'warn']]);
+        ['/Users/example/leer', '⚠︎ keine Repositories gefunden', 'warn'],
+        ['/Users/example/riesig', '1 Repository · ⚠︎ Ordner sehr groß, Suche abgebrochen', 'warn'],
+        ['spark:~/projects', '12 Repositories (zuletzt gefunden)', 'ok'],
+        ['studio:/srv', '⚠︎ noch keine Repositories gefunden', 'warn']]);
     assert.ok(items.every((row) => row.middle));                                // Pfade werden in der Mitte gekürzt
     assert.deepEqual(items.map((row) => row.buttons.map((b) => b.label)), [
         ['Quick-Öffnen', 'Entfernen'], ['Entfernen'],                           // fehlender Ordner: nichts zu öffnen
@@ -1695,25 +2003,26 @@ test('Übersicht: Repository-Suche zeigt jeden Ordner mit Zahl und Warnung, zwis
         { action: 'removeFolder', kind: 'local', path: '/Users/example/Github', label: '/Users/example/Github' });
     assert.deepEqual(items[4].buttons[0].action,
         { action: 'removeFolder', kind: 'remote', host: 'spark', label: 'spark:~/projects' });
-    const footer = rows.slice(start).find((row) => row.type === 'footer');
-    assert.deepEqual(footer.buttons.map((b) => b.label), ['Ordner hinzufügen…', 'Remote-Ordner hinzufügen…']);
+    const footers = rows.slice(start).filter((row) => row.type === 'footer').slice(0, 2);
+    assert.deepEqual(footers.map((row) => row.buttons.map((button) => button.label)),
+        [['Ordner hinzufügen…'], ['Remote-Ordner hinzufügen…']]);
 });
 
 test('Übersicht: ohne Suchordner steht ein kurzer Hinweis da, und fehlende Module blenden ihren Knopf aus', () => {
-    const model = (folders) => JSON.parse(widgets(`return JSON.stringify(dashboardModel(Object.assign({}, STATE,
+    const model = (folders) => JSON.parse(widgets(`return JSON.stringify(dashboardRows(Object.assign({}, STATE,
         { folders: ${JSON.stringify(folders)} })));`));
     const empty = model({ canAddLocal: true, canAddRemote: false, local: [], remote: [], errors: [] });
-    const note = empty.find((row) => row.text && row.text.startsWith('Noch kein Suchordner'));
-    assert.equal(note.text, 'Noch kein Suchordner: füge einen Ordner mit deinen Repositories hinzu.');
+    const note = empty.find((row) => row.text && row.text.startsWith('Noch kein lokaler Suchordner'));
+    assert.equal(note.text, 'Noch kein lokaler Suchordner eingerichtet.');
     assert.ok(note.text.length < 80);                                            // passt in eine Zeile
     const footers = empty.filter((row) => row.type === 'footer').map((row) => row.buttons.map((b) => b.label));
     assert.deepEqual(footers[1], ['Ordner hinzufügen…']);                       // ohne Hosts-Modul kein Remote-Knopf
     const failing = model(Object.assign({}, FOLDERS, { errors: ['Suchordner: Ungültige search-folders.json'] }));
     assert.ok(failing.some((row) => row.type === 'note' && row.level === 'warn' && row.text.includes('search-folders.json')));
     const sections = (folders) => model(folders).filter((row) => row.type === 'section').map((row) => row.text);
-    assert.ok(!sections({ canAddLocal: false, canAddRemote: false, local: [], remote: [], errors: [] }).includes('Repository-Suche'));
-    assert.deepEqual(JSON.parse(widgets(`return JSON.stringify(dashboardModel(STATE).filter((row) => row.type === 'section')
-        .map((row) => row.text));`)), ['Workspaces', 'App-Einstellungen']);        // alter Zustand ohne folders
+    assert.ok(!sections({ canAddLocal: false, canAddRemote: false, local: [], remote: [], errors: [] }).includes('Lokale Suchordner'));
+    assert.deepEqual(JSON.parse(widgets(`return JSON.stringify(dashboardRows(STATE).filter((row) => row.type === 'section')
+        .map((row) => row.text));`)), ['Workspaces', 'Wachhalten & Apps', 'Anbieter, Modell und CLI']);
 });
 
 test('Übersicht: die Knöpfe der Repository-Suche lösen ihre Aktion aus', () => {
@@ -1728,30 +2037,30 @@ test('Übersicht: die Knöpfe der Repository-Suche lösen ihre Aktion aus', () =
         return JSON.stringify({ clicked });`));
     assert.equal(out.clicked.length, 6 + 2);                                       // 6 Entfernen + 2 Hinzufügen
     for (const click of out.clicked) assert.deepEqual(click.action, click.expected, click.title);
-    assert.deepEqual(out.clicked.map((c) => c.action.action).slice(-2), ['addFolder', 'addRemoteFolder']);
+    assert.deepEqual(out.clicked.map((c) => c.action.action).filter((action) => action !== 'removeFolder'), ['addFolder', 'addRemoteFolder']);
 });
 
 const QUICK = (extra = {}) => withFolders({ local: [Object.assign({ path: '/Users/example/Github', exists: true, repos: 3, truncated: false,
     quickOpen: true, shortcut: 'Github öffnen' }, extra), FOLDERS.local[1]] });
 
 test('Übersicht: Quick-Öffnen ist ein Kästchen neben Entfernen und nennt den Shortcut auf dem Schreibtisch', () => {
-    const model = (state) => JSON.parse(widgets(`return JSON.stringify(dashboardModel(${JSON.stringify(state)}));`));
+    const model = (state) => JSON.parse(widgets(`return JSON.stringify(dashboardRows(${JSON.stringify(state)}));`));
     const folderRow = (state, title = '/Users/example/Github') => model(state).find((row) => row.type === 'item' && row.title === title);
     const off = folderRow(withFolders());
     assert.deepEqual(off.buttons.map((b) => [b.label, Boolean(b.checkbox), b.checked]),
         [['Quick-Öffnen', true, false], ['Entfernen', false, undefined]]);
     assert.deepEqual(off.buttons[0].action, { action: 'quickOpen', path: '/Users/example/Github', enabled: true });     // anklicken = einschalten
-    assert.equal(off.detail, 'Lokal · 14 Repositories');
+    assert.equal(off.detail, '14 Repositories');
     const on = folderRow(QUICK());
     assert.deepEqual(on.buttons.map((b) => [b.label, Boolean(b.checkbox), b.checked]),
         [['Quick-Öffnen', true, true], ['Entfernen', false, undefined]]);
     assert.deepEqual(on.buttons[0].action, { action: 'quickOpen', path: '/Users/example/Github', enabled: false });     // anklicken = ausschalten
-    assert.equal(on.detail, 'Lokal · 3 Repositories · Schreibtisch: „Github öffnen“');
+    assert.equal(on.detail, '3 Repositories · Schreibtisch: „Github öffnen“');
     // Ein fehlender Ordner hat nichts zu öffnen: kein Kästchen. Eine Warnung wird nicht von dem Namen überdeckt.
     assert.deepEqual(folderRow(QUICK(), '/Volumes/Alt').buttons.map((b) => b.label), ['Entfernen']);
-    assert.equal(folderRow(QUICK({ repos: 0 })).detail, 'Lokal · ⚠︎ keine Repositories gefunden');
+    assert.equal(folderRow(QUICK({ repos: 0 })).detail, '⚠︎ keine Repositories gefunden');
     const noName = folderRow(QUICK({ shortcut: null }));
-    assert.equal(noName.detail, 'Lokal · 3 Repositories');                              // Name nicht bestimmbar: nur das Kästchen
+    assert.equal(noName.detail, '3 Repositories');                              // Name nicht bestimmbar: nur das Kästchen
 });
 
 test('Übersicht: das Quick-Öffnen-Kästchen ist ein echter Schalter und löst seine Aktion aus', () => {
@@ -1794,7 +2103,7 @@ const QUICK_WS = (quickOpen) => STATE({ workspaces: [
     { name: 'Solo', projects: ['B'], shortcut: true, quickOpen: false, missing: [] }] });
 
 test('Übersicht: Quick-Öffnen bei Workspaces ist ein Kästchen vor Starten und zeigt „Quick ✓“, wenn es an ist', () => {
-    const rows = (state) => JSON.parse(widgets(`return JSON.stringify(dashboardModel(${JSON.stringify(state)}));`));
+    const rows = (state) => JSON.parse(widgets(`return JSON.stringify(dashboardRows(${JSON.stringify(state)}));`));
     const item = (state, title) => rows(state).find((row) => row.type === 'item' && row.title === title);
     const on = item(QUICK_WS(true), 'Demo');
     assert.deepEqual(on.buttons.map((b) => [b.label, Boolean(b.checkbox), b.checked]),
@@ -1996,7 +2305,7 @@ const ALL = { available: true, error: null, current: { provider: 'mlx', model: '
     OPTION('ollama', 'big:70b', 'opencode', { local: false, providerReady: true, frameworkReady: true })] };
 
 test('Übersicht: nur die Local-Dev-Zeile bekommt „Einstellen…“, vor „Öffnen“', () => {
-    const rows = JSON.parse(widgets(`return JSON.stringify(dashboardModel(${JSON.stringify(STATE({
+    const rows = JSON.parse(widgets(`return JSON.stringify(dashboardRows(${JSON.stringify(STATE({
         entries: [{ id: 'local', title: 'Local Dev', status: { text: 'MLX · Spark → opencode', level: 'ok' } }, { id: 'remote', title: 'Remote', status: null }] }))}));`));
     const local = rows.find((row) => row.type === 'item' && row.title === 'Local Dev');
     assert.deepEqual(local.buttons.map((b) => b.label), ['Einstellen…', 'Öffnen']);
@@ -2080,11 +2389,37 @@ function run() {
 });
 
 test('Übersicht: ein Workspace mit Local Dev zeigt „Local Dev ✓“ in der Zeile', () => {
-    const rows = JSON.parse(widgets(`return JSON.stringify(dashboardModel(${JSON.stringify(STATE({ workspaces: [
+    const rows = JSON.parse(widgets(`return JSON.stringify(dashboardRows(${JSON.stringify(STATE({ workspaces: [
         { name: 'Demo', projects: ['A', 'B'], shortcut: true, quickOpen: true, localDev: SAVED, missing: [] },
         { name: 'Solo', projects: ['B'], shortcut: false, missing: [] }] }))}));`));
     const details = rows.filter((row) => row.type === 'item').slice(0, 2).map((row) => row.detail);
     assert.deepEqual(details, ['Schreibtisch ✓ · Quick ✓ · Local Dev ✓ · A, B', 'kein Shortcut · B']);
+});
+
+test('Remote-Ordner-Dialog: das Host-Feld ist eine Combo-Box mit den verbundenen Geräten und bleibt frei beschreibbar', () => {
+    const out = JSON.parse(widgets(`
+        steps.push({ response: FIRST, host: 'frei-getippt' }, { response: FIRST });
+        const typed = nativeUi({}).askRemoteFolder('', 'user@mac-a.local', ['user@mac-a.local', 'spark']);
+        const plain = nativeUi({}).askRemoteFolder('', undefined, []);
+        return JSON.stringify({ typed, plain, seen });`, `
+        const steps = [];
+        const seen = [];
+        function scriptedPresent(alert, built) {
+            const host = built.host;
+            seen.push({ combo: Boolean(host.isKindOfClass($.NSComboBox)), editable: Boolean(host.editable), value: ObjC.unwrap(host.stringValue),
+                items: Array.from({ length: Number(host.numberOfItems) }, (_, i) => ObjC.unwrap(host.itemObjectValueAtIndex(i))),
+                label: ObjC.unwrap(built.alert.accessoryView.subviews.objectAtIndex(0).stringValue) });
+            const step = steps.shift() || { response: FIRST, host: 'x' };
+            if (step.host !== undefined) host.stringValue = $(step.host);
+            return step.response;
+        }`));
+    assert.deepEqual(out.typed, { host: 'frei-getippt', root: '' });                     // auch ein Host, der nicht in der Liste steht
+    assert.deepEqual(out.seen[0].items, ['user@mac-a.local', 'spark']);
+    assert.equal(out.seen[0].value, 'user@mac-a.local');                                 // der Vorschlag steht im Feld
+    assert.ok(out.seen[0].combo && out.seen[0].editable);
+    assert.match(out.seen[0].label, /Liste öffnen oder .* eintippen/);
+    assert.deepEqual(out.seen[1].items, []);                                             // ohne bekannte Geräte: das Feld wie vorher
+    assert.match(out.seen[1].label, /Alias aus ~\/\.ssh\/config/);
 });
 
 test('Remote-Ordner-Dialog: Host ist Pflicht, Eingaben bleiben stehen, Abbrechen liefert null', () => {
@@ -2181,12 +2516,13 @@ function run(argv) {
 // ------------------------------------------------------------------ Presets (Modell und Widgets)
 
 test('Übersicht: Presets pro Repository zeigen, was gilt, und was nach einem Umzug zu tun ist', () => {
-    const rows = JSON.parse(widgets(`return JSON.stringify(dashboardModel(${JSON.stringify(
+    const rows = JSON.parse(widgets(`return JSON.stringify(dashboardRows(${JSON.stringify(
         Object.assign(ssh(), { folders: FOLDERS, presets: PRESETS }))}));`));
     assert.deepEqual(rows.filter((row) => row.type === 'section').map((row) => row.text),
-        ['Workspaces', 'Repository-Suche', 'Presets pro Repository', 'Remote', 'App-Einstellungen']);
+        ['Workspaces', 'Wachhalten & Apps', 'Lokale Suchordner', 'Remote-Suchordner', 'Presets pro Repository',
+            'Verbindungen von diesem Mac', 'Zugriff auf diesen Mac', 'Anbieter, Modell und CLI']);
     const start = rows.findIndex((row) => row.text === 'Presets pro Repository');
-    const after = rows.slice(start + 1, rows.findIndex((row) => row.text === 'Remote'));
+    const after = rows.slice(start + 1, rows.findIndex((row, index) => index > start && row.type === 'section'));
     assert.equal(after[0].title, 'Allgemeiner Standard');
     const items = after.filter((row) => row.type === 'item');
     assert.deepEqual(items.map((row) => [row.title, row.detail, row.level]), [
@@ -2205,7 +2541,7 @@ test('Übersicht: Presets pro Repository zeigen, was gilt, und was nach einem Um
 });
 
 test('Übersicht: Presets ohne Repositories bieten kein Anlegen an, ohne Modul gibt es den Bereich nicht', () => {
-    const model = (presets) => JSON.parse(widgets(`return JSON.stringify(dashboardModel(Object.assign({}, STATE,
+    const model = (presets) => JSON.parse(widgets(`return JSON.stringify(dashboardRows(Object.assign({}, STATE,
         { presets: ${JSON.stringify(presets)} })));`));
     const none = model(Object.assign({}, PRESETS, { repos: [], items: [], orphans: [], errors: ['Presets: kaputt'] }));
     const start = none.findIndex((row) => row.text === 'Presets pro Repository');
@@ -2223,7 +2559,7 @@ test('Übersicht: Presets ohne Repositories bieten kein Anlegen an, ohne Modul g
 
 test('Übersicht: ein festgelegter allgemeiner Standard ersetzt die eingebaute Zeile und lässt sich bearbeiten und zurücksetzen', () => {
     const general = { terminals: [TERM('Shell'), TERM('Agent', 'Claude Code')], urls: ['http://localhost:3000', 'http://localhost:6006'] };
-    const rows = JSON.parse(widgets(`return JSON.stringify(dashboardModel(${JSON.stringify(
+    const rows = JSON.parse(widgets(`return JSON.stringify(dashboardRows(${JSON.stringify(
         Object.assign(ssh(), { presets: Object.assign({}, PRESETS, { general }) }))}));`));
     const start = rows.findIndex((row) => row.text === 'Presets pro Repository');
     const item = rows.slice(start + 1).find((row) => row.type === 'item');

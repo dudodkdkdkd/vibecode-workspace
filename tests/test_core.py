@@ -43,6 +43,10 @@ class CoreTests(unittest.TestCase):
         autostart = patch.object(core, 'tailscale_autostart')
         self.autostart = autostart.start()
         self.addCleanup(autostart.stop)
+        # Auch die Ollama-Modelle liest kein Test aus dem echten Home: ein eigener Test prüft die echte Funktion mit Wegwerf-Ordnern.
+        models = patch.object(core, 'ollama_models', return_value={'available': False})
+        models.start()
+        self.addCleanup(models.stop)
 
     def save(self, name='Demo', projects=('A', 'B'), shortcut=False, rename_from=None):
         return core.save_workspace(name, list(projects), shortcut, rename_from)
@@ -163,9 +167,12 @@ class CoreTests(unittest.TestCase):
                                  env=dict(os.environ), timeout=30)
             self.assertEqual(json.loads(out.stdout), ['run', name], out.stderr)
 
-    def test_wake_setting_uses_only_on_off_and_reports_failures(self):
+    def test_wake_setting_supports_both_modes_and_reports_failures(self):
         with patch.object(core, 'call_module', return_value={'code': 0, 'out': '', 'err': ''}) as call:
             self.cli('settings', 'keep-awake', 'on')
+            call.assert_called_once_with('remote', ['on', '--wake-only'], timeout=30)
+            call.reset_mock()
+            self.cli('settings', 'keep-awake-apps', 'on')
             call.assert_called_once_with('remote', ['on'], timeout=30)
             call.reset_mock()
             core.setting_action('keep-awake', False)
@@ -213,7 +220,7 @@ class CoreTests(unittest.TestCase):
 
     def test_repository_modules_register_themselves(self):
         entries = {e['id']: e for e in core.module_entries()}
-        self.assertEqual(set(entries), {'launch', 'setup', 'preset-store', 'search-folders', 'hosts', 'remote', 'local'})
+        self.assertEqual(set(entries), {'launch', 'setup', 'preset-store', 'search-folders', 'hosts', 'remote', 'local', 'local-models'})
         self.assertFalse(entries['hosts'].get('menu'))        # Hilfseintrag, kein Menüpunkt
         argv = core.entry_argv(entries['remote'], ['ssh', 'share'])
         self.assertEqual(argv[0], 'python3')
@@ -242,6 +249,7 @@ class CoreTests(unittest.TestCase):
             core.module_entries()
 
     def test_state_reports_missing_projects_and_menu_entries(self):
+        self.fake_home()
         self.save('Demo', ['A', 'weg'], shortcut=False)
         with patch.object(core, 'list_project_paths', return_value=[('A', '/a'), ('B', '/b')]):
             state = core.state()
@@ -299,8 +307,9 @@ class CoreTests(unittest.TestCase):
 
     def test_ssh_state_combines_hosts_and_the_saved_mac(self):
         replies = {'hosts': {'code': 0, 'out': '[{"host": "spark", "root": "~/p", "repos": 3}]', 'err': ''},
-                   'remote': {'code': 0, 'out': '{"target": {"user": "t", "host": "remote-mac.local", "port": 22}}', 'err': ''}}
-        with patch.object(core, 'call_module', side_effect=lambda entry, args, timeout=60: replies[entry]) as call:
+                   'show': {'code': 0, 'out': '{"target": {"user": "t", "host": "remote-mac.local", "port": 22}}', 'err': ''},
+                   'access': {'code': 0, 'out': '[]', 'err': ''}}
+        with patch.object(core, 'call_module', side_effect=lambda entry, args, timeout=60: replies[args[1] if entry == 'remote' else entry]) as call:
             info = core.ssh_state()
         self.assertEqual(info['hosts'], [{'host': 'spark', 'root': '~/p', 'repos': 3}])
         self.assertEqual(info['mac'], {'user': 't', 'host': 'remote-mac.local', 'port': 22})
@@ -310,8 +319,9 @@ class CoreTests(unittest.TestCase):
 
     def test_ssh_state_reports_a_broken_source_without_breaking_the_rest(self):
         replies = {'hosts': {'code': 1, 'out': '', 'err': 'Ungültige remote-hosts.json'},
-                   'remote': {'code': 0, 'out': '{"target": null}', 'err': ''}}
-        with patch.object(core, 'call_module', side_effect=lambda entry, args, timeout=60: replies[entry]):
+                   'show': {'code': 0, 'out': '{"target": null}', 'err': ''},
+                   'access': {'code': 0, 'out': '[]', 'err': ''}}
+        with patch.object(core, 'call_module', side_effect=lambda entry, args, timeout=60: replies[args[1] if entry == 'remote' else entry]):
             info = core.ssh_state()
         self.assertEqual(info['hosts'], [])
         self.assertEqual(info['errors'], ['hosts: Ungültige remote-hosts.json'])
@@ -396,7 +406,7 @@ class CoreTests(unittest.TestCase):
     def test_ssh_actions_are_a_fixed_list_and_bad_lines_are_rejected(self):
         with patch.object(core, 'call_module') as call:
             for action, line in [('rm', ''), ('join', ''), ('join', '   '), ('join', 'a\nb'), ('join', "it's open"),
-                                 ('join', 'workspace remote ssh join'), ('allow', 'workspace remote ssh allow'),
+                                 ('join', 'workspace remote ssh join'), ('allow', 'workspace remote ssh allow'), ('revoke', '--yes'),
                                  ('allow', 'x' * 2001), ('allow-check', None)]:
                 with self.assertRaises(ValueError, msg=(action, line)):
                     core.ssh_action(action, line)
@@ -427,6 +437,11 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(json.loads(core.ssh_action('allow-check', line)['out'])['known'])
         refused = core.ssh_action('allow-check', "workspace remote ssh allow 'command=\"x\" " + key + "'")
         self.assertEqual(refused['code'], 1)
+        self.assertEqual(core.ssh_state()['grants'], [{'name': info['name'], 'fingerprint': info['fingerprint']}])
+        done = core.ssh_action('revoke', info['fingerprint'])
+        self.assertEqual(done['code'], 0, done)
+        self.assertEqual(core.ssh_state()['grants'], [])
+        self.assertFalse(json.loads(core.ssh_action('allow-check', line)['out'])['known'])
 
     def test_open_ssh_only_connects_to_configured_hosts(self):
         hosts = {'hosts': [{'host': 'spark', 'root': '~', 'repos': 1}], 'mac': None}
@@ -642,6 +657,7 @@ class CoreTests(unittest.TestCase):
         self.assertTrue((github / 'alpha').is_dir())                                  # nichts gelöscht
 
     def test_remote_hosts_work_end_to_end_with_the_real_module_but_no_ssh(self):
+        self.fake_home()
         real = core.call_module
 
         def no_ssh(entry, args, timeout=60):
@@ -1771,6 +1787,142 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(shlex.split(run.call_args.args[0][-1]),
                          ['exec', sys.executable, str(ROOT / 'core' / 'terminal_session.py'),
                           '/bin/zsh', str(ROOT / 'local-dev' / 'launcher.zsh')])
+
+
+class OllamaModelTests(unittest.TestCase):
+    """The Ollama part of the Local Dev tab against throwaway folders and a fake `ollama`; never the real one."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix='vibecode-ollama-'))
+        self.addCleanup(lambda: subprocess.run(['/bin/rm', '-rf', str(self.tmp)]))
+        self.log = self.tmp / 'calls.log'
+        fake = self.tmp / 'ollama'
+        fake.write_text('#!/bin/sh\necho "$*" >> "$FAKE_LOG"\n[ -n "$FAKE_FAIL" ] && { echo "$FAKE_FAIL" >&2; exit 1; }\nexit 0\n')
+        fake.chmod(0o755)
+        config = self.tmp / 'local-ai.json'
+        config.write_text(json.dumps({'providers': {'ollama': {'type': 'ollama', 'name': 'Ollama (lokal)', 'default_model': 'a:1b',
+                                                                'server_command': str(fake)}}}), encoding='utf-8')
+        manifest = self.tmp / 'models' / 'manifests' / 'registry.ollama.ai' / 'library' / 'b' / '2b'
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text(json.dumps({'config': {'size': 1}, 'layers': [{'size': 9}]}), encoding='utf-8')
+        env = patch.dict(os.environ, {'LOCAL_DEV_CONFIG_FILE': str(config), 'OLLAMA_MODELS': str(self.tmp / 'models'),
+                                      'FAKE_LOG': str(self.log), 'FAKE_FAIL': ''})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def test_models_for_the_window_come_from_the_module(self):
+        found = core.ollama_models()
+        self.assertTrue(found['available'] and found['cli'])
+        self.assertEqual([(m['name'], m['size']) for m in found['models']], [('b:2b', 10)])
+        self.assertEqual(found['missing'][0], {'name': 'a:1b', 'why': 'eingestellt'})
+        self.assertFalse(self.log.exists())                                        # reading never starts ollama
+
+    def test_a_broken_module_answer_is_shown_as_a_message_not_as_a_crash(self):
+        with patch.object(core, 'call_module', return_value={'code': 1, 'out': '', 'err': '× Etwas ist kaputt'}):
+            self.assertEqual(core.ollama_models(), {'available': True, 'error': 'Ollama-Modelle: Etwas ist kaputt', 'models': [], 'missing': []})
+        with patch.object(core, 'call_module', return_value={'code': 0, 'out': '[1]', 'err': ''}):
+            self.assertIn('Ollama-Modelle:', core.ollama_models()['error'])
+        with patch.object(core, 'call_module', return_value={'code': 0, 'out': '{"available": true}', 'err': ''}):
+            self.assertIn('Ollama-Modelle:', core.ollama_models()['error'])
+        with patch.object(core, 'module_entries', return_value=[]):
+            self.assertEqual(core.ollama_models(), {'available': False})
+
+    def test_pull_opens_a_terminal_with_the_module_and_the_name_only_after_it_was_checked(self):
+        with patch.object(core, 'open_in_terminal') as terminal:
+            message = core.model_action('pull', 'qwen2.5-coder:7b')
+        argv = terminal.call_args.args[0]
+        self.assertEqual(argv[-2:], ['pull', 'qwen2.5-coder:7b'])
+        self.assertTrue(argv[-3].endswith('local-dev/models.py'))
+        self.assertIn('Terminal geöffnet', message)
+        for bad in ('-oProxyCommand=x', 'a b', '../x', 'x;rm'):
+            with patch.object(core, 'open_in_terminal') as terminal, self.assertRaisesRegex(ValueError, 'Ungültiger Modellname', msg=bad):
+                core.model_action('pull', bad)
+            terminal.assert_not_called()
+        self.assertFalse(self.log.exists())
+
+    def test_remove_runs_ollama_rm_and_reports_failures_readably(self):
+        self.assertEqual(core.model_action('remove', 'b:2b'), '„b:2b“ wurde entfernt.')
+        self.assertEqual(self.log.read_text().strip(), 'rm b:2b')
+        with self.assertRaisesRegex(ValueError, 'nicht installiert'):
+            core.model_action('remove', 'unbekannt:1b')
+        with patch.dict(os.environ, {'FAKE_FAIL': 'could not connect to ollama app'}), self.assertRaisesRegex(ValueError, 'could not connect'):
+            core.model_action('remove', 'b:2b')
+
+    def test_unknown_actions_and_empty_names_are_refused(self):
+        for action, name in (('push', 'b:2b'), ('remove', ''), ('remove', None), ('pull', '  ')):
+            with self.assertRaises(ValueError, msg=(action, name)):
+                core.model_action(action, name)
+
+    def test_command_line_models_pull_and_remove(self):
+        with patch.object(core, 'open_in_terminal'), redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(core.main(['models', 'pull', 'b:2b']), 0)
+        self.assertIn('Terminal geöffnet', out.getvalue())
+        with redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(core.main(['models', 'remove', 'b:2b']), 0)
+        self.assertIn('wurde entfernt', out.getvalue())
+
+
+class ComboTests(unittest.TestCase):
+    """Saved provider/model/CLI combinations: only a throwaway config folder."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix='vibecode-combos-'))
+        self.addCleanup(lambda: subprocess.run(['/bin/rm', '-rf', str(self.tmp)]))
+        env = patch.dict(os.environ, {'VIBECODE_CONFIG_DIR': str(self.tmp / 'config')})
+        env.start()
+        self.addCleanup(env.stop)
+        self.qwen = {'provider': 'ollama', 'model': 'qwen2.5-coder:7b', 'framework': 'opencode'}
+        self.gemma = {'provider': 'ollama', 'model': 'gemma3:4b', 'framework': 'codex'}
+
+    def test_add_keeps_order_ignores_duplicates_and_remove_is_exact(self):
+        self.assertEqual(core.combos_state(), {'items': [], 'error': None})                 # no file yet: empty, nothing written
+        self.assertFalse((self.tmp / 'config' / 'local-combos.json').exists())
+        self.assertEqual(core.combo_action('add', self.qwen), [self.qwen])
+        self.assertEqual(core.combo_action('add', self.gemma), [self.qwen, self.gemma])
+        self.assertEqual(core.combo_action('add', dict(self.qwen)), [self.qwen, self.gemma])
+        self.assertEqual(core.combos_state()['items'], [self.qwen, self.gemma])
+        self.assertEqual(core.combo_action('remove', self.qwen), [self.gemma])
+        self.assertEqual(core.combo_action('remove', self.qwen), [self.gemma])              # again: no error
+        self.assertEqual(core.combo_action('remove', dict(self.gemma, framework='opencode')), [self.gemma])   # other CLI: untouched
+
+    def test_only_three_plain_words_are_accepted(self):
+        for bad in ({'provider': 'ollama', 'model': 'a b', 'framework': 'x'}, {'provider': 'ollama', 'model': "a'b", 'framework': 'x'},
+                    {'provider': '', 'model': 'm', 'framework': 'x'}, {'provider': 'ollama', 'model': '-m', 'framework': 'x'},
+                    {'provider': 'o', 'model': 'm\n', 'framework': 'x'}, {'provider': 'o', 'model': 'm'}, {'provider': 'o', 'model': 'm', 'framework': 'x', 'extra': 1},
+                    'text', None):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                core.combo_action('add', bad)
+        self.assertFalse((self.tmp / 'config' / 'local-combos.json').exists())
+
+    def test_a_damaged_file_is_reported_and_never_replaced(self):
+        path = self.tmp / 'config' / 'local-combos.json'
+        path.parent.mkdir(parents=True)
+        for text in ('{kaputt', '[]', '{"version": 2, "combos": []}', '{"version": 1, "combos": [{"provider": "a"}]}'):
+            path.write_text(text, encoding='utf-8')
+            self.assertIn('Kombinationen:', core.combos_state()['error'], text)
+            with self.assertRaises(ValueError):
+                core.combo_action('add', self.qwen)
+            self.assertEqual(path.read_text(encoding='utf-8'), text)                         # untouched
+
+    def test_at_most_forty_and_unknown_actions(self):
+        for number in range(core.MAX_COMBOS):
+            core.combo_action('add', dict(self.qwen, model=f'm{number}'))
+        with self.assertRaisesRegex(ValueError, 'Höchstens 40'):
+            core.combo_action('add', self.qwen)
+        with self.assertRaises(ValueError):
+            core.combo_action('push', self.qwen)
+
+    def test_command_line_combos(self):
+        flags = ['--provider=ollama', '--model=qwen2.5-coder:7b', '--framework=opencode']
+        with redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(core.main(['combos', 'add', *flags]), 0)
+        self.assertEqual(json.loads(out.getvalue()), [self.qwen])
+        with redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(core.main(['combos', 'list']), 0)
+        self.assertEqual(json.loads(out.getvalue()), [self.qwen])
+        with redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(core.main(['combos', 'remove', *flags]), 0)
+        self.assertEqual(json.loads(out.getvalue()), [])
 
 
 if __name__ == '__main__':

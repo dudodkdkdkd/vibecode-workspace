@@ -24,9 +24,10 @@ LAUNCHER = REPO / 'workspaces' / 'VibeCode Workspace.command'
 NAME_MAX = 60
 ENTRY_ID = re.compile(r'[a-z][a-z0-9-]*')
 RESERVED = {'run', 'start', 'list', 'save', 'delete', 'open', 'shortcuts', 'projects',
-            'window', 'help', '_state', '_ssh', 'ssh-open', 'folders', 'presets', 'settings', 'open-folder', 'open-workspace', 'workspace-quick', 'local-options', 'local-settings', 'local-default', 'tailscale', 'agents'}
+            'window', 'help', '_state', '_ssh', 'ssh-open', 'folders', 'presets', 'settings', 'open-folder', 'open-workspace', 'workspace-quick', 'local-options', 'local-settings', 'local-default', 'tailscale', 'agents', 'models', 'combos'}
 # Everything the window may trigger over SSH. Fixed on purpose: no arbitrary commands.
-SSH_ACTIONS = ('share', 'share-wake', 'share-recheck', 'join', 'allow-check', 'allow', 'tailnet', 'invite', 'inbox', 'accept', 'grant-check', 'grant')
+SSH_ACTIONS = ('share', 'share-wake', 'share-recheck', 'join', 'allow-check', 'allow',
+               'tailnet', 'invite', 'inbox', 'accept', 'grant-check', 'grant', 'revoke')
 # Everything the window may do with Tailscale. Fixed on purpose; `setup` only opens a Terminal (VibeCode never runs sudo itself).
 TAILSCALE_ACTIONS = ('up', 'down', 'login', 'logout', 'auto-on', 'auto-off', 'setup')
 
@@ -551,11 +552,107 @@ def set_local_dev_default(value):
     return local_dev_module(['--set-default'] + [value[key] for key in LOCAL_DEV_KEYS])
 
 
+# --- Kombinationen: gespeicherte Paare aus Anbieter, Modell und CLI, die der Preset-Editor als Terminal anbietet -------------
+
+COMBO_PART = re.compile(r'[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,150}')      # dieselbe Regel wie localDevParts in terminal-setup.js
+MAX_COMBOS = 40
+
+
+def clean_combo(value):
+    """One combination: provider, model and CLI as three words without spaces or quotes (they travel in a terminal preset's
+    prompt, space separated). Anything else is rejected, never repaired."""
+    value = clean_local_dev(value)
+    for key in LOCAL_DEV_KEYS:
+        if not COMBO_PART.fullmatch(value[key]):
+            raise ValueError(f'„{value[key]}“ ist für eine Kombination nicht erlaubt (Buchstaben, Ziffern und . _ : / @ + -).')
+    return value
+
+
+def combos_load():
+    path = config_dir() / 'local-combos.json'
+    if not path.exists():
+        return []
+    # Beschädigte Daten werden abgelehnt, nie durch eine leere Liste ersetzt.
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+        if not isinstance(data, dict) or data.get('version') != 1 or not isinstance(data.get('combos'), list):
+            raise ValueError('falsches Format')
+        return [clean_combo(entry) for entry in data['combos']]
+    except (ValueError, TypeError) as exc:
+        raise ValueError(f'{path} ist ungültig ({exc}). Datei prüfen oder umbenennen.') from exc
+
+
+def combos_state():
+    try:
+        return {'items': combos_load(), 'error': None}
+    except ValueError as exc:
+        return {'items': [], 'error': f'Kombinationen: {exc}'}
+
+
+def combo_action(action, value):
+    """Add (duplicates are ignored) or remove one combination. Returns the new list."""
+    if action not in ('add', 'remove'):
+        raise ValueError(f'Unbekannte Kombinations-Aktion „{action}“.')
+    value = clean_combo(value)
+    items = combos_load()
+    if action == 'add' and value not in items:
+        if len(items) >= MAX_COMBOS:
+            raise ValueError(f'Höchstens {MAX_COMBOS} Kombinationen.')
+        items.append(value)
+    elif action == 'remove':
+        items = [item for item in items if item != value]
+    atomic_write(config_dir() / 'local-combos.json', json.dumps({'version': 1, 'combos': items}, indent=2, ensure_ascii=False) + '\n')
+    return items
+
+
+# --- Ollama-Modelle: installierte und noch nicht geladene, Laden (im Terminal) und Entfernen -------------------------------
+
+def ollama_models():
+    """The Ollama models for the Local Dev tab: {'available', 'provider', 'cli', 'models', 'missing', 'error'}. The local-dev module
+    reads its own files (no `ollama` call, no network), so this is cheap enough for every redraw."""
+    if 'local-models' not in {e['id'] for e in module_entries()}:
+        return {'available': False}
+    try:
+        result = call_module('local-models', ['list'], timeout=15)
+        data = json.loads(result['out']) if not result['code'] else None
+        if (not isinstance(data, dict) or type(data.get('available')) is not bool
+                or (data['available'] and not all(isinstance(data.get(key), list) for key in ('models', 'missing')))):
+            raise ValueError(re.sub(r'^×\s*', '', (result['err'] or result['out'] or 'Ungültige Antwort').splitlines()[-1]))
+    except (ValueError, OSError, subprocess.SubprocessError) as exc:
+        return {'available': True, 'error': f'Ollama-Modelle: {exc}', 'models': [], 'missing': []}
+    return data
+
+
+def model_action(action, name):
+    """Download (opens a Terminal: the progress is the point) or remove one Ollama model. The module checks the name."""
+    if action not in ('pull', 'remove'):
+        raise ValueError(f'Unbekannte Modell-Aktion „{action}“.')
+    entries = {e['id']: e for e in module_entries()}
+    if 'local-models' not in entries:
+        raise ValueError('Das Local-Dev-Modul fehlt.')
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError('Bitte einen Modellnamen angeben.')
+    if action == 'pull':
+        check = call_module('local-models', ['check', name], timeout=15)         # a wrong name must fail here, not in a Terminal
+        if check['code']:
+            raise ValueError(re.sub(r'^×\s*', '', check['err'] or check['out'] or 'Ungültiger Modellname.'))
+        open_in_terminal(entry_argv(entries['local-models'], ['pull', name]))
+        return (f'Terminal geöffnet. Dort wird „{name}“ geladen. Ist es fertig, hier unter Local Dev auf „Aktualisieren“ '
+                'klicken, dann steht das Modell in der Liste.')
+    result = call_module('local-models', ['remove', name], timeout=90)
+    if result['code']:
+        raise ValueError(re.sub(r'^×\s*', '', result['err'] or result['out'] or f'Status {result["code"]}'))
+    return result['out']
+
+
 def setting_action(name, enabled):
     if type(enabled) is not bool:
         raise ValueError('Die Einstellung muss ein- oder ausgeschaltet werden.')
-    if name == 'keep-awake':
-        result = call_module('remote', ['on' if enabled else 'off'], timeout=30)
+    if name in ('keep-awake', 'keep-awake-apps'):
+        args = ['on'] if enabled else ['off']
+        if enabled and name == 'keep-awake':
+            args.append('--wake-only')
+        result = call_module('remote', args, timeout=30)
         if result['code']:
             raise ValueError(result['err'] or result['out'] or 'Wachhalten konnte nicht geändert werden.')
     else:
@@ -732,11 +829,13 @@ def call_module(entry_id, args, timeout=60):
 
 
 def ssh_state():
-    """SSH overview for the window: configured hosts, the saved Mac target, what is available."""
+    """SSH overview for the window: saved targets and incoming key grants."""
     present = {e['id'] for e in module_entries()}
-    info = {'hosts': [], 'mac': None, 'guided': 'setup' in present, 'share': 'remote' in present, 'errors': []}
+    info = {'hosts': [], 'mac': None, 'grants': [], 'guided': 'setup' in present,
+            'share': 'remote' in present, 'errors': []}
     for entry_id, args, key in (('hosts', ['list', str(config_dir())], 'hosts'),
-                                ('remote', ['ssh', 'show'], 'mac')):
+                                ('remote', ['ssh', 'show'], 'mac'),
+                                ('remote', ['ssh', 'access'], 'grants')):
         if entry_id not in present:
             continue
         try:
@@ -744,6 +843,8 @@ def ssh_state():
             if result['code']:
                 raise ValueError(result['err'] or result['out'] or f'Status {result["code"]}')
             data = json.loads(result['out'])
+            if key == 'grants' and not isinstance(data, list):
+                raise ValueError('SSH-Freigaben konnten nicht gelesen werden.')
             info[key] = data['target'] if key == 'mac' else data
         except (ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
             info['errors'].append(f'{entry_id}: {exc}')
@@ -1123,6 +1224,10 @@ def ssh_action(action, line=''):
         if len(tokens) != 1 or not re.fullmatch(r'[0-9a-f]{32}', tokens[0]):
             raise ValueError('Ungültiger Einladungscode.')
         args = {'accept': ['ssh', 'accept'], 'grant-check': ['ssh', 'grant', '--check'], 'grant': ['ssh', 'grant', '--yes']}[action] + tokens
+    elif action == 'revoke':
+        if not re.fullmatch(r'SHA256:[A-Za-z0-9+/]{43}', line):
+            raise ValueError('Ungültiger SSH-Fingerprint.')
+        args = ['ssh', 'revoke', '--yes', line]
     elif action == 'tailnet':
         # Ein eigenes Gerät aus dem Tailnet: genau „benutzer@gerät“, das Modul prüft den Besitzer und vertraut dem Host-Schlüssel.
         tokens = line_tokens(line, 'tailnet')
@@ -1175,6 +1280,7 @@ def state():
     with ThreadPoolExecutor(max_workers=4) as pool:      # Modulstatus parallel: das Fenster soll zügig öffnen
         tailscale = pool.submit(tailscale_info)
         agents = pool.submit(agents_local, paths)
+        models = pool.submit(ollama_models)
         statuses = list(pool.map(entry_status, menu))
     ssh = ssh_state()
     return {
@@ -1190,6 +1296,8 @@ def state():
         'settings': {'wake': wake_state()},
         'tailscale': tailscale.result(),
         'agents': agents.result(),
+        'models': models.result(),
+        'combos': combos_state(),
     }
 
 
@@ -1211,7 +1319,7 @@ def usage(entries):
              '  vibecode save --name N --project P [--project Q] [--shortcut]',
              '  vibecode delete --name N      Workspace samt Shortcut löschen',
              '  vibecode shortcuts sync       Schreibtisch-Shortcuts neu anlegen',
-             '  vibecode settings keep-awake on|off',
+             '  vibecode settings keep-awake|keep-awake-apps on|off',
              '  vibecode agents local|remote  was die Coding-Agenten gerade tun (JSON; remote nur auf Anfrage, per SSH)',
              '  vibecode tailscale up|down|login|logout|auto-on|auto-off|setup   Tailscale steuern (Fenster: Bereich Remote)',
              '  vibecode projects             Projekte, die der Launcher kennt',
@@ -1248,7 +1356,7 @@ def main(argv):
         return 0
     if command == 'settings':
         parser = argparse.ArgumentParser(prog='vibecode settings', add_help=False)
-        parser.add_argument('name', choices=['keep-awake'])
+        parser.add_argument('name', choices=['keep-awake', 'keep-awake-apps'])
         parser.add_argument('value', choices=['on', 'off'])
         options = parser.parse_args(rest)
         setting_action(options.name, options.value == 'on')
@@ -1264,6 +1372,23 @@ def main(argv):
         if rest not in (['local'], ['remote']):
             raise ValueError('Aufruf: vibecode agents local|remote')
         print(json.dumps(agents_local() if rest == ['local'] else agents_remote(), ensure_ascii=False))
+        return 0
+    if command == 'combos':
+        parser = argparse.ArgumentParser(prog='vibecode combos', add_help=False)
+        parser.add_argument('action', choices=['list', 'add', 'remove'])
+        for key in LOCAL_DEV_KEYS:
+            parser.add_argument(f'--{key}')
+        options = parser.parse_args(rest)
+        if options.action == 'list':
+            print(json.dumps(combos_load(), ensure_ascii=False))
+        else:
+            items = combo_action(options.action, {key: getattr(options, key) for key in LOCAL_DEV_KEYS})
+            print(json.dumps(items, ensure_ascii=False))
+        return 0
+    if command == 'models':
+        if len(rest) != 2:
+            raise ValueError('Aufruf: vibecode models pull|remove MODELL')
+        print(model_action(rest[0], rest[1]))
         return 0
     if command == 'tailscale':
         if len(rest) != 1:
@@ -1414,7 +1539,7 @@ def main(argv):
 
 if __name__ == '__main__':
     from terminal_session import wrap_if_needed
-    wrap_if_needed([sys.executable, str(CORE / 'vibecode.py')] + sys.argv[1:])
+    wrap_if_needed([sys.executable, str(CORE / 'vibecode.py')] + sys.argv[1:], minimize_window=len(sys.argv) == 1)
     try:
         sys.exit(main(sys.argv[1:]))
     except (ValueError, OSError, subprocess.SubprocessError) as exc:

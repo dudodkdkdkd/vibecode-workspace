@@ -494,14 +494,13 @@ if [[ "$OPEN_CONTROL_TERMINAL" == "true" && -f "$CONTROL_SCRIPT" ]]; then
   CONTROL_TERMINAL_ENABLED=true
 fi
 
-# Local Dev ist ein eigenes Modul: fehlt es, startet der Workspace ohne und sagt es.
+# Local Dev ist ein eigenes Modul: fehlt es, startet der Workspace ohne und sagt es. Das Skript wird auch ohne --local-dev gesucht:
+# ein Preset kann ein Local-Dev-Terminal enthalten (Typ „Local Dev“), das es braucht.
 LOCAL_DEV_SCRIPT=""
-if (( ${#LOCAL_DEV_REQUEST[@]} )); then
-  if [[ -f "$SCRIPT_DIR/../local-dev/launcher.zsh" ]]; then
-    LOCAL_DEV_SCRIPT="$(cd "$SCRIPT_DIR/../local-dev" && pwd -P)/launcher.zsh"
-  else
-    print -u2 'Hinweis: Local Dev ist nicht installiert (Ordner local-dev/ fehlt). Der Workspace startet ohne.'
-  fi
+if [[ -f "$SCRIPT_DIR/../local-dev/launcher.zsh" ]]; then
+  LOCAL_DEV_SCRIPT="$(cd "$SCRIPT_DIR/../local-dev" && pwd -P)/launcher.zsh"
+elif (( ${#LOCAL_DEV_REQUEST[@]} )); then
+  print -u2 'Hinweis: Local Dev ist nicht installiert (Ordner local-dev/ fehlt). Der Workspace startet ohne.'
 fi
 
 AUTO_START_VALUE="$AUTO_START_TERMINALS" \
@@ -598,6 +597,16 @@ function run(argv) {
     const localDev = Object.fromEntries(["SCRIPT", "PROVIDER", "MODEL", "FRAMEWORK"].map((name) =>
         [name.toLowerCase(), ObjC.unwrap(environment.objectForKey(`LOCAL_DEV_${name}_VALUE`) || $(""))]));
     const localDevEnabled = Object.values(localDev).every((value) => value);
+    const shellQuote = (value) => "'" + String(value).replace(/'/g, "'\\''") + "'";
+    // Ein Preset-Terminal vom Typ „Local Dev“: der gespeicherte Befehl trägt nur Platzhalter, hier kommen die Pfade dieses Macs hinein.
+    // Auf einem SSH-Host oder ohne das Modul bleibt ein Terminal mit dem Grund (so sieht man, warum nichts startet).
+    const localDevTerminalCommand = (entry, repoPath, remote) => {
+        if (remote) return "echo 'Local Dev läuft nur auf diesem Mac, nicht auf SSH-Hosts.'; exec bash -l";
+        if (!localDev.script) return "echo 'Local Dev ist nicht installiert (Ordner local-dev/ fehlt).'; exec zsh -l";
+        return entry.command.split("@LOCAL_DEV_SCRIPT@").join(shellQuote(localDev.script))
+            .split("@REPOSITORY@").join(shellQuote(repoPath));
+    };
+    const presetLocalDev = new Set();                      // „Projekt<Tab>Anbieter Modell CLI“: ein Preset startet es schon dort
 
     let savedTerminals = {};
     let generalDefault = null;
@@ -660,11 +669,15 @@ function run(argv) {
         for (const entry of entries) {
             // Auch früher gespeicherte Codex-Vorlagen verwenden den neuen Standard.
             // Nur den erzeugten Start ersetzen; eigene Befehle und Prompts bleiben erhalten.
-            const command = ["Codex", "Codex 2"].includes(entry.type)
+            let command = ["Codex", "Codex 2"].includes(entry.type)
                 ? entry.command.replace(
                     /^(if command -v codex >\/dev\/null 2>&1; then (?:CODEX_HOME="?\$HOME\/\.codex(?:-account2)?"? )?exec codex )(?:--yolo|--sandbox workspace-write --ask-for-approval never)(?=;| -- )/,
                     "$1--dangerously-bypass-approvals-and-sandbox")
                 : entry.command;
+            if (entry.type === "Local Dev") {
+                command = localDevTerminalCommand(entry, locations.get(project).path.replace(/\/$/, "") || "/", remoteProject);
+                if (!remoteProject) presetLocalDev.add(`${project}\t${entry.prompt}`);
+            }
             if (hasOwnEntry) {
                 terminalDefinitions.push({ project, terminalName: entry.name, command, relativeCwd: entry.cwd,
                     placement: entry.placement });
@@ -740,7 +753,9 @@ function run(argv) {
 
         // Local Dev läuft auf dem Mac (lokaler Modellserver), nie auf einem SSH-Host. Es arbeitet im ersten Repository
         // der Auswahl und hängt als letztes Terminal in dessen Gruppe, neben Claude und Codex.
-        if (localDevEnabled && !authority && group.length) {
+        // Hat ein Preset genau diese Kombination für dieses Repository schon, startet sie nicht noch einmal.
+        if (localDevEnabled && !authority && group.length
+                && !presetLocalDev.has(`${group[0]}\t${localDev.provider} ${localDev.model} ${localDev.framework}`)) {
             const project = group[0];
             const repoPath = locations.get(project).path.replace(/\/$/, "") || "/";
             const baseLabel = `${project} · Local Dev`;

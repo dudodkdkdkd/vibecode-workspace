@@ -54,7 +54,22 @@ class TerminalSessionTests(unittest.TestCase):
                 result = session.run_command([sys.executable, '-c', code, str(output)] + values)
             self.assertEqual(result, 0)
             self.assertEqual(json.loads(output.read_text()), [values, '/dev/ttys999'])
-            close.assert_called_once_with('/dev/ttys999')
+            close.assert_called_once_with('/dev/ttys999', restore=False)
+
+    def test_overview_start_minimizes_its_terminal_and_failure_restores_it(self):
+        for status in [0, 7]:
+            with self.subTest(status=status), patch.object(session, 'terminal_tty', return_value='/dev/ttys999'), \
+                 patch.object(session, 'minimize_terminal_window', return_value=True) as minimize, \
+                 patch.object(session, 'schedule_close') as close, patch('builtins.input'), \
+                 contextlib.redirect_stderr(io.StringIO()):
+                code = session.run_command([sys.executable, '-c', f'raise SystemExit({status})'], minimize_window=True)
+                self.assertEqual(code, status)
+                self.assertEqual([call.args for call in minimize.call_args_list],
+                                 [('/dev/ttys999', True)] + ([('/dev/ttys999', False)] if status else []))
+                if status:
+                    close.assert_not_called()
+                else:
+                    close.assert_called_once_with('/dev/ttys999', restore=True)
 
     def test_failure_keeps_the_diagnosis_and_exit_status_without_closing(self):
         for status in [7, 130]:
@@ -112,14 +127,51 @@ class TerminalSessionTests(unittest.TestCase):
                 with self.assertRaises(SystemExit) as result:
                     session.wrap_if_needed(['command'])
             self.assertEqual(result.exception.code, 0)
-            run.assert_called_once_with(['command'])
+            run.assert_called_once_with(['command'], minimize_window=False)
 
     @unittest.skipUnless(shutil.which('osacompile'), 'macOS AppleScript compiler required')
-    def test_terminal_cleanup_script_compiles_with_the_terminal_dictionary(self):
+    def test_terminal_window_scripts_compile_with_the_terminal_dictionary(self):
         with tempfile.TemporaryDirectory() as directory:
-            result = subprocess.run(['/usr/bin/osacompile', '-o', str(Path(directory) / 'close.scpt')],
-                                    input=session.CLOSE_SCRIPT, capture_output=True, text=True)
-            self.assertEqual(result.returncode, 0, result.stderr)
+            for name, script in [('close', session.CLOSE_SCRIPT), ('minimize', session.MINIMIZE_SCRIPT)]:
+                with self.subTest(script=name):
+                    result = subprocess.run(['/usr/bin/osacompile', '-o', str(Path(directory) / f'{name}.scpt')],
+                                            input=script, capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(shutil.which('osascript'), 'macOS AppleScript required')
+    def test_minimization_changes_only_the_matching_single_tab_window(self):
+        logic = (session.MINIMIZE_SCRIPT.replace('on run argv', 'on setMinimized(argv)')
+                 .replace('end run', 'end setMinimized')
+                 .replace('if application "Terminal" is not running then return false', '')
+                 .replace('tell application "Terminal"', 'tell fakeTerminal')
+                 .replace('in windows', 'in its testWindows').replace('tabs of terminalWindow', 'testTabs of terminalWindow')
+                 .replace('miniaturized of terminalWindow', 'isMinimized of terminalWindow'))
+        script = '''using terms from application "Terminal"
+script fakeTerminal
+    property testWindows : {}
+end script
+''' + logic + '''
+on run
+    set testWindows of fakeTerminal to {¬
+        {testTabs:{{tty:"/dev/ttys122"}}, isMinimized:false}, ¬
+        {testTabs:{{tty:"/dev/ttys123"}, {tty:"/dev/ttys124"}}, isMinimized:false}, ¬
+        {testTabs:{{tty:"/dev/ttys999"}}, isMinimized:false}}
+    set sharedTab to setMinimized({"/dev/ttys123", "minimize"})
+    set missingTab to setMinimized({"/dev/ttys000", "minimize"})
+    set firstChange to setMinimized({"/dev/ttys999", "minimize"})
+    set repeatChange to setMinimized({"/dev/ttys999", "minimize"})
+    set restoreChange to setMinimized({"/dev/ttys999", "restore"})
+    set windowStates to {}
+    repeat with terminalWindow in testWindows of fakeTerminal
+        set end of windowStates to isMinimized of terminalWindow
+    end repeat
+    return {sharedTab, missingTab, firstChange, repeatChange, restoreChange} & windowStates
+end run
+end using terms from
+'''
+        result = subprocess.run(['/usr/bin/osascript', '-'], input=script, capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), 'false, false, true, false, true, false, false, false')
 
     @unittest.skipUnless(shutil.which('osascript'), 'macOS AppleScript required')
     def test_cleanup_closes_only_the_finished_target_window_and_preserves_shared_windows(self):

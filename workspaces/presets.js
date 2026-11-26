@@ -10,7 +10,7 @@
 // Befehle und Prüfungen kommen aus terminal-setup.js selbst, nichts davon ist nachgebaut.
 ObjC.import("Foundation");
 
-const TYPES = ["Shell", "Claude Code", "Codex", "Codex 2", "Antigravity", "Eigener Befehl"];
+const TYPES = ["Shell", "Claude Code", "Codex", "Codex 2", "Antigravity", "Eigener Befehl", "Local Dev"];
 const MAX_TERMINALS = 12;
 
 function readText(path) {
@@ -27,7 +27,7 @@ function exists(path) {
 function loadWizard(moduleDirectory) {
     const source = readText(`${moduleDirectory}/terminal-setup.js`);
     return new Function(`${source}
-return { terminalCommand, defaultTerminals, validateTerminals, validateUrls, normalizeEntry, TERMINAL_PLACEMENTS };`)();
+return { terminalCommand, defaultTerminals, validateTerminals, validateUrls, normalizeEntry, localDevParts, TERMINAL_PLACEMENTS };`)();
 }
 
 function isRemote(path) {
@@ -98,6 +98,8 @@ function buildPreset(wizard, path, preset) {
         names.add(name);
         const prompt = entry.type === "Shell" ? "" : entry.prompt.trim();
         check(entry.type !== "Eigener Befehl" || prompt, `${where} („${name}“): Bitte einen Shell-Befehl angeben.`);
+        check(entry.type !== "Local Dev" || wizard.localDevParts(prompt),
+            `${where} („${name}“): Local Dev braucht Anbieter, Modell und CLI, mit Leerzeichen getrennt.`);
         check(!/[\u0000-\u001f\u007f]/.test(prompt.replace(/\n/g, " ")), `${where}: Steuerzeichen im Prompt.`);
         const cwd = entry.cwd.trim();
         check(!cwd.startsWith("/") && !cwd.startsWith("~") && !cwd.split("/").includes("..") && !/[\u0000-\u001f\u007f]/.test(cwd),
